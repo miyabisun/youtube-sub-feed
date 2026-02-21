@@ -1,0 +1,21 @@
+{
+  "name": "youtube-sub-feed",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "cd client && bunx vite build --watch & bun --env-file=.env src/index.ts",
+    "setup": "bun install && cd client && bun install && test -f .env || cp .env.example .env",
+    "build:client": "cd client && bun install && bun run build",
+    "build": "bun run build:client",
+    "start": "bun --env-file=.env src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "hono": "^4.7.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.7.3"
+  }
+}

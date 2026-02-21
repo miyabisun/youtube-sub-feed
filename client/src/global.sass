@@ -1,0 +1,103 @@
+\:root
+	// Spacing (φ-based, base=10px)
+	--sp-1: 4px
+	--sp-2: 6px
+	--sp-3: 10px
+	--sp-4: 16px
+	--sp-5: 26px
+	--sp-6: 42px
+
+	// Font Size (φ-based, base=1rem)
+	--fs-xs: 0.72rem
+	--fs-sm: 0.85rem
+	--fs-md: 1rem
+	--fs-lg: 1.18rem
+	--fs-xl: 1.62rem
+
+	// Border Radius (φ-based, base=4px)
+	--radius-sm: 4px
+	--radius-md: 6px
+	--radius-lg: 10px
+
+	// Surfaces (YouTube Dark)
+	--c-bg: #0f0f0f
+	--c-surface: #1a1a1a
+	--c-surface-hover: #252525
+	--c-backdrop: rgba(0, 0, 0, 0.7)
+
+	// Borders
+	--c-border: #333
+	--c-border-strong: #444
+
+	// Text hierarchy
+	--c-text: #f1f1f1
+	--c-text-sub: #aaaaaa
+	--c-text-muted: rgba(255, 255, 255, 0.5)
+	--c-text-faint: rgba(255, 255, 255, 0.35)
+
+	// Interactive overlays
+	--c-overlay-1: rgba(255, 255, 255, 0.05)
+	--c-overlay-2: rgba(255, 255, 255, 0.08)
+	--c-overlay-3: rgba(255, 255, 255, 0.15)
+
+	// Danger (red)
+	--c-danger: rgba(255, 100, 100, 0.9)
+	--c-danger-dim: rgba(255, 100, 100, 0.8)
+	--c-danger-bg: rgba(255, 100, 100, 0.2)
+	--c-danger-bg-hover: rgba(255, 100, 100, 0.3)
+	--c-danger-border: rgba(255, 100, 100, 0.4)
+	--c-danger-hover: rgba(255, 100, 100, 0.15)
+
+	// Accent (Google Red)
+	--c-accent: #d93025
+	--c-accent-hover: #ea4335
+	--c-accent-bg: rgba(217, 48, 37, 0.2)
+	--c-accent-bg-hover: rgba(217, 48, 37, 0.3)
+	--c-accent-border: rgba(217, 48, 37, 0.4)
+	--c-accent-subtle: rgba(217, 48, 37, 0.15)
+	--c-accent-active: rgba(217, 48, 37, 0.5)
+
+	// Live (red glow)
+	--c-live: #ff0000
+	--c-live-bg: rgba(255, 0, 0, 0.15)
+	--c-live-border: rgba(255, 0, 0, 0.4)
+
+	// Shorts (pink)
+	--c-shorts: #ff6090
+	--c-shorts-bg: rgba(255, 96, 144, 0.15)
+	--c-shorts-border: rgba(255, 96, 144, 0.4)
+
+*,
+*::before,
+*::after
+	box-sizing: border-box
+
+body
+	margin: 0
+	background-color: var(--c-bg)
+	color: var(--c-text)
+	font-size: clamp(12px, 1vw, 18px)
+	line-height: 1.5715
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif
+
+h1, h2, h3, h4, h5, h6
+	color: var(--c-text)
+
+a
+	color: var(--c-accent)
+	text-decoration: none
+
+	&:hover
+		color: var(--c-accent-hover)
+
+ul
+	margin: 0
+	padding: 0
+	list-style: none
+
+li
+	margin: 0
+	padding: 0
+
+button
+	font-family: inherit
