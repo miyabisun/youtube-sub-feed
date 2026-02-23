@@ -2,9 +2,8 @@
 	let { message = '', type = 'success' } = $props();
 	let visible = $state(true);
 
-	const duration = type === 'error' ? 3000 : 500;
-
 	$effect(() => {
+		const duration = type === 'error' ? 3000 : 500;
 		const timer = setTimeout(() => { visible = false; }, duration);
 		return () => clearTimeout(timer);
 	});

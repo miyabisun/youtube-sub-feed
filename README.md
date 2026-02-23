@@ -17,16 +17,17 @@ You need a Google Cloud project with the YouTube Data API enabled and OAuth 2.0 
 2. Create a new project (or select an existing one)
 3. Navigate to **APIs & Services > Library**
 4. Search for **YouTube Data API v3** and click **Enable**
-5. Navigate to **APIs & Services > Credentials**
-6. Click **Create Credentials > OAuth client ID**
-   - If prompted, configure the **OAuth consent screen** first:
-     - User Type: **External**
-     - App name: anything (e.g. "youtube-sub-feed")
-     - Scopes: add `https://www.googleapis.com/auth/youtube.readonly`
-     - Test users: add your own Google email address
+5. Open **Google Auth platform** from the left menu and configure the OAuth consent screen
+   1. **Branding**: enter an app name (e.g. "youtube-sub-feed") and support email
+   2. **Audience**: select **External** → add your own Google email address as a test user
+   3. **Data Access**: click **Add or remove scopes** and add `https://www.googleapis.com/auth/youtube.readonly`
+6. Navigate to **APIs & Services > Credentials** from the left menu
+7. Click **Create Credentials > OAuth client ID**
    - Application type: **Web application**
-   - Authorized redirect URIs: `http://localhost:3000/api/auth/callback`
-7. Copy the **Client ID** and **Client Secret**
+   - Name: anything (e.g. "youtube-sub-feed")
+   - Authorized JavaScript origins: (leave empty)
+   - Authorized redirect URIs: add `http://localhost:3000/api/auth/callback`
+8. Copy the **Client ID** and **Client Secret**
 
 > **Note:** While the app is in "Testing" status on the consent screen, only the test users you added can log in. This is fine for personal use.
 

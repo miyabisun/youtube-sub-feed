@@ -16,7 +16,7 @@ export function getAuthUrl(state?: string): string {
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'https://www.googleapis.com/auth/youtube.readonly',
+    scope: 'openid email https://www.googleapis.com/auth/youtube.readonly',
     access_type: 'offline',
     prompt: 'consent',
   })

@@ -32,7 +32,7 @@
 			const a = e.target.closest('a');
 			if (!a) return;
 			const href = a.getAttribute('href');
-			if (!href || href.startsWith('http') || href.startsWith('//')) return;
+			if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('/api/')) return;
 			if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
 
 			const base = getBasePath();

@@ -4,6 +4,7 @@ import { isQuotaExceeded, getQuotaResetTime } from './quota-manager.js'
 import { fetchChannelVideos } from './video-fetcher.js'
 import { checkLivestreams } from './livestream-checker.js'
 import { syncSubscriptions } from './channel-sync.js'
+import { checkRssForNewVideos } from './rss-checker.js'
 import cache from './cache.js'
 
 const NORMAL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes per cycle
@@ -33,12 +34,9 @@ export function startNormalPolling(): void {
 
   async function tick() {
     try {
-      const token = await waitForToken()
-      await waitForQuota()
-
       const channels = sqlite.query(
-        "SELECT id FROM channels WHERE fast_polling = 0 ORDER BY last_fetched_at ASC NULLS FIRST"
-      ).all() as { id: string }[]
+        "SELECT id, last_fetched_at FROM channels WHERE fast_polling = 0 ORDER BY last_fetched_at ASC NULLS FIRST"
+      ).all() as { id: string; last_fetched_at: string | null }[]
 
       const count = channels.length
       if (count === 0) {
@@ -47,29 +45,47 @@ export function startNormalPolling(): void {
       }
 
       index = index % count
-      const { id } = channels[index]
+      const channel = channels[index]
 
-      const newVideoIds = await fetchChannelVideos(id, token)
+      const advance = () => {
+        index++
+        if (index >= count) {
+          cache.clearPrefix('uush:')
+          index = 0
+        }
+        setTimeout(tick, Math.floor(NORMAL_INTERVAL_MS / count))
+      }
+
+      // RSS-first: skip API if no new videos detected (only for previously fetched channels)
+      if (channel.last_fetched_at !== null) {
+        const rss = await checkRssForNewVideos(channel.id)
+        if (!rss.hasNewVideos) {
+          const now = new Date().toISOString()
+          sqlite.query('UPDATE channels SET last_fetched_at = ? WHERE id = ?').run(now, channel.id)
+          advance()
+          return
+        }
+      }
+
+      const token = await waitForToken()
+      await waitForQuota()
+
+      // Skip notifications for first-time fetches
+      const notify = channel.last_fetched_at !== null
+      const newVideoIds = await fetchChannelVideos(channel.id, token, { notify })
       if (newVideoIds.length > 0) {
-        console.log(`[polling] Normal: ${id} - ${newVideoIds.length} new videos`)
+        console.log(`[polling] Normal: ${channel.id} - ${newVideoIds.length} new videos`)
       }
 
-      index++
-      if (index >= count) {
-        // One cycle complete, clear UUSH cache only
-        cache.clearPrefix('uush:')
-        index = 0
-      }
-
-      const interval = Math.floor(NORMAL_INTERVAL_MS / count)
-      setTimeout(tick, interval)
+      advance()
     } catch (e) {
       console.error('[polling] Normal error:', e)
+      index++
       setTimeout(tick, 60_000)
     }
   }
 
-  console.log('[polling] Starting normal polling (30min/cycle)')
+  console.log('[polling] Starting normal polling (30min/cycle, RSS-first)')
   tick()
 }
 
@@ -78,12 +94,9 @@ export function startFastPolling(): void {
 
   async function tick() {
     try {
-      const token = await waitForToken()
-      await waitForQuota()
-
       const channels = sqlite.query(
-        "SELECT id FROM channels WHERE fast_polling = 1 ORDER BY last_fetched_at ASC NULLS FIRST"
-      ).all() as { id: string }[]
+        "SELECT id, last_fetched_at FROM channels WHERE fast_polling = 1 ORDER BY last_fetched_at ASC NULLS FIRST"
+      ).all() as { id: string; last_fetched_at: string | null }[]
 
       const count = channels.length
       if (count === 0) {
@@ -92,43 +105,67 @@ export function startFastPolling(): void {
       }
 
       index = index % count
-      const { id } = channels[index]
+      const channel = channels[index]
 
-      const newVideoIds = await fetchChannelVideos(id, token)
+      const advance = () => {
+        index++
+        if (index >= count) index = 0
+        setTimeout(tick, Math.floor(FAST_INTERVAL_MS / count))
+      }
+
+      // RSS-first: skip API if no new videos detected (only for previously fetched channels)
+      if (channel.last_fetched_at !== null) {
+        const rss = await checkRssForNewVideos(channel.id)
+        if (!rss.hasNewVideos) {
+          const now = new Date().toISOString()
+          sqlite.query('UPDATE channels SET last_fetched_at = ? WHERE id = ?').run(now, channel.id)
+
+          // Check livestreams even when RSS skips API (non-blocking: skip if no token)
+          const token = await getValidAccessToken()
+          if (token) await checkLivestreams(token)
+
+          advance()
+          return
+        }
+      }
+
+      const token = await waitForToken()
+      await waitForQuota()
+
+      const notify = channel.last_fetched_at !== null
+      const newVideoIds = await fetchChannelVideos(channel.id, token, { notify })
       if (newVideoIds.length > 0) {
-        console.log(`[polling] Fast: ${id} - ${newVideoIds.length} new videos`)
+        console.log(`[polling] Fast: ${channel.id} - ${newVideoIds.length} new videos`)
       }
 
       // Check livestreams during fast polling
       await checkLivestreams(token)
 
-      index++
-      if (index >= count) index = 0
-
-      const interval = Math.floor(FAST_INTERVAL_MS / count)
-      setTimeout(tick, interval)
+      advance()
     } catch (e) {
       console.error('[polling] Fast error:', e)
+      index++
       setTimeout(tick, 60_000)
     }
   }
 
-  console.log('[polling] Starting fast polling (10min/cycle)')
+  console.log('[polling] Starting fast polling (10min/cycle, RSS-first)')
   tick()
 }
 
-export function startDailySync(): void {
+const SYNC_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
+
+export function startPeriodicSync(): void {
   async function sync() {
     try {
       const token = await waitForToken()
       await syncSubscriptions(token)
     } catch (e) {
-      console.error('[polling] Daily sync error:', e)
+      console.error('[polling] Sync error:', e)
     }
-    // Schedule next sync in 24 hours
-    setTimeout(sync, 24 * 60 * 60 * 1000)
+    setTimeout(sync, SYNC_INTERVAL_MS)
   }
 
-  console.log('[polling] Starting daily subscription sync')
+  console.log('[polling] Starting periodic subscription sync (10min)')
   sync()
 }

@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "cd client && bunx vite build --watch & bun --env-file=.env src/index.ts",
-    "setup": "bun install && cd client && bun install && test -f .env || cp .env.example .env",
+    "setup": "bun install && cd client && bun install && cd .. && test -f .env || cp .env.example .env",
     "build:client": "cd client && bun install && bun run build",
     "build": "bun run build:client",
     "start": "bun --env-file=.env src/index.ts",

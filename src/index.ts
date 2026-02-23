@@ -9,7 +9,7 @@ import feedRoutes from './routes/feed.js'
 import channelRoutes from './routes/channels.js'
 import groupRoutes from './routes/groups.js'
 import { authMiddleware } from './middleware/auth.js'
-import { startNormalPolling, startFastPolling, startDailySync } from './lib/polling.js'
+import { startNormalPolling, startFastPolling, startPeriodicSync } from './lib/polling.js'
 import { initDiscordClient } from './lib/discord.js'
 
 const port = Number(process.env.PORT) || 3000
@@ -41,7 +41,7 @@ init()
 initDiscordClient()
 startNormalPolling()
 startFastPolling()
-startDailySync()
+startPeriodicSync()
 
 console.log(`Server running on http://localhost:${port}`)
 

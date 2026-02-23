@@ -35,7 +35,17 @@ export async function fetchChannelVideosCore(
   if (!channel) return []
 
   // Fetch latest videos from UU playlist
-  const items = await deps.fetchPlaylistItems(channel.upload_playlist_id, accessToken, 10)
+  let items: Awaited<ReturnType<typeof deps.fetchPlaylistItems>>
+  try {
+    items = await deps.fetchPlaylistItems(channel.upload_playlist_id, accessToken, 10)
+  } catch (e: any) {
+    if (e?.status === 404 && e?.reason === 'playlistNotFound') {
+      console.log(`[video-fetcher] Playlist not found for ${channelId}, deleting channel`)
+      db.query('DELETE FROM channels WHERE id = ?').run(channelId)
+      return []
+    }
+    throw e
+  }
 
   if (items.length === 0) return []
 

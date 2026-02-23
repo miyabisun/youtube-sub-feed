@@ -1,4 +1,5 @@
 <script>
+	import { untrack } from 'svelte';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import VideoCard from '$lib/components/VideoCard.svelte';
@@ -13,7 +14,7 @@
 	let loadingMore = $state(false);
 	let hasMore = $state(true);
 	let toast = $state(null);
-	let sentinel;
+	let sentinel = $state(null);
 
 	const LIMIT = 100;
 
@@ -54,7 +55,7 @@
 
 	$effect(() => {
 		groupId;
-		loadVideos(true);
+		untrack(() => loadVideos(true));
 	});
 
 	$effect(() => {

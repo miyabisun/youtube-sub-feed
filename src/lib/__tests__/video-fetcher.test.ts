@@ -182,6 +182,36 @@ describe('fetchChannelVideosCore', () => {
     expect(notified).toBe(true)
   })
 
+  test('deletes channel from DB on 404 playlistNotFound', async () => {
+    const db = setupDb()
+    db.exec("INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UC123', 'Old Video')")
+
+    const error = Object.assign(new Error('YouTube API error: 404'), { status: 404, reason: 'playlistNotFound' })
+    const deps = makeDeps(db, {
+      fetchPlaylistItems: async () => { throw error },
+    })
+
+    const newIds = await fetchChannelVideosCore('UC123', 'token', {}, deps)
+    expect(newIds).toEqual([])
+
+    const channel = db.query("SELECT * FROM channels WHERE id = 'UC123'").get()
+    expect(channel).toBeNull()
+
+    // CASCADE should delete videos too
+    const videos = db.query("SELECT * FROM videos WHERE channel_id = 'UC123'").all()
+    expect(videos).toEqual([])
+  })
+
+  test('re-throws non-404 API errors', async () => {
+    const db = setupDb()
+    const error = Object.assign(new Error('YouTube API error: 500'), { status: 500, reason: 'backendError' })
+    const deps = makeDeps(db, {
+      fetchPlaylistItems: async () => { throw error },
+    })
+
+    expect(fetchChannelVideosCore('UC123', 'token', {}, deps)).rejects.toThrow('YouTube API error: 500')
+  })
+
   test('updates last_fetched_at even when no new videos', async () => {
     const db = setupDb()
     db.exec("INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UC123', 'Existing')")

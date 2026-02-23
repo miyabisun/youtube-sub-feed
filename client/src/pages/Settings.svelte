@@ -177,6 +177,7 @@
 
 			<div class="group-list">
 				{#each groups as group, i (group.id)}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div
 						class="group-item"
 						class:drag-over={dragOverIndex === i}
@@ -196,7 +197,8 @@
 								onblur={() => renameGroup(group.id)}
 							/>
 						{:else}
-							<span class="group-name" ondblclick={() => editingGroup = { id: group.id, name: group.name }}>{group.name}</span>
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<span class="group-name" ondblclick={() => editingGroup = { id: group.id, name: group.name }}>{group.name}</span>
 						{/if}
 						<div class="group-actions">
 							<button class="btn-assign" class:active={selectedGroup === group.id} onclick={() => selectGroup(group.id)}>割当</button>
@@ -214,6 +216,9 @@
 					{#each channels as ch (ch.id)}
 						<label class="assign-item">
 							<input type="checkbox" bind:checked={channelAssignments[ch.id]} />
+							{#if ch.thumbnail_url}
+								<img class="channel-icon" src={ch.thumbnail_url} alt="" />
+							{/if}
 							<span>{ch.title}</span>
 						</label>
 					{/each}
@@ -361,6 +366,13 @@
 
 	input
 		accent-color: var(--c-accent)
+
+.channel-icon
+	width: 24px
+	height: 24px
+	border-radius: 50%
+	object-fit: cover
+	flex-shrink: 0
 
 .save-btn
 	padding: var(--sp-3) var(--sp-5)

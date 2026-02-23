@@ -1,4 +1,5 @@
 <script>
+	import { untrack } from 'svelte';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import VideoCard from '$lib/components/VideoCard.svelte';
@@ -14,7 +15,7 @@
 	let loadingMore = $state(false);
 	let hasMore = $state(true);
 	let toast = $state(null);
-	let sentinel;
+	let sentinel = $state(null);
 
 	const LIMIT = 100;
 
@@ -92,7 +93,7 @@
 
 	$effect(() => {
 		channelId;
-		loadData(true);
+		untrack(() => loadData(true));
 	});
 
 	$effect(() => {
@@ -111,7 +112,10 @@
 	{:else}
 		{#if channel}
 			<div class="channel-header">
-				<div class="channel-name">{channel.title}</div>
+				<div class="channel-name-row">
+					<div class="channel-name">{channel.title}</div>
+					<a class="youtube-link" href="https://www.youtube.com/channel/{channel.id}" target="_blank" rel="noopener">YouTube</a>
+				</div>
 				<div class="channel-settings">
 					<label class="toggle">
 						<input type="checkbox" checked={channel.show_livestreams} onchange={() => toggleSetting('show_livestreams')} />
@@ -175,10 +179,28 @@
 	padding-bottom: var(--sp-3)
 	border-bottom: 1px solid var(--c-border)
 
+.channel-name-row
+	display: flex
+	align-items: center
+	gap: var(--sp-3)
+	margin-bottom: var(--sp-3)
+
 .channel-name
 	font-size: var(--fs-lg)
 	font-weight: bold
-	margin-bottom: var(--sp-3)
+
+.youtube-link
+	font-size: var(--fs-xs)
+	color: var(--c-text-sub)
+	text-decoration: none
+	padding: var(--sp-1) var(--sp-3)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
+	white-space: nowrap
+
+	&:hover
+		color: var(--c-accent)
+		border-color: var(--c-accent-border)
 
 .channel-settings
 	display: flex

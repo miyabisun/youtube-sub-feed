@@ -17,7 +17,7 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 | ランタイム | Bun |
 | バックエンド | Hono |
 | データベース | SQLite (bun:sqlite) |
-| ORM | Drizzle ORM |
+| ORM | なし（raw bun:sqlite） |
 | フロントエンド | Svelte 5 + Vite |
 | スタイリング | Sass |
 | 言語 | TypeScript (strict) |
@@ -75,28 +75,45 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 **使用しないエンドポイント:**
 - Search.list（100ユニット/回、コスト高すぎ）
 
+### RSS-First 戦略（クォータ削減）
+
+YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?channel_id={id}`）はクォータを消費しない。各チャンネルの巡回時にまず RSS で新着を検知し、新着があるチャンネルのみ YouTube Data API を呼ぶハイブリッド方式を採用する。
+
+- **RSS チェック → 新着なし**: API スキップ、`last_fetched_at` のみ更新して次の tick へ
+- **RSS チェック → 新着あり**: 従来通り API で動画詳細を取得
+- **RSS 取得失敗**: 安全側に倒して API フォールバック（`hasNewVideos: true` として扱う）
+- **初回取得**（`last_fetched_at IS NULL`）: RSS をスキップし、常に API で取得
+- **手動リフレッシュ**（`POST /api/channels/:id/refresh`）: RSS を介さず常に API 直接
+- **高頻度巡回の `checkLivestreams`**: RSS スキップ時も実行（ライブ終了検知を維持）
+
 ### クォータ予算（10,000ユニット/日）
 
 ```
-■ 通常巡回（190チャンネル、30分/周、48周/日）
-  ※ 全200チャンネル - 高頻度巡回5チャンネル = 190チャンネル
-  PlaylistItems.list: 190 × 48                   = 9,120ユニット
+■ 通常巡回（195チャンネル、30分/周、48周/日）
+  ※ RSS-First: 新着動画があるチャンネルのみ API 呼び出し
+  ※ 平均 ~0.3 動画/日/ch → 195ch × 0.3 ≒ 60 新着/日
+  ※ 新着検知は1回の API で DB に入る → 以降の周は RSS スキップ
+  PlaylistItems.list: 60                          =    60ユニット
+  Videos.list:        60                          =    60ユニット
 
 ■ 高頻度巡回（5チャンネル、10分/周、144周/日）
-  PlaylistItems.list: 5 × 144                    =   720ユニット
+  ※ 同様に RSS-First → 5ch × ~1 動画/日 = 5 新着
+  PlaylistItems + Videos: 5 × 2                   =    10ユニット
+
+■ ライブ終了検知（checkLivestreams）
+  ※ 配信中 0本 → 0、1本 → 最大 144回/日
+  Videos.list:                                    ≒   144ユニット
 
 ■ その他
-  Subscriptions.list: 1日1回                      =     4ユニット
-  Videos.list:        新着動画のバッチ取得         ≒   50ユニット
-  Videos.list:        ライブ終了検知の再取得       ≒    5ユニット
-  UUSH照合:           ショート判定                 ≒   20ユニット
-  手動リフレッシュ:   数回/日                     ≒   10ユニット
-  初回セットアップ:   1回のみ                     ≒  200ユニット
+  Subscriptions.list: 10分ごと × 144回 × 4ページ  =   576ユニット
+  UUSH照合:           ショート判定                 ≒    20ユニット
+  手動リフレッシュ:   数回/日                      ≒    10ユニット
+  初回セットアップ:   1回のみ                      ≒   200ユニット
 
-■ 合計: 約 9,929ユニット/日（初回除く）
-  ※ 初回セットアップ日は約200ユニット追加（1回のみ）
-  ※ ライブ通知5件フル稼働時でも余裕あり
-  ※ チャンネル増加時は通常巡回間隔を延長して調整可能
+■ 合計: 約 880ユニット/日（初回除く、ライブ配信中1本想定）
+  ※ ライブ 0本なら約 736ユニット/日
+  ※ クォータ上限 10,000 の 9% 程度で運用可能
+  ※ チャンネル数が 1,000+ に増加しても余裕あり
 ```
 
 ### 動画取得の仕組み
@@ -120,17 +137,19 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 
 ### 更新戦略
 
-2つの巡回ループを並行稼働させる（novel-server のラウンドロビン同期パターンに準拠）:
+2つの巡回ループを並行稼働させる（novel-server のラウンドロビン同期パターンに準拠）。各巡回では **RSS-First 戦略**により、新着がないチャンネルの API 呼び出しをスキップする:
 
 - **通常巡回（30分/周）**: `fast_polling=0` のチャンネルを1周
   - `interval = Math.floor(30 * 60 * 1000 / channelCount)` で均等間隔にスケジューリング
-  - 約190チャンネル ÷ 30分 ≒ 9秒に1チャンネル
+  - 約460チャンネル ÷ 30分 ≒ 3.9秒に1チャンネル
+  - RSS で新着なしと判定されたチャンネルは API をスキップ
 - **高頻度巡回（10分/周）**: `fast_polling=1` のチャンネルのみ（最大5件）
   - `interval = Math.floor(10 * 60 * 1000 / fastChannelCount)` で均等間隔
   - 5チャンネル ÷ 10分 = 2分に1チャンネル
+  - RSS スキップ時も `checkLivestreams` は実行
 - 各ループは `setTimeout` チェーンで1チャンネルずつ処理し、1周完了後に次の周を開始
-- **手動リフレッシュ**: 指定した1チャンネルのみを即座に更新（`POST /api/channels/:id/refresh`）
-- **登録チャンネルリストの同期**: 1日1回
+- **手動リフレッシュ**: 指定した1チャンネルのみを即座に更新（`POST /api/channels/:id/refresh`）— RSS を介さず常に API 直接
+- **登録チャンネルリストの同期**: 10分ごと（RSS-First により日次クォータに十分な余裕があるため、新規登録を即座に反映）
 
 #### 巡回順序
 
@@ -147,12 +166,14 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 #### エラーハンドリング・リトライ
 
 - API 失敗時は最大3回リトライ（1秒 → 2秒 → 3秒の線形バックオフ）
+- API エラー発生時は当該チャンネルをスキップして次のチャンネルに進む（スタックループ防止）
 - クォータ超過時の検知: HTTP 403 + `reason: "quotaExceeded"` で判定
 - クォータ超過を検知したら巡回ループを停止し、太平洋時間 午前0時（日本時間 17:00）まで待機してから再開
 
 ### チャンネル登録解除時の扱い
 
-- YouTubeで登録解除したチャンネルは、次回 Subscriptions.list 同期時に**物理削除**
+- YouTubeで登録解除したチャンネルは、次回 Subscriptions.list 同期（10分ごと）時に**物理削除**
+- 巡回中に 404 `playlistNotFound` を検知した場合も即座に**物理削除**（チャンネル消滅への即時対応）
 - そのチャンネルの動画データも**物理削除**（CASCADE）
 - 理由: 論理削除だとフィードに解除済みチャンネルの動画が残る。再登録時に非表示済み動画まで復活するのも望ましくない
 
@@ -367,6 +388,7 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
   - **スマホ**: 左スワイプで非表示化、右スワイプで非表示から復元
   - **PC**: カード内の非表示/復元ボタンをクリック
 - チャンネル設定（ライブ配信表示・高頻度巡回の切り替え）
+- YouTube チャンネルページへの外部リンク（別タブで開く）
 
 ### 管理画面
 
@@ -483,7 +505,7 @@ DISCORD_CHANNEL_ID=xxx
 
 ### DB マイグレーション
 
-- `drizzle-kit push` で直接反映（マイグレーションファイルは生成しない）
+- `CREATE TABLE IF NOT EXISTS` で起動時に自動作成（`src/lib/init.ts`）
 - 個人用アプリのためロールバック不要
 
 ## デプロイ
