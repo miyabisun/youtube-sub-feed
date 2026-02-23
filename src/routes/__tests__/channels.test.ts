@@ -8,7 +8,7 @@ function setupApp() {
   sqlite.exec(`CREATE TABLE channels (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, thumbnail_url TEXT,
     upload_playlist_id TEXT, show_livestreams INTEGER NOT NULL DEFAULT 0,
-    fast_polling INTEGER NOT NULL DEFAULT 0, last_fetched_at TEXT, created_at TEXT NOT NULL
+    last_fetched_at TEXT, created_at TEXT NOT NULL
   )`)
   sqlite.exec(`CREATE TABLE videos (
     id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, title TEXT NOT NULL,
@@ -36,7 +36,7 @@ function setupApp() {
   const app = new Hono()
 
   app.get('/api/channels', (c) => {
-    const rows = sqlite.query(`SELECT c.id, c.title, c.show_livestreams, c.fast_polling FROM channels c ORDER BY c.title COLLATE NOCASE`).all()
+    const rows = sqlite.query(`SELECT c.id, c.title, c.show_livestreams FROM channels c ORDER BY c.title COLLATE NOCASE`).all()
     return c.json(rows)
   })
 
@@ -51,13 +51,10 @@ function setupApp() {
   app.patch('/api/channels/:id', async (c) => {
     const id = c.req.param('id')
     const body = await c.req.json() as any
-    const sets: string[] = []
-    const params: any[] = []
-    if (body.show_livestreams !== undefined) { sets.push('show_livestreams = ?'); params.push(body.show_livestreams) }
-    if (body.fast_polling !== undefined) { sets.push('fast_polling = ?'); params.push(body.fast_polling) }
-    if (sets.length === 0) return c.json({ error: 'No fields to update' }, 400)
-    params.push(id)
-    sqlite.query(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`).run(...params)
+    if (body.show_livestreams === undefined) return c.json({ error: 'No fields to update' }, 400)
+    const val = Number(body.show_livestreams)
+    if (val !== 0 && val !== 1) return c.json({ error: 'show_livestreams must be 0 or 1' }, 400)
+    sqlite.query('UPDATE channels SET show_livestreams = ? WHERE id = ?').run(val, id)
     return c.json({ ok: true })
   })
 
@@ -106,17 +103,14 @@ describe('PATCH /api/channels/:id', () => {
     expect(ch.show_livestreams).toBe(1)
   })
 
-  test('updates fast_polling setting', async () => {
-    const { app, sqlite } = setupApp()
+  test('returns 400 for invalid show_livestreams value', async () => {
+    const { app } = setupApp()
     const res = await app.request('/api/channels/UC1', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fast_polling: 1 }),
+      body: JSON.stringify({ show_livestreams: 2 }),
     })
-    expect(res.status).toBe(200)
-
-    const ch = sqlite.query("SELECT fast_polling FROM channels WHERE id = 'UC1'").get() as any
-    expect(ch.fast_polling).toBe(1)
+    expect(res.status).toBe(400)
   })
 
   test('returns 400 for empty update', async () => {

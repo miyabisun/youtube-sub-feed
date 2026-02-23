@@ -8,7 +8,7 @@ import { checkRssForNewVideos } from './rss-checker.js'
 import cache from './cache.js'
 
 const NORMAL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes per cycle
-const FAST_INTERVAL_MS = 10 * 60 * 1000   // 10 minutes per cycle
+const FAST_INTERVAL_MS = 15 * 60 * 1000   // 15 minutes per cycle
 
 async function waitForToken(): Promise<string> {
   while (true) {
@@ -35,7 +35,7 @@ export function startNormalPolling(): void {
   async function tick() {
     try {
       const channels = sqlite.query(
-        "SELECT id, last_fetched_at FROM channels WHERE fast_polling = 0 ORDER BY last_fetched_at ASC NULLS FIRST"
+        "SELECT id, last_fetched_at FROM channels WHERE show_livestreams = 0 ORDER BY last_fetched_at ASC NULLS FIRST"
       ).all() as { id: string; last_fetched_at: string | null }[]
 
       const count = channels.length
@@ -95,7 +95,7 @@ export function startFastPolling(): void {
   async function tick() {
     try {
       const channels = sqlite.query(
-        "SELECT id, last_fetched_at FROM channels WHERE fast_polling = 1 ORDER BY last_fetched_at ASC NULLS FIRST"
+        "SELECT id, last_fetched_at FROM channels WHERE show_livestreams = 1 ORDER BY last_fetched_at ASC NULLS FIRST"
       ).all() as { id: string; last_fetched_at: string | null }[]
 
       const count = channels.length
@@ -149,7 +149,7 @@ export function startFastPolling(): void {
     }
   }
 
-  console.log('[polling] Starting fast polling (10min/cycle, RSS-first)')
+  console.log('[polling] Starting fast polling (15min/cycle, RSS-first)')
   tick()
 }
 

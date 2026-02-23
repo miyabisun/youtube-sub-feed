@@ -96,13 +96,13 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
   PlaylistItems.list: 60                          =    60ユニット
   Videos.list:        60                          =    60ユニット
 
-■ 高頻度巡回（5チャンネル、10分/周、144周/日）
+■ 高頻度巡回（5チャンネル、15分/周、96周/日）
   ※ 同様に RSS-First → 5ch × ~1 動画/日 = 5 新着
   PlaylistItems + Videos: 5 × 2                   =    10ユニット
 
 ■ ライブ終了検知（checkLivestreams）
-  ※ 配信中 0本 → 0、1本 → 最大 144回/日
-  Videos.list:                                    ≒   144ユニット
+  ※ 配信中 0本 → 0、1本 → 最大 96回/日
+  Videos.list:                                    ≒    96ユニット
 
 ■ その他
   Subscriptions.list: 10分ごと × 144回 × 4ページ  =   576ユニット
@@ -110,9 +110,9 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
   手動リフレッシュ:   数回/日                      ≒    10ユニット
   初回セットアップ:   1回のみ                      ≒   200ユニット
 
-■ 合計: 約 880ユニット/日（初回除く、ライブ配信中1本想定）
+■ 合計: 約 832ユニット/日（初回除く、ライブ配信中1本想定）
   ※ ライブ 0本なら約 736ユニット/日
-  ※ クォータ上限 10,000 の 9% 程度で運用可能
+  ※ クォータ上限 10,000 の 8% 程度で運用可能
   ※ チャンネル数が 1,000+ に増加しても余裕あり
 ```
 
@@ -139,14 +139,15 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 
 2つの巡回ループを並行稼働させる（novel-server のラウンドロビン同期パターンに準拠）。各巡回では **RSS-First 戦略**により、新着がないチャンネルの API 呼び出しをスキップする:
 
-- **通常巡回（30分/周）**: `fast_polling=0` のチャンネルを1周
+- **通常巡回（30分/周）**: `show_livestreams=0` のチャンネルを1周
   - `interval = Math.floor(30 * 60 * 1000 / channelCount)` で均等間隔にスケジューリング
   - 約460チャンネル ÷ 30分 ≒ 3.9秒に1チャンネル
   - RSS で新着なしと判定されたチャンネルは API をスキップ
-- **高頻度巡回（10分/周）**: `fast_polling=1` のチャンネルのみ（最大5件）
-  - `interval = Math.floor(10 * 60 * 1000 / fastChannelCount)` で均等間隔
-  - 5チャンネル ÷ 10分 = 2分に1チャンネル
+- **高頻度巡回（15分/周）**: `show_livestreams=1` のチャンネルのみ（最大5件）
+  - `interval = Math.floor(15 * 60 * 1000 / fastChannelCount)` で均等間隔
+  - 5チャンネル ÷ 15分 = 3分に1チャンネル
   - RSS スキップ時も `checkLivestreams` は実行
+  - YouTube RSS フィードは約15分キャッシュされるため、それに合わせた間隔
 - 各ループは `setTimeout` チェーンで1チャンネルずつ処理し、1周完了後に次の周を開始
 - **手動リフレッシュ**: 指定した1チャンネルのみを即座に更新（`POST /api/channels/:id/refresh`）— RSS を介さず常に API 直接
 - **登録チャンネルリストの同期**: 10分ごと（RSS-First により日次クォータに十分な余裕があるため、新規登録を即座に反映）
@@ -180,10 +181,9 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 ### ライブ配信の扱い
 
 - デフォルトではライブ配信（アーカイブ含む）はフィードに**表示しない**
-- チャンネルごとに「ライブ配信を表示する」フラグを設定可能
+- チャンネルごとに `show_livestreams=1` を設定可能
   - 友人のチャンネル等、個別に許可する運用
-- `fast_polling=1` のチャンネルが高頻度巡回（10分/周）の対象になる
-  - `show_livestreams` とは独立した設定（ライブ表示のみ・高頻度巡回のみも可能）
+  - 有効にするとフィードへのライブ表示 + 高頻度巡回（15分/周）の両方が適用される
   - 現時点で1件、最大5件程度の運用を想定
 - カード上に「LIVE」または「配信アーカイブ」ラベルを表示
 
@@ -216,8 +216,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 | title | TEXT | チャンネル名 |
 | thumbnail_url | TEXT | チャンネルアイコンURL |
 | upload_playlist_id | TEXT | アップロードプレイリストID (UU...) |
-| show_livestreams | INTEGER | ライブ配信をフィードに表示するか (0: 非表示, 1: 表示) DEFAULT 0 |
-| fast_polling | INTEGER | 高頻度巡回対象か (0: 通常30分, 1: 10分) DEFAULT 0。show_livestreams とは独立（通知だけ欲しい場合など） |
+| show_livestreams | INTEGER | ライブ配信をフィードに表示 + 高頻度巡回対象 (0: 非表示/通常30分, 1: 表示/15分) DEFAULT 0 |
 | last_fetched_at | TEXT | 最終取得日時 (ISO 8601) |
 | created_at | TEXT | 登録日時 |
 
@@ -311,7 +310,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
   - クエリパラメータ: `?limit=100&offset=0` でページネーション
 - `POST /api/channels/sync` — YouTube から登録チャンネルを再同期
 - `POST /api/channels/:id/refresh` — 指定チャンネルのみ手動更新
-- `PATCH /api/channels/:id` — チャンネル設定更新（`show_livestreams`, `fast_polling`）
+- `PATCH /api/channels/:id` — チャンネル設定更新（`show_livestreams`）
 
 ### グループ管理
 
@@ -387,7 +386,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 - 非表示/復元操作:
   - **スマホ**: 左スワイプで非表示化、右スワイプで非表示から復元
   - **PC**: カード内の非表示/復元ボタンをクリック
-- チャンネル設定（ライブ配信表示・高頻度巡回の切り替え）
+- チャンネル設定（ライブ配信の切り替え — 有効にすると15分間隔の高頻度巡回も適用）
 - YouTube チャンネルページへの外部リンク（別タブで開く）
 
 ### 管理画面

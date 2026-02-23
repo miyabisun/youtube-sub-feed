@@ -8,7 +8,6 @@ export default function init() {
       thumbnail_url TEXT,
       upload_playlist_id TEXT,
       show_livestreams INTEGER NOT NULL DEFAULT 0,
-      fast_polling INTEGER NOT NULL DEFAULT 0,
       last_fetched_at TEXT,
       created_at TEXT NOT NULL
     )

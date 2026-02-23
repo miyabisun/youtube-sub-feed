@@ -17,7 +17,6 @@ function runInit(sqlite: Database) {
       thumbnail_url TEXT,
       upload_playlist_id TEXT,
       show_livestreams INTEGER NOT NULL DEFAULT 0,
-      fast_polling INTEGER NOT NULL DEFAULT 0,
       last_fetched_at TEXT,
       created_at TEXT NOT NULL
     )
@@ -179,6 +178,5 @@ describe('init', () => {
     sqlite.exec("INSERT INTO channels (id, title, created_at) VALUES ('UC123', 'Test', '2024-01-01')")
     const channel: any = sqlite.query("SELECT * FROM channels WHERE id = 'UC123'").get()
     expect(channel.show_livestreams).toBe(0)
-    expect(channel.fast_polling).toBe(0)
   })
 })

@@ -8,7 +8,7 @@ const channels = new Hono()
 
 channels.get('/api/channels', (c) => {
   const rows = sqlite.query(`
-    SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.fast_polling, c.last_fetched_at,
+    SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
       (SELECT GROUP_CONCAT(g.name, ', ')
        FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
        WHERE cg.channel_id = c.id) as group_names
@@ -51,28 +51,14 @@ channels.post('/api/channels/:id/refresh', async (c) => {
 
 channels.patch('/api/channels/:id', async (c) => {
   const id = c.req.param('id')
-  const body = await c.req.json<{ show_livestreams?: number; fast_polling?: number }>()
+  const body = await c.req.json<{ show_livestreams?: number }>()
 
-  const sets: string[] = []
-  const params: any[] = []
+  if (body.show_livestreams === undefined) return c.json({ error: 'No fields to update' }, 400)
 
-  if (body.show_livestreams !== undefined) {
-    const val = Number(body.show_livestreams)
-    if (val !== 0 && val !== 1) return c.json({ error: 'show_livestreams must be 0 or 1' }, 400)
-    sets.push('show_livestreams = ?')
-    params.push(val)
-  }
-  if (body.fast_polling !== undefined) {
-    const val = Number(body.fast_polling)
-    if (val !== 0 && val !== 1) return c.json({ error: 'fast_polling must be 0 or 1' }, 400)
-    sets.push('fast_polling = ?')
-    params.push(val)
-  }
+  const val = Number(body.show_livestreams)
+  if (val !== 0 && val !== 1) return c.json({ error: 'show_livestreams must be 0 or 1' }, 400)
 
-  if (sets.length === 0) return c.json({ error: 'No fields to update' }, 400)
-
-  params.push(id)
-  sqlite.query(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`).run(...params)
+  sqlite.query('UPDATE channels SET show_livestreams = ? WHERE id = ?').run(val, id)
   return c.json({ ok: true })
 })
 

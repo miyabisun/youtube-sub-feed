@@ -121,10 +121,6 @@
 						<input type="checkbox" checked={channel.show_livestreams} onchange={() => toggleSetting('show_livestreams')} />
 						ライブ表示
 					</label>
-					<label class="toggle">
-						<input type="checkbox" checked={channel.fast_polling} onchange={() => toggleSetting('fast_polling')} />
-						高頻度巡回
-					</label>
 					<button class="refresh-btn" onclick={refreshChannel}>更新</button>
 				</div>
 			</div>

@@ -8,7 +8,7 @@ function setupApp() {
   sqlite.exec(`CREATE TABLE channels (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, thumbnail_url TEXT,
     upload_playlist_id TEXT, show_livestreams INTEGER NOT NULL DEFAULT 0,
-    fast_polling INTEGER NOT NULL DEFAULT 0, last_fetched_at TEXT, created_at TEXT NOT NULL
+    last_fetched_at TEXT, created_at TEXT NOT NULL
   )`)
   sqlite.exec(`CREATE TABLE groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,

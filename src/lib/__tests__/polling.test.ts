@@ -9,18 +9,18 @@ describe('polling interval calculation', () => {
     expect(interval).toBeLessThan(10000)
   })
 
-  test('fast polling: 5 channels / 10min = 2min per channel', () => {
+  test('fast polling: 5 channels / 15min = 3min per channel', () => {
     const channelCount = 5
-    const interval = Math.floor(10 * 60 * 1000 / channelCount)
-    expect(interval).toBe(120_000)
+    const interval = Math.floor(15 * 60 * 1000 / channelCount)
+    expect(interval).toBe(180_000)
   })
 
   test('handles single channel gracefully', () => {
     const channelCount = 1
     const normalInterval = Math.floor(30 * 60 * 1000 / channelCount)
-    const fastInterval = Math.floor(10 * 60 * 1000 / channelCount)
+    const fastInterval = Math.floor(15 * 60 * 1000 / channelCount)
     expect(normalInterval).toBe(1_800_000)
-    expect(fastInterval).toBe(600_000)
+    expect(fastInterval).toBe(900_000)
   })
 
   test('index wraps around correctly', () => {
