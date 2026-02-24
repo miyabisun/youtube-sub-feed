@@ -1,3 +1,50 @@
+export function swipeNav(node, opts) {
+	let startX, startY, locked, horizontal;
+	const { onLeft, onRight } = opts;
+
+	function onStart(e) {
+		const touch = e.touches[0];
+		startX = touch.clientX;
+		startY = touch.clientY;
+		locked = false;
+		horizontal = false;
+	}
+
+	function onMove(e) {
+		const touch = e.touches[0];
+		const dx = touch.clientX - startX;
+		const dy = touch.clientY - startY;
+
+		if (!locked) {
+			if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+			locked = true;
+			horizontal = Math.abs(dx) > Math.abs(dy);
+		}
+		if (!horizontal) return;
+
+		e.preventDefault();
+	}
+
+	function onEnd(e) {
+		if (!locked || !horizontal) return;
+		const dx = e.changedTouches[0].clientX - startX;
+		if (dx < -50 && onLeft) onLeft();
+		if (dx > 50 && onRight) onRight();
+	}
+
+	node.addEventListener('touchstart', onStart, { passive: true });
+	node.addEventListener('touchmove', onMove, { passive: false });
+	node.addEventListener('touchend', onEnd, { passive: true });
+
+	return {
+		destroy() {
+			node.removeEventListener('touchstart', onStart);
+			node.removeEventListener('touchmove', onMove);
+			node.removeEventListener('touchend', onEnd);
+		},
+	};
+}
+
 export function swipeable(node, opts) {
 	let startX, startY, offsetX, locked, horizontal;
 	let swipeBg;

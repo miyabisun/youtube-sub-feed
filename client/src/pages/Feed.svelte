@@ -5,9 +5,11 @@
 	import VideoCard from '$lib/components/VideoCard.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
-	import { swipeable } from '$lib/swipe.js';
+	import { swipeNav } from '$lib/swipe.js';
+	import { navigate } from '$lib/router.svelte.js';
 
 	let { groupId = null } = $props();
+	let groups = $state([]);
 
 	let videos = $state([]);
 	let loading = $state(false);
@@ -53,6 +55,32 @@
 		}
 	}
 
+	async function loadGroups() {
+		try {
+			groups = await fetcher(`${config.path.api}/groups`);
+		} catch (_) {}
+	}
+
+	function swipeLeft() {
+		const cycle = [null, ...groups.map((g) => String(g.id))];
+		const currentIndex = cycle.indexOf(groupId ?? null);
+		const nextIndex = (currentIndex + 1) % cycle.length;
+		const next = cycle[nextIndex];
+		navigate(next ? `/group/${next}` : '/');
+	}
+
+	function swipeRight() {
+		const cycle = [null, ...groups.map((g) => String(g.id))];
+		const currentIndex = cycle.indexOf(groupId ?? null);
+		const prevIndex = (currentIndex - 1 + cycle.length) % cycle.length;
+		const prev = cycle[prevIndex];
+		navigate(prev ? `/group/${prev}` : '/');
+	}
+
+	$effect(() => {
+		untrack(() => loadGroups());
+	});
+
 	$effect(() => {
 		groupId;
 		untrack(() => loadVideos(true));
@@ -70,7 +98,7 @@
 	});
 </script>
 
-<div class="feed">
+<div class="feed" use:swipeNav={{ onLeft: swipeLeft, onRight: swipeRight }}>
 	{#if loading}
 		<Spinner />
 	{:else if videos.length === 0}
@@ -79,8 +107,7 @@
 		<div class="video-list">
 			{#each videos as video (video.id)}
 				<div class="video-wrapper">
-					<div class="swipe-bg">もう見た</div>
-					<div class="video-item" use:swipeable={{ onSwipeLeft: () => hideVideo(video.id) }}>
+					<div class="video-item">
 						<VideoCard {video} />
 						<button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
 					</div>
@@ -123,7 +150,7 @@
 	background: var(--c-bg)
 
 .hide-btn
-	display: none
+	display: block
 	position: absolute
 	top: var(--sp-2)
 	right: var(--sp-2)
@@ -141,9 +168,6 @@
 		color: var(--c-danger)
 		border-color: var(--c-danger-border)
 
-.swipe-bg
-	display: none
-
 .empty
 	text-align: center
 	padding: var(--sp-6)
@@ -152,9 +176,12 @@
 .sentinel
 	height: 1px
 
+@media (max-width: 599px)
+	.hide-btn
+		opacity: 0.7
+
 @media (min-width: 600px)
 	.hide-btn
-		display: block
 		opacity: 0
 
 	.video-wrapper:hover .hide-btn
@@ -170,26 +197,4 @@
 	.video-list
 		display: grid
 		grid-template-columns: repeat(3, 1fr)
-
-@media (max-width: 599px)
-	.video-wrapper
-		overflow: hidden
-
-	.video-item
-		background: var(--c-bg)
-
-	.swipe-bg
-		display: flex
-		align-items: center
-		justify-content: flex-end
-		padding-right: var(--sp-5)
-		position: absolute
-		right: 0
-		top: 0
-		bottom: 0
-		width: 80px
-		color: var(--c-danger)
-		font-weight: bold
-		font-size: var(--fs-sm)
-		opacity: 0
 </style>
