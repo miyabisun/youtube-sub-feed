@@ -160,6 +160,14 @@
 	.video-wrapper:hover .hide-btn
 		opacity: 1
 
+@media (min-width: 800px)
+	.feed
+		max-width: none
+
+	.video-list
+		display: grid
+		grid-template-columns: repeat(3, 1fr)
+
 @media (max-width: 599px)
 	.video-wrapper
 		overflow: hidden

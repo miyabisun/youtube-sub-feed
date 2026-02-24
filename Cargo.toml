@@ -1,0 +1,28 @@
+[package]
+name = "youtube-sub-feed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-cookies = "0.11"
+tower = { version = "0.5", features = ["util"] }
+uuid = { version = "1", features = ["v4"] }
+regex-lite = "0.1"
+urlencoding = "2"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

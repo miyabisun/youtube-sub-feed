@@ -7,16 +7,17 @@ youtube-sub-feed が準拠する、novel-server（同一マシン上の別プロ
 
 ```
 novel-server/
-├── src/                     # バックエンド (TypeScript)
-│   ├── index.ts             # エントリポイント & Hono アプリ設定
-│   ├── db/
-│   │   ├── index.ts         # Drizzle + SQLite 初期化
-│   │   └── schema.ts        # テーブルスキーマ定義
-│   ├── lib/
-│   │   ├── cache.ts         # インメモリキャッシュ (TTL ベース)
-│   │   ├── favorite-sync.ts # バックグラウンド定期同期
-│   │   ├── init.ts          # DB スキーマ自動初期化
-│   │   └── spa.ts           # SPA インデックス配信 & BASE_PATH 対応
+├── Cargo.toml               # Rust プロジェクト定義
+├── src/                     # バックエンド (Rust)
+│   ├── main.rs              # エントリポイント (axum + tokio::main)
+│   ├── config.rs            # 環境変数の読み込み
+│   ├── error.rs             # AppError enum + IntoResponse
+│   ├── state.rs             # AppState (db, cache, config, http)
+│   ├── db.rs                # SQLite 初期化 (rusqlite)
+│   ├── cache.rs             # インメモリキャッシュ (HashMap + TTL)
+│   ├── sanitize.rs          # HTML サニタイズ (ammonia)
+│   ├── spa.rs               # SPA インデックス配信 & BASE_PATH 対応
+│   ├── sync.rs              # バックグラウンド定期同期
 │   ├── modules/             # ビジネスロジック (サイト別モジュール)
 │   └── routes/              # API ルートハンドラ
 ├── client/                  # フロントエンド (Svelte 5)
@@ -31,145 +32,147 @@ novel-server/
 │   │   │   └── components/  # 共通コンポーネント
 │   │   └── pages/           # ページコンポーネント
 │   └── vite.config.js
+├── bin/dev                  # ローカル開発用スクリプト (ビルド＆起動)
 ├── docs/                    # ドキュメント
 ├── CLAUDE.md                # プロジェクト固有ルール
-├── package.json
-├── tsconfig.json
-├── drizzle.config.ts
-└── Dockerfile
+└── Dockerfile               # マルチステージビルド
 ```
 
 ## 技術スタック
 
-| 項目 | 技術 | バージョン |
-|------|------|-----------|
-| ランタイム | Bun | latest |
-| フレームワーク | Hono | ^4.7.2 |
-| ORM | Drizzle ORM | ^0.39.0 |
-| DB | SQLite (bun:sqlite) | - |
-| フロントエンド | Svelte 5 | ^5.0.0 |
-| ビルドツール | Vite | ^6.0.0 |
-| スタイリング | Sass | ^1.60.0 |
-| TypeScript | strict: true | ^5.7.3 |
+> **注意**: 2026-02 に Bun/TypeScript から Rust に移行済み。
+> youtube-sub-feed は Bun/TypeScript のまま運用しているため、直接的な技術スタックの参照先ではなくなった。
+> ただしアーキテクチャパターン（キャッシュ・同期・SPA配信等）とフロントエンド規約は引き続き有効。
 
-## package.json スクリプト
+| 項目 | 旧 (TypeScript) | 現行 (Rust) |
+|------|-----------------|-------------|
+| ランタイム | Bun | tokio |
+| フレームワーク | Hono | axum |
+| DB | bun:sqlite + Drizzle | rusqlite (bundled) |
+| フロントエンド | Svelte 5 + Vite | Svelte 5 + Vite（変更なし） |
+| フロントエンドビルド | Bun (bunx) | Node.js (npx) |
+| スタイリング | Sass | Sass（変更なし） |
+| HTML パース | cheerio | scraper |
+| HTML サニタイズ | HTMLRewriter | ammonia |
+| HTTP クライアント | fetch | reqwest |
+| ログ | Hono logger | tracing |
+| エラー型 | throw + try/catch | thiserror + AppError enum |
 
-```json
-{
-  "type": "module",
-  "scripts": {
-    "dev": "cd client && bunx vite build --watch & bun --env-file=.env src/index.ts",
-    "setup": "bun install && cd client && bun install && test -f .env || cp .env.example .env",
-    "build:client": "cd client && bun install && bun run build",
-    "build": "bun run build:client",
-    "start": "bun --env-file=.env src/index.ts"
-  }
-}
+## Rust 移行の知見
+
+youtube-sub-feed で同様の移行を検討する場合の参考情報。
+
+### 移行の動機
+
+- Bun の1インスタンスあたり RSS ~130-140MB → Rust で ~30-40MB に削減
+- 1GB VPS で多くのインスタンスを運用可能に
+
+### ハマりポイント
+
+#### 1. `Send` 境界と非同期 (最大の壁)
+
+`tokio::spawn` 内で rusqlite の `Statement` や `MappedRows` が `.await` を跨ぐとコンパイルエラー。DB 操作は同期関数に切り出し `{}` ブロック内で完結させる必要がある。
+
+```rust
+// NG: Mutex guard が .await を跨ぐ
+let ids = {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT id FROM ...")?;
+    stmt.query_map([], |row| row.get(0))? // MappedRows は Send ではない
+        .collect()
+};
+some_async_fn().await; // ← ここで Send 境界違反
+
+// OK: 同期関数に切り出す
+fn get_ids(conn: &Connection) -> Vec<String> { /* DB操作を完結 */ }
+let ids = { let conn = state.db.lock().unwrap(); get_ids(&conn) };
+some_async_fn().await; // OK
 ```
 
-## tsconfig.json
+#### 2. 外部 API パラメータのサイレント破壊
 
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "skipLibCheck": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "resolveJsonModule": true,
-    "declaration": true,
-    "sourceMap": true,
-    "types": ["bun-types"]
-  },
-  "include": ["src"],
-  "exclude": ["node_modules", "dist", "client"]
-}
+reqwest はクエリパラメータのカンマを `%2C` にエンコードする。TypeScript の `fetch` では問題なかったパラメータ形式が Rust で壊れ、API がデータの代わりに null を返した。**コンパイラでは検出不可能**で、curl での手動テストで発見。
+
+**対策**: API パラメータ形式は定数化し、フォーマットのテストを書く。
+
+#### 3. Docker ビルドの依存
+
+`rust:1-slim` には OpenSSL の開発ヘッダーがない。reqwest (native-tls) を使う場合、Dockerfile に `pkg-config` と `libssl-dev` のインストールが必要。
+
+### 移行して良かった点
+
+- メモリ消費が 1/4 以下に
+- scraper (HTML パース) と ammonia (サニタイズ) は cheerio/HTMLRewriter とほぼ同じ感覚
+- axum のルーティングが Hono に近く移植しやすい
+
+## DB 初期化パターン (src/db.rs)
+
+```rust
+// rusqlite でオープン + PRAGMA 設定
+let conn = Connection::open(path)?;
+conn.execute_batch("
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA cache_size = -64000;
+    PRAGMA temp_store = MEMORY;
+")?;
+// CREATE TABLE IF NOT EXISTS ...
 ```
 
-## drizzle.config.ts
+## インメモリキャッシュ (src/cache.rs)
 
-```typescript
-{
-  schema: './src/db/schema.ts',
-  dialect: 'sqlite',
-  dbCredentials: {
-    url: process.env.DATABASE_PATH || './novel.db'
-  }
-}
-```
-
-## DB 初期化パターン (src/db/index.ts)
-
-```typescript
-import { drizzle } from 'drizzle-orm/bun-sqlite'
-import { Database } from 'bun:sqlite'
-
-const sqlite = new Database(process.env.DATABASE_PATH || './novel.db')
-// WAL モード & パフォーマンス PRAGMA
-sqlite.exec('PRAGMA journal_mode = WAL')
-sqlite.exec('PRAGMA synchronous = NORMAL')
-sqlite.exec('PRAGMA cache_size = -64000')
-sqlite.exec('PRAGMA temp_store = MEMORY')
-
-export const db = drizzle(sqlite)
-```
-
-## インメモリキャッシュ (src/lib/cache.ts)
-
-- Map ベースの TTL キャッシュ
+- `HashMap<String, CacheEntry>` ベースの TTL キャッシュ
 - 最大 10,000 エントリ
 - 1時間ごとにスイープ
 - FIFO で最古エントリを削除
 
-```typescript
-// 使用例
-cache.get(key)          // TTL 内ならヒット
-cache.set(key, value, ttl)
-cache.delete(key)       // 手動破棄
-```
-
-## バックグラウンド同期パターン (src/lib/favorite-sync.ts)
+## バックグラウンド同期パターン (src/sync.rs)
 
 2種類の同期パターンを使用:
 
 ### 一括同期 (なろう・ノクターン)
-```typescript
-startSyosetuSync('narou', 10 * 60 * 1000)  // 10分間隔
-// → fetchData() で全件一括取得 → トランザクションで一括更新
+```
+tokio::time::interval(10分)
+→ fetch_data() で全件一括取得 → DB一括更新
 ```
 
 ### ラウンドロビン同期 (カクヨム)
-```typescript
-startKakuyomuSync()  // 1時間で全件を循環
-// → 1件ずつ fetchDatum() → 均等間隔でスケジューリング
-// → interval = Math.floor(3_600_000 / count)
+```
+loop {
+    1件ずつ fetch_datum() → DB更新
+    tokio::time::sleep(3_600_000ms / count)
+}
+// 1時間で全件を均等に循環
 ```
 
-## SPA 配信 (src/lib/spa.ts)
+## SPA 配信 (src/spa.rs)
 
-- `client/build/` の静的ファイルを Hono の `serveStatic` で配信
+- `client/build/` の静的ファイルを `tower_http::services::ServeDir` で配信
 - SPA のフォールバック: 未マッチのルートに `index.html` を返す
 - `BASE_PATH` 対応: `<base>` タグと `window.__BASE_PATH__` を動的注入
 
 ## API ルートの規約
 
-```typescript
+```rust
 // エラーレスポンス
-c.json({ error: 'Invalid type' }, 400)
-c.json({ error: 'Failed to fetch ranking' }, 502)
+(StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid type"})))
+(StatusCode::BAD_GATEWAY, Json(json!({"error": "Failed to fetch ranking"})))
 
-// リトライパターン (最大3回、指数バックオフ)
-for (let i = 0; i < 3; i++) {
-  try { /* ... */ } catch (e) {
-    if (i < 2) await new Promise(r => setTimeout(r, 500 * (i + 1)))
-  }
+// リトライパターン (最大3回、線形バックオフ)
+for attempt in 0..3 {
+    match fetch().await {
+        Ok(data) => return Ok(data),
+        Err(e) if attempt < 2 => {
+            tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+        }
+        Err(e) => return Err(e),
+    }
 }
 ```
 
 ## フロントエンド規約
+
+> フロントエンドは Rust 移行後も変更なし。
 
 ### ルーター (router.svelte.js)
 - 正規表現ベースのパターンマッチング
@@ -224,20 +227,24 @@ for (let i = 0; i < 3; i++) {
 ## Dockerfile (マルチステージビルド)
 
 ```dockerfile
-# Stage 1: Builder
-FROM oven/bun:1
-# サーバー依存 + クライアント依存をインストール
-# フロントエンドビルド → /dist/ に集約
+# Stage 1: Frontend
+FROM node:22-slim
+# npm ci → npx vite build
 
-# Stage 2: Production
-FROM oven/bun:1-slim
-# /dist をコピー、本番依存のみ
-# NODE_ENV=production, PORT=3000
-# CMD: ["bun", "run", "src/index.ts"]
+# Stage 2: Rust build
+FROM rust:1-slim
+# apt-get install pkg-config libssl-dev
+# cargo build --release
+
+# Stage 3: Production
+FROM debian:bookworm-slim
+# ca-certificates のみインストール
+# バイナリ + client/build/ をコピー
+# CMD: ["novel-server"]
 ```
 
 ## CLAUDE.md ルール
 
 1. `/rev` で変更をレビュー → Critical/Warning は `/dev` で修正
 2. `docs/*.md` はコード変更時に常に最新化
-3. `client/` 変更後は必ず `cd client && bunx vite build` で成功確認
+3. `client/` 変更後は必ず `cd client && npx vite build` で成功確認

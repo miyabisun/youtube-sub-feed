@@ -23,13 +23,18 @@
 		if (v.is_livestream) return 'label-archive';
 		return '';
 	}
+
+	function hqThumbnail(url) {
+		if (!url) return url;
+		return url.replace('/mqdefault.', '/hqdefault.');
+	}
 </script>
 
 <div class="video-card">
 	<a class="thumbnail-link" href={getVideoUrl(video)} target="_blank" rel="noopener">
 		<div class="thumbnail-wrap">
 			{#if video.thumbnail_url}
-				<img class="thumbnail" src={video.thumbnail_url} alt="" loading="lazy" />
+				<img class="thumbnail" src={hqThumbnail(video.thumbnail_url)} alt="" loading="lazy" />
 			{/if}
 			{#if video.duration}
 				<span class="duration">{formatDuration(video.duration)}</span>

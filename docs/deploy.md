@@ -17,8 +17,7 @@ docker run -d \
   -e GOOGLE_CLIENT_ID=xxx \
   -e GOOGLE_CLIENT_SECRET=xxx \
   -e GOOGLE_REDIRECT_URI=https://feed.sis.jp/api/auth/callback \
-  -e DISCORD_TOKEN=xxx \
-  -e DISCORD_CHANNEL_ID=xxx \
+  -e DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx \
   youtube-sub-feed
 ```
 
@@ -62,5 +61,4 @@ server {
 | `GOOGLE_CLIENT_ID` | Google OAuth2 クライアントID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth2 クライアントシークレット |
 | `GOOGLE_REDIRECT_URI` | OAuth2 コールバックURL |
-| `DISCORD_TOKEN` | Discord Bot トークン |
-| `DISCORD_CHANNEL_ID` | 通知先 Discord チャンネルID |
+| `DISCORD_WEBHOOK_URL` | Discord Webhook URL（省略可） |

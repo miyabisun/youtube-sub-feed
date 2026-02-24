@@ -14,14 +14,14 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 
 | 項目 | 技術 |
 |------|------|
-| ランタイム | Bun |
-| バックエンド | Hono |
-| データベース | SQLite (bun:sqlite) |
-| ORM | なし（raw bun:sqlite） |
+| ランタイム | Rust (tokio) |
+| バックエンド | axum |
+| データベース | SQLite (rusqlite) |
+| ORM | なし（raw rusqlite） |
 | フロントエンド | Svelte 5 + Vite |
 | スタイリング | Sass |
-| 言語 | TypeScript (strict) |
-| コンテナ | Docker (マルチステージビルド) |
+| 言語 | Rust |
+| コンテナ | Docker (3段マルチステージビルド) |
 
 ## 認証
 
@@ -41,7 +41,7 @@ novel-server に準拠（詳細: [reference-novel-server.md](./reference-novel-s
 - セッション管理:
   - Cookie ベースのセッション（HttpOnly, SameSite=Lax）
   - Cookie 名: `session`
-  - セッションID生成: `crypto.randomUUID()`
+  - セッションID生成: UUID v4
   - 本番: `Secure` フラグ有効（HTTPS）、開発: `Secure` 無効（localhost HTTP）
   - セッション有効期限: 30日
   - セッション期限切れ時: ログインページへ自動リダイレクト
@@ -84,36 +84,33 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 - **RSS 取得失敗**: 安全側に倒して API フォールバック（`hasNewVideos: true` として扱う）
 - **初回取得**（`last_fetched_at IS NULL`）: RSS をスキップし、常に API で取得
 - **手動リフレッシュ**（`POST /api/channels/:id/refresh`）: RSS を介さず常に API 直接
-- **高頻度巡回の `checkLivestreams`**: RSS スキップ時も実行（ライブ終了検知を維持）
+- **ライブ察知ループ**: RSS を使わず常に API 直叩き（5分/周で新着 + ライブ終了検知）
 
 ### クォータ予算（10,000ユニット/日）
 
 ```
-■ 通常巡回（195チャンネル、30分/周、48周/日）
-  ※ RSS-First: 新着動画があるチャンネルのみ API 呼び出し
-  ※ 平均 ~0.3 動画/日/ch → 195ch × 0.3 ≒ 60 新着/日
-  ※ 新着検知は1回の API で DB に入る → 以降の周は RSS スキップ
-  PlaylistItems.list: 60                          =    60ユニット
-  Videos.list:        60                          =    60ユニット
+■ 新着検知（200ch、15分/周、RSS-First）
+  ※ 新着動画があるチャンネルのみ API 呼び出し
+  ※ 平均 ~0.3 動画/日/ch → 200ch × 0.3 ≒ 65 新着/日
+  PlaylistItems.list: 65                          =    65ユニット
+  Videos.list:        65                          =    65ユニット
+  小計                                            ≒   130ユニット/日
 
-■ 高頻度巡回（5チャンネル、15分/周、96周/日）
-  ※ 同様に RSS-First → 5ch × ~1 動画/日 = 5 新着
-  PlaylistItems + Videos: 5 × 2                   =    10ユニット
-
-■ ライブ終了検知（checkLivestreams）
-  ※ 配信中 0本 → 0、1本 → 最大 96回/日
-  Videos.list:                                    ≒    96ユニット
+■ ライブ察知（5ch、5分/周、API直叩き）
+  PlaylistItems.list: 5 × 288回                   = 1,440ユニット
+  Videos.list（新着）:                             ≒     5ユニット
+  Videos.list（終了検知、配信中1本想定）:           ≒   288ユニット
+  小計                                            ≒ 1,733ユニット/日
 
 ■ その他
   Subscriptions.list: 10分ごと × 144回 × 4ページ  =   576ユニット
   UUSH照合:           ショート判定                 ≒    20ユニット
   手動リフレッシュ:   数回/日                      ≒    10ユニット
   初回セットアップ:   1回のみ                      ≒   200ユニット
+  小計                                            ≒   606ユニット/日
 
-■ 合計: 約 832ユニット/日（初回除く、ライブ配信中1本想定）
-  ※ ライブ 0本なら約 736ユニット/日
-  ※ クォータ上限 10,000 の 8% 程度で運用可能
-  ※ チャンネル数が 1,000+ に増加しても余裕あり
+■ 合計: 約 2,469ユニット/日（初回除く、ライブ配信中1本想定）
+  ※ クォータ上限 10,000 の 25% 程度で運用可能
 ```
 
 ### 動画取得の仕組み
@@ -127,34 +124,34 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
    - `liveStreamingDetails` の存在有無 → ライブ配信判定（追加クォータなし）
    - `liveStreamingDetails.actualEndTime` → `livestream_ended_at` に保存（NULL なら配信中）
    - duration, is_short は変更されないため、新着時のみ取得すれば十分
-   - ライブ配信の終了検知: 高頻度巡回時に `is_livestream=1 AND livestream_ended_at IS NULL` の動画を Videos.list で再取得し、終了日時を更新
+   - ライブ配信の終了検知: ライブ察知ループ（5分/周）で `is_livestream=1 AND livestream_ended_at IS NULL` の動画を Videos.list で再取得し、終了日時を更新
 4. 新着動画のうち duration ≤ 60秒のものについて、ショート動画判定を実施
    - チャンネルIDから `UUSH` プレイリスト（Shorts専用）を `PlaylistItems.list` で取得
    - そのプレイリストに含まれていれば `is_short = 1`
    - `UUSH` は非公式機能のため、取得失敗時は duration ≤ 60秒 をフォールバック判定とする
    - UUSH プレイリストの取得結果はチャンネル単位でメモリキャッシュし、同一巡回内での重複取得を防止
-   - キャッシュは通常巡回1周完了ごとにクリア
+   - キャッシュは新着検知ループ1周完了ごとにクリア
 
 ### 更新戦略
 
-2つの巡回ループを並行稼働させる（novel-server のラウンドロビン同期パターンに準拠）。各巡回では **RSS-First 戦略**により、新着がないチャンネルの API 呼び出しをスキップする:
+2つの巡回ループを並行稼働させる（novel-server のラウンドロビン同期パターンに準拠）:
 
-- **通常巡回（30分/周）**: `show_livestreams=0` のチャンネルを1周
-  - `interval = Math.floor(30 * 60 * 1000 / channelCount)` で均等間隔にスケジューリング
-  - 約460チャンネル ÷ 30分 ≒ 3.9秒に1チャンネル
+- **新着検知ループ（15分/周）**: `show_livestreams=0` のチャンネルを RSS-First で巡回
+  - `interval = 15 * 60 * 1000 / channel_count` で均等間隔にスケジューリング
   - RSS で新着なしと判定されたチャンネルは API をスキップ
-- **高頻度巡回（15分/周）**: `show_livestreams=1` のチャンネルのみ（最大5件）
-  - `interval = Math.floor(15 * 60 * 1000 / fastChannelCount)` で均等間隔
-  - 5チャンネル ÷ 15分 = 3分に1チャンネル
-  - RSS スキップ時も `checkLivestreams` は実行
-  - YouTube RSS フィードは約15分キャッシュされるため、それに合わせた間隔
-- 各ループは `setTimeout` チェーンで1チャンネルずつ処理し、1周完了後に次の周を開始
+  - YouTube RSS フィードの約15分キャッシュに合わせた周期
+  - ライブチェックはしない（ライブ察知ループの責務）
+- **ライブ察知ループ（5分/周）**: `show_livestreams=1` のチャンネルのみ（最大5件）、**API直叩き**
+  - `interval = 5 * 60 * 1000 / fast_channel_count` で均等間隔
+  - RSS をスキップし、常に API で動画取得（ライブ開始の即時検知）
+  - 毎 tick で `check_livestreams` を実行（ライブ終了検知）
+- 各ループは `tokio::time::sleep` チェーンで1チャンネルずつ処理し、1周完了後に次の周を開始
 - **手動リフレッシュ**: 指定した1チャンネルのみを即座に更新（`POST /api/channels/:id/refresh`）— RSS を介さず常に API 直接
 - **登録チャンネルリストの同期**: 10分ごと（RSS-First により日次クォータに十分な余裕があるため、新規登録を即座に反映）
 
 #### 巡回順序
 
-- 通常巡回・高頻度巡回それぞれのループ内で `last_fetched_at` が最も古いチャンネルから順に処理（`ORDER BY last_fetched_at ASC`）
+- 新着検知・ライブ察知それぞれのループ内で `last_fetched_at` が最も古いチャンネルから順に処理（`ORDER BY last_fetched_at ASC`）
 - サーバー起動と同時に巡回を開始。ただし有効なアクセストークンが存在しない場合（初回起動時等）はログイン完了を待機
 - 巡回処理はトランザクション外で YouTube API を呼び出し、結果の DB 書き込みのみ短いトランザクションで実行
 
@@ -183,7 +180,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 - デフォルトではライブ配信（アーカイブ含む）はフィードに**表示しない**
 - チャンネルごとに `show_livestreams=1` を設定可能
   - 友人のチャンネル等、個別に許可する運用
-  - 有効にするとフィードへのライブ表示 + 高頻度巡回（15分/周）の両方が適用される
+  - 有効にするとフィードへのライブ表示 + ライブ察知巡回（5分/周、API直叩き）の両方が適用される
   - 現時点で1件、最大5件程度の運用を想定
 - カード上に「LIVE」または「配信アーカイブ」ラベルを表示
 
@@ -216,7 +213,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 | title | TEXT | チャンネル名 |
 | thumbnail_url | TEXT | チャンネルアイコンURL |
 | upload_playlist_id | TEXT | アップロードプレイリストID (UU...) |
-| show_livestreams | INTEGER | ライブ配信をフィードに表示 + 高頻度巡回対象 (0: 非表示/通常30分, 1: 表示/15分) DEFAULT 0 |
+| show_livestreams | INTEGER | ライブ配信をフィードに表示 + ライブ察知巡回対象 (0: 非表示, 1: 表示/5分API直叩き) DEFAULT 0 |
 | last_fetched_at | TEXT | 最終取得日時 (ISO 8601) |
 | created_at | TEXT | 登録日時 |
 
@@ -386,7 +383,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 - 非表示/復元操作:
   - **スマホ**: 左スワイプで非表示化、右スワイプで非表示から復元
   - **PC**: カード内の非表示/復元ボタンをクリック
-- チャンネル設定（ライブ配信の切り替え — 有効にすると15分間隔の高頻度巡回も適用）
+- チャンネル設定（ライブ配信の切り替え — 有効にすると5分間隔のAPI直叩きライブ察知も適用）
 - YouTube チャンネルページへの外部リンク（別タブで開く）
 
 ### 管理画面
@@ -445,37 +442,33 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 
 ## Discord 通知
 
-discord.js を依存に追加し、Bot から `youtube-info` チャンネルへ直接メッセージを送信する。
+Discord Webhook を使って通知チャンネルへ Embed を POST する。
 
-- **メッセージ形式**: Embed（`EmbedBuilder`）を使用
+- **メッセージ形式**: Webhook Embed
   - チャンネル名（author）、動画タイトル（title、リンク付き）、サムネイル（image）、公開日時（timestamp）
   - サイドバーの色にアクセントカラーを設定
 - 通知タイミング:
   - **初回セットアップ完了時**: 全チャンネルの初回動画取得が完了した旨を通知
   - **新着動画検知時**: 新しい動画を検知したら通知（1件ずつ送信）
-- 環境変数で Bot トークンとチャンネルIDを設定
+- 環境変数 `DISCORD_WEBHOOK_URL` で Webhook URL を設定（省略時は通知無効）
 - エラーハンドリング: 通知失敗時は fire-and-forget（ログ出力のみ、巡回は続行）
 
 ## テスト
 
-Bun の組み込みテストランナー (`bun test`) を使用。
+Rust の `#[test]` / `#[tokio::test]` を使用。
 **TDD（テスト駆動開発）** で進める — 実装より先にテストを書き、Red → Green → Refactor のサイクルを回す。
 
 ### 方針
 
 - テスト項目は実装時にコードと一緒に設計する（事前に網羅的なリストは作らない）
 - エッジケース・異常系・状態遷移はTDDのサイクル中に発見し、テストとして追加していく
-- 純粋関数（ビジネスロジック）のユニットテスト + YouTube APIモックによるAPI統合テストの2層構成
+- 純粋関数（ビジネスロジック）のユニットテスト + DBロジックテスト（インメモリSQLite）の構成
+- HTTP依存コードはオーケストレーション/パススルーが主でありモックはトートロジーになるため、HTTPモックは導入しない
 
-### テストディレクトリ構成
+### テスト配置
 
-```
-src/
-├── lib/
-│   └── __tests__/        # ユニットテスト
-└── routes/
-    └── __tests__/        # API 統合テスト
-```
+- 各 `.rs` ファイル末尾に `#[cfg(test)] mod tests { ... }` で配置
+- DB テストは `db::open_memory()` でインメモリ SQLite を使用
 
 ## 開発環境
 
@@ -487,8 +480,7 @@ DATABASE_PATH=./feed.db
 GOOGLE_CLIENT_ID=xxx
 GOOGLE_CLIENT_SECRET=xxx
 GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/callback
-DISCORD_TOKEN=xxx
-DISCORD_CHANNEL_ID=xxx
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx
 ```
 
 ### 開発フロー
@@ -499,12 +491,12 @@ DISCORD_CHANNEL_ID=xxx
 
 ### ログ出力
 
-- `console.log` による標準出力（Docker ログで確認）
+- `tracing` + `tracing-subscriber` による構造化ログ（Docker ログで確認）
 - 巡回状況・エラー・クォータ超過等の重要イベントをログ出力
 
 ### DB マイグレーション
 
-- `CREATE TABLE IF NOT EXISTS` で起動時に自動作成（`src/lib/init.ts`）
+- `CREATE TABLE IF NOT EXISTS` で起動時に自動作成（`src/db.rs`）
 - 個人用アプリのためロールバック不要
 
 ## デプロイ
