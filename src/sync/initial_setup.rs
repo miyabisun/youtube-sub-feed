@@ -1,6 +1,6 @@
 use crate::notify::notify_setup_complete;
 use crate::state::AppState;
-use crate::sync::{channel_sync, token, video_fetcher};
+use crate::sync::{channel_sync, video_fetcher};
 
 pub async fn run_initial_setup(state: &AppState) {
     let channel_count: i64 = {
@@ -14,15 +14,11 @@ pub async fn run_initial_setup(state: &AppState) {
         return;
     }
 
-    tracing::info!("[setup] Starting initial setup...");
+    tracing::info!("[setup] Waiting for login...");
 
-    let access_token = match token::get_valid_access_token(state).await {
-        Some(t) => t,
-        None => {
-            tracing::info!("[setup] No valid token, cannot run initial setup");
-            return;
-        }
-    };
+    let access_token = crate::sync::wait_for_token(state).await;
+
+    tracing::info!("[setup] Starting initial setup...");
 
     if let Err(e) = channel_sync::sync_subscriptions(state, &access_token).await {
         tracing::error!("[setup] Error syncing subscriptions: {}", e);

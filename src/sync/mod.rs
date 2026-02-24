@@ -15,7 +15,7 @@ pub(crate) async fn wait_for_token(state: &AppState) -> String {
         if let Some(t) = token::get_valid_access_token(state).await {
             return t;
         }
-        tracing::info!("[polling] No valid token, waiting 60s...");
+        tracing::info!("[sync] No valid token, waiting 60s...");
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
@@ -41,18 +41,9 @@ pub fn start_sync(state: AppState) {
 
     let state_clone = state.clone();
     tokio::spawn(async move {
-        // Check if initial setup is needed
-        let channel_count: i64 = {
-            let conn = state_clone.db.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
-                .unwrap_or(0)
-        };
-
-        if channel_count == 0 {
-            initial_setup::run_initial_setup(&state_clone).await;
-        }
+        initial_setup::run_initial_setup(&state_clone).await;
+        polling::start_polling(state_clone);
     });
 
-    polling::start_polling(state.clone());
     subscriptions::start_periodic_sync(state);
 }
