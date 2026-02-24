@@ -314,6 +314,14 @@
 			color: var(--c-accent)
 			border-color: var(--c-accent-border)
 
+@media (min-width: 800px)
+	.channel-detail
+		max-width: none
+
+	.video-list
+		display: grid
+		grid-template-columns: repeat(3, 1fr)
+
 @media (max-width: 599px)
 	.swipe-bg
 		display: flex

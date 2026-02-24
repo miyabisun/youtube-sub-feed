@@ -79,10 +79,10 @@
 		<div class="video-list">
 			{#each videos as video (video.id)}
 				<div class="video-wrapper">
-					<div class="swipe-bg">非表示</div>
+					<div class="swipe-bg">もう見た</div>
 					<div class="video-item" use:swipeable={{ onSwipeLeft: () => hideVideo(video.id) }}>
 						<VideoCard {video} />
-						<button class="hide-btn" onclick={() => hideVideo(video.id)}>非表示</button>
+						<button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
 					</div>
 				</div>
 			{/each}
@@ -158,6 +158,9 @@
 		opacity: 0
 
 	.video-wrapper:hover .hide-btn
+		opacity: 0.7
+
+	.video-wrapper:hover .hide-btn:hover
 		opacity: 1
 
 @media (min-width: 800px)
