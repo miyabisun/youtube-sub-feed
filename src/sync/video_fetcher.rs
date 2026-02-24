@@ -1,5 +1,5 @@
 use crate::duration::is_short_duration;
-use crate::notify::{notify_new_video, VideoInfo};
+use crate::notify::{notify_new_video, notify_warning, VideoInfo};
 use crate::state::AppState;
 use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uush_playlist};
 use crate::youtube::videos::fetch_video_details;
@@ -40,12 +40,28 @@ pub async fn fetch_channel_videos(
         Ok(items) => items,
         Err(e) => {
             if e.status == 404 && e.reason.as_deref() == Some("playlistNotFound") {
-                tracing::info!(
-                    "[video-fetcher] Playlist not found for {}, deleting channel",
+                let channel_title: Option<String> = {
+                    let conn = state.db.lock().unwrap();
+                    conn.query_row(
+                        "SELECT title FROM channels WHERE id = ?1",
+                        [channel_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                };
+                let name = channel_title.as_deref().unwrap_or(channel_id);
+                tracing::warn!(
+                    "[video-fetcher] Playlist not found for {} ({}), skipping",
+                    name,
                     channel_id
                 );
-                let conn = state.db.lock().unwrap();
-                let _ = conn.execute("DELETE FROM channels WHERE id = ?1", [channel_id]);
+                notify_warning(
+                    &state.http,
+                    &state.config,
+                    "プレイリスト未検出",
+                    &format!("{} ({}) のアップロードプレイリストが見つかりません。チャンネルが動画を全削除した可能性があります。", name, channel_id),
+                )
+                .await;
                 return Vec::new();
             }
             tracing::error!("[video-fetcher] Error fetching playlist: {}", e);

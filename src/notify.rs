@@ -34,7 +34,7 @@ pub async fn notify_new_video(http: &reqwest::Client, config: &Config, video: &V
     let embed = build_video_embed(video);
     let body = json!({ "embeds": [embed] });
     if let Err(e) = http.post(webhook_url).json(&body).send().await {
-        tracing::error!("[discord] Failed to send notification: {}", e);
+        tracing::error!("[discord] Failed to send notification: {:?}", e);
     }
 }
 
@@ -59,7 +59,32 @@ pub async fn notify_setup_complete(
     });
 
     if let Err(e) = http.post(webhook_url).json(&body).send().await {
-        tracing::error!("[discord] Failed to send setup notification: {}", e);
+        tracing::error!("[discord] Failed to send setup notification: {:?}", e);
+    }
+}
+
+pub async fn notify_warning(
+    http: &reqwest::Client,
+    config: &Config,
+    title: &str,
+    description: &str,
+) {
+    let webhook_url = match &config.discord_webhook_url {
+        Some(url) => url,
+        None => return,
+    };
+
+    let body = json!({
+        "embeds": [{
+            "title": title,
+            "description": description,
+            "color": 0xffa000,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }]
+    });
+
+    if let Err(e) = http.post(webhook_url).json(&body).send().await {
+        tracing::error!("[discord] Failed to send warning: {:?}", e);
     }
 }
 
