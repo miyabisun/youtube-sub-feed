@@ -1,10 +1,20 @@
 # youtube-sub-feed
 
+> 日本語ドキュメントは [README.ja.md](./README.ja.md) を参照してください。
+
 A personal web app for browsing your YouTube subscriptions chronologically, without the recommendation algorithm.
+
+## Tech Stack
+
+- **Backend**: Rust (axum + tokio)
+- **Database**: SQLite (rusqlite)
+- **Frontend**: Svelte 5 + Vite
+- **Notifications**: Discord Webhook
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) v1.0+
+- [Rust](https://rustup.rs/) (stable)
+- [Node.js](https://nodejs.org/) v22+ (for frontend build)
 - A Google account with YouTube subscriptions
 
 ## Setup
@@ -31,13 +41,9 @@ You need a Google Cloud project with the YouTube Data API enabled and OAuth 2.0 
 
 > **Note:** While the app is in "Testing" status on the consent screen, only the test users you added can log in. This is fine for personal use.
 
-### 2. Install & Configure
+### 2. Configure
 
-```bash
-bun run setup
-```
-
-This installs dependencies and creates a `.env` file from `.env.example`. Edit `.env`:
+Copy `.env.example` to `.env` and fill in your credentials:
 
 ```env
 PORT=3000
@@ -51,13 +57,14 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/callback
 
 ```bash
 # Development (with frontend hot rebuild)
-bun run dev
+./bin/dev
 
 # — or —
 
 # Production
-bun run build
-bun start
+cd client && npm install && npx vite build && cd ..
+cargo build --release
+./target/release/youtube-sub-feed
 ```
 
 Open `http://localhost:3000`, click "Google Login", and authorize. The app will automatically sync your subscriptions and start fetching videos.
@@ -66,42 +73,18 @@ Open `http://localhost:3000`, click "Google Login", and authorize. The app will 
 
 To receive Discord notifications when new videos are detected:
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new application and go to the **Bot** tab
-3. Click **Reset Token** and copy the bot token
-4. Enable **MESSAGE CONTENT INTENT** under Privileged Gateway Intents (not strictly required, but recommended)
-5. Go to **OAuth2 > URL Generator**
-   - Scopes: `bot`
-   - Bot Permissions: `Send Messages`, `Embed Links`
-   - Copy the generated URL and open it to invite the bot to your server
-6. In Discord, enable Developer Mode (Settings > Advanced), right-click the channel for notifications, and click **Copy Channel ID**
+1. In your Discord server, open **Server Settings > Integrations > Webhooks**
+2. Click **New Webhook**, choose a channel, and copy the **Webhook URL**
 
 Add to `.env`:
 
 ```env
-DISCORD_TOKEN=your-bot-token
-DISCORD_CHANNEL_ID=your-channel-id
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx
 ```
 
-Restart the server. The bot will send an embed for each new video detected during polling.
+Restart the server. An embed will be sent for each new video detected during polling.
 
 ## Docker
-
-A pre-built image is published to GitHub Container Registry on every push to `main`.
-
-```bash
-docker pull ghcr.io/miyabisun/youtube-sub-feed:latest
-
-docker run -d \
-  --name youtube-sub-feed \
-  -p 3000:3000 \
-  -v ytfeed-data:/app \
-  --env-file .env \
-  -e NODE_ENV=production \
-  ghcr.io/miyabisun/youtube-sub-feed:latest
-```
-
-Or build locally:
 
 ```bash
 docker build -t youtube-sub-feed .
@@ -111,7 +94,6 @@ docker run -d \
   -p 3000:3000 \
   -v ytfeed-data:/app \
   --env-file .env \
-  -e NODE_ENV=production \
   youtube-sub-feed
 ```
 
@@ -121,9 +103,9 @@ For production, update `GOOGLE_REDIRECT_URI` in `.env` to match your actual doma
 
 - On first login, the app syncs all your YouTube subscriptions and fetches recent videos
 - Two polling loops run in the background:
-  - **Normal** (30 min cycle): rotates through all channels
-  - **Fast** (10 min cycle): for channels you mark as "fast polling"
-- A daily sync checks for new/removed subscriptions
+  - **New video detection** (15 min cycle): RSS-First strategy for all `show_livestreams=0` channels — only calls the YouTube API when RSS detects new videos
+  - **Livestream detection** (5 min cycle): API-direct polling for `show_livestreams=1` channels, with livestream end detection
+- Subscription list syncs every 10 minutes
 - Videos can be organized into groups, hidden via swipe, and filtered by type (Shorts, livestreams)
 
 ## Environment Variables
@@ -135,15 +117,12 @@ For production, update `GOOGLE_REDIRECT_URI` in `.env` to match your actual doma
 | `GOOGLE_CLIENT_ID` | — | Google OAuth client ID (required) |
 | `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret (required) |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/callback` | OAuth callback URL |
-| `DISCORD_TOKEN` | — | Discord bot token (optional) |
-| `DISCORD_CHANNEL_ID` | — | Discord channel for notifications (optional) |
+| `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL (optional) |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `bun run setup` | Install dependencies and create `.env` |
-| `bun run dev` | Start dev server with frontend hot rebuild |
-| `bun run build` | Build frontend for production |
-| `bun start` | Start production server |
-| `bun test` | Run all tests |
+| `./bin/dev` | Start dev server with frontend hot rebuild |
+| `cargo build --release` | Build for production |
+| `cargo test` | Run all tests |

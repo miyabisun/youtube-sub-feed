@@ -21,6 +21,5 @@ COPY --from=backend /app/target/release/youtube-sub-feed /usr/local/bin/
 COPY --from=frontend /app/client/build /app/client/build
 WORKDIR /app
 ENV PORT=3000
-ENV NODE_ENV=production
 EXPOSE 3000
 CMD ["youtube-sub-feed"]

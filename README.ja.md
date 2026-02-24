@@ -1,10 +1,20 @@
 # youtube-sub-feed
 
+> English documentation: [README.md](./README.md)
+
 YouTube の登録チャンネルの最新動画を、レコメンドアルゴリズムなしで時系列に閲覧する個人用 Web アプリ。
+
+## 技術スタック
+
+- **バックエンド**: Rust (axum + tokio)
+- **データベース**: SQLite (rusqlite)
+- **フロントエンド**: Svelte 5 + Vite
+- **通知**: Discord Webhook
 
 ## 前提条件
 
-- [Bun](https://bun.sh/) v1.0 以上
+- [Rust](https://rustup.rs/)（stable）
+- [Node.js](https://nodejs.org/) v22 以上（フロントエンドビルド用）
 - YouTube チャンネルを登録している Google アカウント
 
 ## セットアップ
@@ -31,13 +41,9 @@ YouTube Data API を有効にし、OAuth 2.0 クライアント認証情報を�
 
 > **注意:** 同意画面のステータスが「テスト」の間は、追加したテストユーザーのみがログインできます。個人利用であればこのままで問題ありません。
 
-### 2. インストールと設定
+### 2. 設定
 
-```bash
-bun run setup
-```
-
-依存関係がインストールされ、`.env.example` から `.env` が作成されます。`.env` を編集：
+`.env.example` を `.env` にコピーし、認証情報を入力：
 
 ```env
 PORT=3000
@@ -51,13 +57,14 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/callback
 
 ```bash
 # 開発（フロントエンドのホットリビルド付き）
-bun run dev
+./bin/dev
 
 # — または —
 
 # 本番
-bun run build
-bun start
+cd client && npm install && npx vite build && cd ..
+cargo build --release
+./target/release/youtube-sub-feed
 ```
 
 `http://localhost:3000` を開き、「Google でログイン」をクリックして認可します。登録チャンネルの同期と動画の取得が自動的に開始されます。
@@ -66,42 +73,18 @@ bun start
 
 新しい動画が検出されたときに Discord 通知を受け取るための設定：
 
-1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセス
-2. 新しいアプリケーションを作成し、**Bot** タブを開く
-3. **Reset Token** をクリックしてボットトークンをコピー
-4. Privileged Gateway Intents で **MESSAGE CONTENT INTENT** を有効化（厳密には不要だが推奨）
-5. **OAuth2 > URL Generator** を開く
-   - Scopes: `bot`
-   - Bot Permissions: `Send Messages`, `Embed Links`
-   - 生成された URL を開いてボットをサーバーに招待
-6. Discord で開発者モードを有効化（設定 > 詳細設定）し、通知先チャンネルを右クリックして **チャンネル ID をコピー**
+1. Discord サーバーの **サーバー設定 > 連携サービス > ウェブフック** を開く
+2. **新しいウェブフック** をクリックし、チャンネルを選択して **ウェブフック URL をコピー**
 
 `.env` に追加：
 
 ```env
-DISCORD_TOKEN=your-bot-token
-DISCORD_CHANNEL_ID=your-channel-id
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx
 ```
 
 サーバーを再起動すると、ポーリングで新着動画が検出されるたびに Embed が送信されます。
 
 ## Docker
-
-`main` ブランチへのプッシュごとに、ビルド済みイメージが GitHub Container Registry に公開されます。
-
-```bash
-docker pull ghcr.io/miyabisun/youtube-sub-feed:latest
-
-docker run -d \
-  --name youtube-sub-feed \
-  -p 3000:3000 \
-  -v ytfeed-data:/app \
-  --env-file .env \
-  -e NODE_ENV=production \
-  ghcr.io/miyabisun/youtube-sub-feed:latest
-```
-
-ローカルでビルドする場合：
 
 ```bash
 docker build -t youtube-sub-feed .
@@ -111,7 +94,6 @@ docker run -d \
   -p 3000:3000 \
   -v ytfeed-data:/app \
   --env-file .env \
-  -e NODE_ENV=production \
   youtube-sub-feed
 ```
 
@@ -121,9 +103,9 @@ docker run -d \
 
 - 初回ログイン時に YouTube の登録チャンネルをすべて同期し、最新の動画を取得
 - バックグラウンドで 2 つのポーリングループが稼働：
-  - **通常巡回**（30 分/周）: 全チャンネルをローテーション
-  - **高頻度巡回**（10 分/周）: 「高頻度巡回」に設定したチャンネルのみ
-- 1 日 1 回の同期でチャンネルの登録・解除を反映
+  - **新着検知**（15 分/周）: `show_livestreams=0` の全チャンネルを RSS-First 戦略で巡回 — RSS で新着を検知したチャンネルのみ YouTube API を呼び出し
+  - **ライブ察知**（5 分/周）: `show_livestreams=1` のチャンネルのみ API 直叩きで巡回 + ライブ終了検知
+- 登録チャンネルリストは 10 分ごとに同期
 - 動画はグループで整理、スワイプで非表示、種別（ショート・ライブ配信）でフィルタ可能
 
 ## 環境変数
@@ -135,15 +117,12 @@ docker run -d \
 | `GOOGLE_CLIENT_ID` | — | Google OAuth クライアント ID（必須） |
 | `GOOGLE_CLIENT_SECRET` | — | Google OAuth クライアントシークレット（必須） |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/callback` | OAuth コールバック URL |
-| `DISCORD_TOKEN` | — | Discord ボットトークン（オプション） |
-| `DISCORD_CHANNEL_ID` | — | 通知先の Discord チャンネル ID（オプション） |
+| `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL（オプション） |
 
 ## コマンド
 
 | コマンド | 説明 |
 |---------|------|
-| `bun run setup` | 依存関係のインストールと `.env` の作成 |
-| `bun run dev` | 開発サーバー起動（フロントエンドのホットリビルド付き） |
-| `bun run build` | フロントエンドの本番ビルド |
-| `bun start` | 本番サーバー起動 |
-| `bun test` | 全テスト実行 |
+| `./bin/dev` | 開発サーバー起動（フロントエンドのホットリビルド付き） |
+| `cargo build --release` | 本番ビルド |
+| `cargo test` | 全テスト実行 |
