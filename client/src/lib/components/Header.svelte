@@ -1,5 +1,5 @@
 <script>
-	import { router, link } from '$lib/router.svelte.js';
+	import { router, link, navigate } from '$lib/router.svelte.js';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 
@@ -13,16 +13,31 @@
 
 	loadGroups();
 
+	let selectValue = $state('');
+	$effect(() => {
+		selectValue = router.index === 1 ? router.params.id : '';
+	});
+
 	function isActive(href) {
 		if (href === '/') return router.index === 0;
 		if (href.startsWith('/group/')) return router.index === 1 && router.params.id === href.split('/')[2];
-		if (href === '/channels') return router.index === 2;
 		if (href === '/settings') return router.index === 5;
 		return false;
+	}
+
+	function onGroupSelect(e) {
+		const value = e.target.value;
+		navigate(value ? `/group/${value}` : '/');
 	}
 </script>
 
 <header>
+	<select class="group-select" bind:value={selectValue} onchange={onGroupSelect}>
+		<option value="">すべて</option>
+		{#each groups as group}
+			<option value={group.id}>{group.name}</option>
+		{/each}
+	</select>
 	<nav class="nav-tabs">
 		<a class="nav-item" class:active={isActive('/')} href={link('/')}>すべて</a>
 		{#each groups as group}
@@ -30,7 +45,6 @@
 		{/each}
 	</nav>
 	<nav class="nav-right">
-		<a class="nav-item" class:active={isActive('/channels')} href={link('/channels')}>チャンネル</a>
 		<a class="nav-item" class:active={isActive('/settings')} href={link('/settings')}>設定</a>
 	</nav>
 </header>
@@ -44,6 +58,22 @@ header
 	background: var(--c-bg)
 	overflow-x: auto
 	-webkit-overflow-scrolling: touch
+
+.group-select
+	display: none
+	flex: 1
+	min-width: 0
+	margin: var(--sp-2) var(--sp-3)
+	padding: var(--sp-3) var(--sp-4)
+	background: var(--c-surface)
+	color: var(--c-text)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-md)
+	font-size: var(--fs-sm)
+
+	&:focus
+		outline: none
+		border-color: var(--c-accent)
 
 .nav-tabs
 	display: flex
@@ -78,4 +108,11 @@ header
 	&.active
 		color: var(--c-text)
 		border-bottom-color: var(--c-accent)
+
+@media (max-width: 799px)
+	.group-select
+		display: block
+
+	.nav-tabs
+		display: none
 </style>

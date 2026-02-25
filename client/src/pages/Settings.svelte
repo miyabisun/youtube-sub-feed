@@ -1,4 +1,5 @@
 <script>
+	import { link } from '$lib/router.svelte.js';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -167,6 +168,11 @@
 	{#if loading}
 		<Spinner />
 	{:else}
+		<section class="section">
+			<h2>メニュー</h2>
+			<a class="menu-link" href={link('/channels')}>チャンネル一覧</a>
+		</section>
+
 		<section class="section">
 			<h2>グループ管理</h2>
 
@@ -385,4 +391,17 @@
 
 	&:hover
 		background: var(--c-accent-hover)
+
+.menu-link
+	display: block
+	padding: var(--sp-3)
+	background: var(--c-surface)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-md)
+	color: var(--c-text)
+	text-decoration: none
+	font-size: var(--fs-md)
+
+	&:hover
+		background: var(--c-overlay-1)
 </style>
