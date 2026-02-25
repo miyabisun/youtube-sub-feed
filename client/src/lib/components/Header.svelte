@@ -35,7 +35,7 @@
 	<select class="group-select" bind:value={selectValue} onchange={onGroupSelect}>
 		<option value="">すべて</option>
 		{#each groups as group}
-			<option value={group.id}>{group.name}</option>
+			<option value={String(group.id)}>{group.name}</option>
 		{/each}
 	</select>
 	<nav class="nav-tabs">
