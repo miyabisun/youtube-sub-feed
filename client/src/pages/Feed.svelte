@@ -55,6 +55,13 @@
 		}
 	}
 
+	const PLAY_ALL_LIMIT = 20;
+
+	function openPlayAll() {
+		const ids = videos.filter(v => !v.is_short).slice(0, PLAY_ALL_LIMIT).map(v => v.id).join(',');
+		window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`);
+	}
+
 	async function loadGroups() {
 		try {
 			groups = await fetcher(`${config.path.api}/groups`);
@@ -104,6 +111,12 @@
 	{:else if videos.length === 0}
 		<p class="empty">動画がありません</p>
 	{:else}
+		{@const playableCount = videos.filter(v => !v.is_short).length}
+		{#if playableCount > 0}
+			<button class="play-all-btn" onclick={openPlayAll}>
+				▶ 連続再生 ({Math.min(playableCount, PLAY_ALL_LIMIT)}本)
+			</button>
+		{/if}
 		<div class="video-list">
 			{#each videos as video (video.id)}
 				<div class="video-wrapper">
@@ -167,6 +180,20 @@
 		background: var(--c-danger-bg)
 		color: var(--c-danger)
 		border-color: var(--c-danger-border)
+
+.play-all-btn
+	display: block
+	margin-bottom: var(--sp-3)
+	padding: var(--sp-2) var(--sp-4)
+	background: var(--c-surface)
+	color: var(--c-text)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
+	font-size: var(--fs-sm)
+	cursor: pointer
+
+	&:hover
+		opacity: 0.8
 
 .empty
 	text-align: center
