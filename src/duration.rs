@@ -14,7 +14,7 @@ pub fn parse_iso_duration(iso: &str) -> u64 {
 
 pub fn is_short_duration(iso: &str) -> bool {
     let seconds = parse_iso_duration(iso);
-    seconds > 0 && seconds <= 60
+    seconds > 0 && seconds <= 180
 }
 
 #[cfg(test)]
@@ -51,12 +51,17 @@ mod tests {
         assert!(is_short_duration("PT30S"));
         assert!(is_short_duration("PT1M"));
         assert!(is_short_duration("PT60S"));
+        assert!(is_short_duration("PT1M30S"));
+        assert!(is_short_duration("PT2M"));
+        assert!(is_short_duration("PT3M"));
+        assert!(is_short_duration("PT180S"));
     }
 
     #[test]
     fn test_is_short_false() {
-        assert!(!is_short_duration("PT61S"));
-        assert!(!is_short_duration("PT2M"));
+        assert!(!is_short_duration("PT3M1S"));
+        assert!(!is_short_duration("PT181S"));
+        assert!(!is_short_duration("PT4M"));
         assert!(!is_short_duration("PT0S"));
     }
 
@@ -76,9 +81,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_short_boundary_60s() {
-        assert!(is_short_duration("PT60S"));
-        assert!(is_short_duration("PT1M"));
-        assert!(!is_short_duration("PT1M1S"));
+    fn test_is_short_boundary_180s() {
+        assert!(is_short_duration("PT180S"));
+        assert!(is_short_duration("PT3M"));
+        assert!(!is_short_duration("PT3M1S"));
     }
 }

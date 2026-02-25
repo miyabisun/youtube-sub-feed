@@ -125,10 +125,11 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
    - `liveStreamingDetails.actualEndTime` → `livestream_ended_at` に保存（NULL なら配信中）
    - duration, is_short は変更されないため、新着時のみ取得すれば十分
    - ライブ配信の終了検知: ライブ察知ループ（5分/周）で `is_livestream=1 AND livestream_ended_at IS NULL` の動画を Videos.list で再取得し、終了日時を更新
-4. 新着動画のうち duration ≤ 60秒のものについて、ショート動画判定を実施
+4. 新着動画のうち duration ≤ 3分（180秒）のものについて、ショート動画判定を実施
+   - 2024年10月15日に YouTube Shorts の上限が 60秒 → 3分に拡大
    - チャンネルIDから `UUSH` プレイリスト（Shorts専用）を `PlaylistItems.list` で取得
    - そのプレイリストに含まれていれば `is_short = 1`
-   - `UUSH` は非公式機能のため、取得失敗時は duration ≤ 60秒 をフォールバック判定とする
+   - `UUSH` は非公式機能のため、取得失敗時は `is_short = 0`（通常動画扱い）
    - UUSH プレイリストの取得結果はチャンネル単位でメモリキャッシュし、同一巡回内での重複取得を防止
    - キャッシュは新着検知ループ1周完了ごとにクリア
 
@@ -188,7 +189,7 @@ YouTube の公開 RSS フィード（`https://www.youtube.com/feeds/videos.xml?c
 
 - 通常動画と混ぜてフィードに表示
 - カード上に「Shorts」ラベルを表示して区別
-- 判定方法: UUSH プレイリスト照合（非公式、失敗時は duration ≤ 60秒 でフォールバック）
+- 判定方法: UUSH プレイリスト照合（非公式、取得失敗時は通常動画扱い）
 - リンク先: `https://www.youtube.com/shorts/VIDEO_ID`（通常動画とは異なるURL）
 
 ### キャッシュ・データ永続化
