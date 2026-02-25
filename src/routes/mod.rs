@@ -27,11 +27,13 @@ pub fn build_router(state: AppState) -> Router {
             auth_middleware,
         ));
 
+    let serve_static = ServeDir::new("client/build")
+        .fallback(get(spa_fallback));
+
     Router::new()
         .merge(public)
         .merge(protected)
-        .nest_service("/assets", ServeDir::new("client/build/assets"))
-        .fallback(get(spa_fallback))
+        .fallback_service(serve_static)
         .layer(CookieManagerLayer::new())
         .with_state(state)
 }
