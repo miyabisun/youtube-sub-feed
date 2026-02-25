@@ -57,8 +57,8 @@
 
 	const PLAY_ALL_LIMIT = 20;
 
-	function openPlayAll() {
-		const ids = videos.filter(v => !v.is_short).slice(0, PLAY_ALL_LIMIT).map(v => v.id).join(',');
+	function openPlayAll(shortsOnly = false) {
+		const ids = videos.filter(v => shortsOnly ? v.is_short : !v.is_short).slice(0, PLAY_ALL_LIMIT).map(v => v.id).join(',');
 		window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`);
 	}
 
@@ -111,11 +111,21 @@
 	{:else if videos.length === 0}
 		<p class="empty">動画がありません</p>
 	{:else}
-		{@const playableCount = videos.filter(v => !v.is_short).length}
-		{#if playableCount > 0}
-			<button class="play-all-btn" onclick={openPlayAll}>
-				▶ 連続再生 ({Math.min(playableCount, PLAY_ALL_LIMIT)}本)
-			</button>
+		{@const normalCount = videos.filter(v => !v.is_short).length}
+		{@const shortsCount = videos.filter(v => v.is_short).length}
+		{#if normalCount > 0 || shortsCount > 0}
+			<div class="play-all-bar">
+				{#if normalCount > 0}
+					<button class="play-all-btn" onclick={() => openPlayAll()}>
+						▶ 連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
+					</button>
+				{/if}
+				{#if shortsCount > 0}
+					<button class="play-all-btn" onclick={() => openPlayAll(true)}>
+						▶ Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
+					</button>
+				{/if}
+			</div>
 		{/if}
 		<div class="video-list">
 			{#each videos as video (video.id)}
@@ -181,9 +191,12 @@
 		color: var(--c-danger)
 		border-color: var(--c-danger-border)
 
-.play-all-btn
-	display: block
+.play-all-bar
+	display: flex
+	gap: var(--sp-2)
 	margin-bottom: var(--sp-3)
+
+.play-all-btn
 	padding: var(--sp-2) var(--sp-4)
 	background: var(--c-surface)
 	color: var(--c-text)
