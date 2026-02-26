@@ -224,6 +224,13 @@
 									<img class="channel-icon" src={ch.thumbnail_url} alt="" />
 								{/if}
 								<span class="channel-name">{ch.title}</span>
+								{#if ch.group_names}
+									<span class="group-labels">
+										{#each ch.group_names.split(', ') as name}
+											<span class="group-label">{name}</span>
+										{/each}
+									</span>
+								{/if}
 								<a class="yt-link" href="https://www.youtube.com/channel/{ch.id}" target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>YT</a>
 							</div>
 							<div class="video-accordion" class:open={expandedChannel === ch.id}>
@@ -406,6 +413,20 @@
 	min-width: 0
 	overflow: hidden
 	text-overflow: ellipsis
+	white-space: nowrap
+
+.group-labels
+	display: flex
+	gap: var(--sp-1)
+	flex-shrink: 0
+
+.group-label
+	padding: 1px var(--sp-2)
+	font-size: var(--fs-xs)
+	color: var(--c-text-muted)
+	background: var(--c-surface)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
 	white-space: nowrap
 
 .yt-link
