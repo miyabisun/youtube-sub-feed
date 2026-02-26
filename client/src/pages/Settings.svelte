@@ -21,6 +21,12 @@
 	let expandedChannel = $state(null);
 	let videoCache = $state({});
 
+	// Filter state
+	let showUnassignedOnly = $state(false);
+	let filteredChannels = $derived(
+		showUnassignedOnly ? channels.filter((ch) => !ch.group_names) : channels
+	);
+
 	async function loadData() {
 		try {
 			[groups, channels] = await Promise.all([
@@ -199,7 +205,8 @@
 							/>
 						{:else}
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<span class="group-name" ondblclick={() => editingGroup = { id: group.id, name: group.name }}>{group.name}</span>
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<span class="group-name" onclick={() => editingGroup = { id: group.id, name: group.name }}>{group.name}</span>
 						{/if}
 						<div class="group-actions">
 							<button class="btn-assign" class:active={selectedGroup === group.id} onclick={() => selectGroup(group.id)}>割当</button>
@@ -212,9 +219,12 @@
 
 		{#if selectedGroup}
 			<section class="section">
-				<h2>チャンネル割り当て: {groups.find(g => g.id === selectedGroup)?.name}</h2>
+				<div class="assign-header">
+					<h2>チャンネル割り当て: {groups.find(g => g.id === selectedGroup)?.name}</h2>
+					<button class="btn-filter" class:active={showUnassignedOnly} onclick={() => showUnassignedOnly = !showUnassignedOnly}>未割当のみ</button>
+				</div>
 				<div class="channel-assign-list">
-					{#each channels as ch (ch.id)}
+					{#each filteredChannels as ch (ch.id)}
 						<div class="assign-card">
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -379,6 +389,33 @@
 	margin-bottom: var(--sp-4)
 	border: 1px solid var(--c-border)
 	border-radius: var(--radius-md)
+
+.assign-header
+	display: flex
+	align-items: center
+	gap: var(--sp-3)
+	margin-bottom: var(--sp-4)
+
+	h2
+		margin: 0
+
+.btn-filter
+	padding: var(--sp-2) var(--sp-3)
+	font-size: var(--fs-xs)
+	color: var(--c-text-sub)
+	background: transparent
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
+	cursor: pointer
+	white-space: nowrap
+
+	&:hover
+		color: var(--c-text)
+
+	&.active
+		color: var(--c-accent)
+		border-color: var(--c-accent-border)
+		background: var(--c-accent-bg)
 
 .assign-card
 	border-bottom: 1px solid var(--c-border)
