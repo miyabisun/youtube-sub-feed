@@ -24,7 +24,7 @@
 	// Filter state
 	let showUnassignedOnly = $state(false);
 	let filteredChannels = $derived(
-		showUnassignedOnly ? channels.filter((ch) => !ch.group_names) : channels
+		showUnassignedOnly ? channels.filter((ch) => !ch.group_names || channelAssignments[ch.id]) : channels
 	);
 
 	async function loadData() {
