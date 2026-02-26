@@ -218,14 +218,13 @@
 						<div class="assign-card">
 							<!-- svelte-ignore a11y_no_static_element_interactions -->
 							<!-- svelte-ignore a11y_click_events_have_key_events -->
-							<div class="assign-row" onclick={() => { channelAssignments[ch.id] = !channelAssignments[ch.id]; }}>
+							<div class="assign-row" onclick={() => toggleExpand(ch.id)}>
 								<input type="checkbox" bind:checked={channelAssignments[ch.id]} onclick={(e) => e.stopPropagation()} />
 								{#if ch.thumbnail_url}
 									<img class="channel-icon" src={ch.thumbnail_url} alt="" />
 								{/if}
 								<span class="channel-name">{ch.title}</span>
 								<a class="yt-link" href="https://www.youtube.com/channel/{ch.id}" target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>YT</a>
-								<button class="btn-expand" class:expanded={expandedChannel === ch.id} onclick={(e) => { e.stopPropagation(); toggleExpand(ch.id); }}>▼</button>
 							</div>
 							<div class="video-accordion" class:open={expandedChannel === ch.id}>
 								<div class="video-accordion-inner">
@@ -422,22 +421,6 @@
 	&:hover
 		color: var(--c-accent)
 		border-color: var(--c-accent-border)
-
-.btn-expand
-	flex-shrink: 0
-	background: transparent
-	border: none
-	color: var(--c-text-sub)
-	cursor: pointer
-	font-size: var(--fs-xs)
-	padding: var(--sp-1) var(--sp-2)
-	transition: transform 0.2s ease
-
-	&.expanded
-		transform: rotate(180deg)
-
-	&:hover
-		color: var(--c-text)
 
 .video-accordion
 	display: grid
