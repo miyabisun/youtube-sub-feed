@@ -21,6 +21,7 @@
 	function isActive(href) {
 		if (href === '/') return router.index === 0;
 		if (href.startsWith('/group/')) return router.index === 1 && router.params.id === href.split('/')[2];
+		if (href === '/channels') return router.index === 2;
 		if (href === '/settings') return router.index === 5;
 		return false;
 	}
@@ -45,6 +46,7 @@
 		{/each}
 	</nav>
 	<nav class="nav-right">
+		<a class="nav-item" class:active={isActive('/channels')} href={link('/channels')}>CH</a>
 		<a class="nav-item" class:active={isActive('/settings')} href={link('/settings')}>設定</a>
 	</nav>
 </header>

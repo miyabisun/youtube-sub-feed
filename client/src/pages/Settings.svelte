@@ -1,5 +1,4 @@
 <script>
-	import { link } from '$lib/router.svelte.js';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -17,6 +16,10 @@
 	// Drag state
 	let dragIndex = $state(null);
 	let dragOverIndex = $state(null);
+
+	// Accordion state
+	let expandedChannel = $state(null);
+	let videoCache = $state({});
 
 	async function loadData() {
 		try {
@@ -88,6 +91,7 @@
 
 	async function selectGroup(groupId) {
 		selectedGroup = groupId;
+		expandedChannel = null;
 		try {
 			const assignedIds = await fetcher(`${config.path.api}/groups/${groupId}/channels`);
 			const assignedSet = new Set(assignedIds);
@@ -113,6 +117,21 @@
 			loadData();
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
+		}
+	}
+
+	async function toggleExpand(channelId) {
+		if (expandedChannel === channelId) {
+			expandedChannel = null;
+			return;
+		}
+		expandedChannel = channelId;
+		if (!videoCache[channelId]) {
+			try {
+				videoCache[channelId] = await fetcher(`${config.path.api}/channels/${channelId}/videos?limit=3`);
+			} catch {
+				videoCache[channelId] = [];
+			}
 		}
 	}
 
@@ -142,25 +161,6 @@
 		dragOverIndex = null;
 	}
 
-	// Touch drag
-	let touchStartY = null;
-	let touchDragIndex = null;
-
-	function onTouchStart(e, index) {
-		touchStartY = e.touches[0].clientY;
-		touchDragIndex = index;
-	}
-
-	function onTouchMove(e) {
-		if (touchDragIndex === null) return;
-		e.preventDefault();
-	}
-
-	function onTouchEnd(e, index) {
-		touchDragIndex = null;
-		touchStartY = null;
-	}
-
 	loadData();
 </script>
 
@@ -168,11 +168,6 @@
 	{#if loading}
 		<Spinner />
 	{:else}
-		<section class="section">
-			<h2>メニュー</h2>
-			<a class="menu-link" href={link('/channels')}>チャンネル一覧</a>
-		</section>
-
 		<section class="section">
 			<h2>グループ管理</h2>
 
@@ -220,13 +215,41 @@
 				<h2>チャンネル割り当て: {groups.find(g => g.id === selectedGroup)?.name}</h2>
 				<div class="channel-assign-list">
 					{#each channels as ch (ch.id)}
-						<label class="assign-item">
-							<input type="checkbox" bind:checked={channelAssignments[ch.id]} />
-							{#if ch.thumbnail_url}
-								<img class="channel-icon" src={ch.thumbnail_url} alt="" />
-							{/if}
-							<span>{ch.title}</span>
-						</label>
+						<div class="assign-card">
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<div class="assign-row" onclick={() => { channelAssignments[ch.id] = !channelAssignments[ch.id]; }}>
+								<input type="checkbox" bind:checked={channelAssignments[ch.id]} onclick={(e) => e.stopPropagation()} />
+								{#if ch.thumbnail_url}
+									<img class="channel-icon" src={ch.thumbnail_url} alt="" />
+								{/if}
+								<span class="channel-name">{ch.title}</span>
+								<a class="yt-link" href="https://www.youtube.com/channel/{ch.id}" target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>YT</a>
+								<button class="btn-expand" class:expanded={expandedChannel === ch.id} onclick={(e) => { e.stopPropagation(); toggleExpand(ch.id); }}>▼</button>
+							</div>
+							<div class="video-accordion" class:open={expandedChannel === ch.id}>
+								<div class="video-accordion-inner">
+									{#if expandedChannel === ch.id && videoCache[ch.id]}
+										{#if videoCache[ch.id].length === 0}
+											<p class="no-videos">動画がありません</p>
+										{:else}
+											<div class="video-thumbs">
+												{#each videoCache[ch.id] as video}
+													<a class="video-thumb" href="https://www.youtube.com/watch?v={video.id}" target="_blank" rel="noopener">
+														{#if video.thumbnail_url}
+															<img src={video.thumbnail_url} alt={video.title} loading="lazy" />
+														{:else}
+															<div class="thumb-placeholder"></div>
+														{/if}
+														<span class="video-title">{video.title}</span>
+													</a>
+												{/each}
+											</div>
+										{/if}
+									{/if}
+								</div>
+							</div>
+						</div>
 					{/each}
 				</div>
 				<button class="save-btn" onclick={saveChannelAssignments}>保存</button>
@@ -244,8 +267,6 @@
 <style lang="sass">
 .settings-page
 	padding: var(--sp-3) var(--sp-4)
-	max-width: 640px
-	margin: 0 auto
 
 .section
 	margin-bottom: var(--sp-6)
@@ -349,36 +370,127 @@
 		background: var(--c-danger-bg)
 
 .channel-assign-list
-	max-height: 400px
-	overflow-y: auto
 	margin-bottom: var(--sp-4)
 	border: 1px solid var(--c-border)
 	border-radius: var(--radius-md)
 
-.assign-item
+.assign-card
+	border-bottom: 1px solid var(--c-border)
+
+	&:last-child
+		border-bottom: none
+
+.assign-row
 	display: flex
 	align-items: center
 	gap: var(--sp-3)
 	padding: var(--sp-3) var(--sp-4)
 	cursor: pointer
-	border-bottom: 1px solid var(--c-border)
 	font-size: var(--fs-sm)
-
-	&:last-child
-		border-bottom: none
 
 	&:hover
 		background: var(--c-overlay-1)
 
 	input
 		accent-color: var(--c-accent)
+		flex-shrink: 0
 
 .channel-icon
-	width: 24px
-	height: 24px
+	width: 32px
+	height: 32px
 	border-radius: 50%
 	object-fit: cover
 	flex-shrink: 0
+
+.channel-name
+	flex: 1
+	min-width: 0
+	overflow: hidden
+	text-overflow: ellipsis
+	white-space: nowrap
+
+.yt-link
+	flex-shrink: 0
+	padding: var(--sp-1) var(--sp-3)
+	font-size: var(--fs-xs)
+	color: var(--c-text-sub)
+	text-decoration: none
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
+	white-space: nowrap
+
+	&:hover
+		color: var(--c-accent)
+		border-color: var(--c-accent-border)
+
+.btn-expand
+	flex-shrink: 0
+	background: transparent
+	border: none
+	color: var(--c-text-sub)
+	cursor: pointer
+	font-size: var(--fs-xs)
+	padding: var(--sp-1) var(--sp-2)
+	transition: transform 0.2s ease
+
+	&.expanded
+		transform: rotate(180deg)
+
+	&:hover
+		color: var(--c-text)
+
+.video-accordion
+	display: grid
+	grid-template-rows: 0fr
+	transition: grid-template-rows 0.25s ease
+
+	&.open
+		grid-template-rows: 1fr
+
+.video-accordion-inner
+	overflow: hidden
+
+.video-thumbs
+	display: flex
+	gap: var(--sp-3)
+	padding: var(--sp-3) var(--sp-4) var(--sp-4)
+
+.video-thumb
+	flex: 1
+	min-width: 0
+	text-decoration: none
+	color: var(--c-text)
+
+	img
+		width: 100%
+		aspect-ratio: 16 / 9
+		object-fit: cover
+		border-radius: var(--radius-sm)
+		display: block
+
+	&:hover img
+		opacity: 0.8
+
+.thumb-placeholder
+	width: 100%
+	aspect-ratio: 16 / 9
+	background: var(--c-surface)
+	border-radius: var(--radius-sm)
+
+.video-title
+	display: block
+	font-size: var(--fs-xs)
+	color: var(--c-text-sub)
+	margin-top: var(--sp-1)
+	overflow: hidden
+	text-overflow: ellipsis
+	white-space: nowrap
+
+.no-videos
+	padding: var(--sp-3) var(--sp-4)
+	color: var(--c-text-muted)
+	font-size: var(--fs-sm)
+	margin: 0
 
 .save-btn
 	padding: var(--sp-3) var(--sp-5)
@@ -391,17 +503,4 @@
 
 	&:hover
 		background: var(--c-accent-hover)
-
-.menu-link
-	display: block
-	padding: var(--sp-3)
-	background: var(--c-surface)
-	border: 1px solid var(--c-border)
-	border-radius: var(--radius-md)
-	color: var(--c-text)
-	text-decoration: none
-	font-size: var(--fs-md)
-
-	&:hover
-		background: var(--c-overlay-1)
 </style>
