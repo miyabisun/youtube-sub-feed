@@ -1,15 +1,8 @@
 <script>
 	import { router, link, navigate } from '$lib/router.svelte.js';
-	import config from '$lib/config.js';
-	import fetcher from '$lib/fetcher.js';
+	import { getGroups, loadGroups } from '$lib/groups.svelte.js';
 
-	let groups = $state([]);
-
-	async function loadGroups() {
-		try {
-			groups = await fetcher(`${config.path.api}/groups`);
-		} catch {}
-	}
+	let groups = $derived(getGroups());
 
 	loadGroups();
 

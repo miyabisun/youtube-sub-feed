@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
+	import { getGroups, loadGroups } from '$lib/groups.svelte.js';
 	import VideoCard from '$lib/components/VideoCard.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
@@ -9,7 +10,7 @@
 	import { navigate } from '$lib/router.svelte.js';
 
 	let { groupId = null } = $props();
-	let groups = $state([]);
+	let groups = $derived(getGroups());
 
 	let videos = $state([]);
 	let loading = $state(false);
@@ -60,12 +61,6 @@
 	function openPlayAll(shortsOnly = false) {
 		const ids = videos.filter(v => shortsOnly ? v.is_short : !v.is_short).slice(0, PLAY_ALL_LIMIT).map(v => v.id).join(',');
 		window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`);
-	}
-
-	async function loadGroups() {
-		try {
-			groups = await fetcher(`${config.path.api}/groups`);
-		} catch (_) {}
 	}
 
 	function swipeLeft() {

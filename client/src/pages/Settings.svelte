@@ -1,6 +1,7 @@
 <script>
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
+	import { setGroups } from '$lib/groups.svelte.js';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -33,6 +34,7 @@
 				fetcher(`${config.path.api}/groups`),
 				fetcher(`${config.path.api}/channels`),
 			]);
+			setGroups(groups);
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
 		}
@@ -48,6 +50,7 @@
 				body: JSON.stringify({ name: newGroupName.trim() }),
 			});
 			groups = [...groups, group];
+			setGroups(groups);
 			newGroupName = '';
 			toast = { message: '作成しました', type: 'success' };
 		} catch (e) {
@@ -64,6 +67,7 @@
 				body: JSON.stringify({ name: editingGroup.name }),
 			});
 			groups = groups.map((g) => g.id === id ? { ...g, name: editingGroup.name } : g);
+			setGroups(groups);
 			editingGroup = null;
 			toast = { message: '更新しました', type: 'success' };
 		} catch (e) {
@@ -75,6 +79,7 @@
 		try {
 			await fetcher(`${config.path.api}/groups/${id}`, { method: 'DELETE' });
 			groups = groups.filter((g) => g.id !== id);
+			setGroups(groups);
 			if (selectedGroup === id) selectedGroup = null;
 			toast = { message: '削除しました', type: 'success' };
 		} catch (e) {
@@ -157,6 +162,7 @@
 		const [moved] = items.splice(dragIndex, 1);
 		items.splice(index, 0, moved);
 		groups = items;
+		setGroups(groups);
 		dragIndex = null;
 		dragOverIndex = null;
 		reorderGroups();
