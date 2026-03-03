@@ -5,6 +5,9 @@
 
 	let { video } = $props();
 
+	let videoUrl = $derived(getVideoUrl(video));
+	let label = $derived(getLabel(video));
+
 	function getVideoUrl(v) {
 		if (v.is_short) return `https://www.youtube.com/shorts/${v.id}`;
 		return `https://www.youtube.com/watch?v=${v.id}`;
@@ -31,7 +34,7 @@
 </script>
 
 <div class="video-card">
-	<a class="thumbnail-link" href={getVideoUrl(video)} target="_blank" rel="noopener">
+	<a class="thumbnail-link" href={videoUrl} target="_blank" rel="noopener">
 		<div class="thumbnail-wrap">
 			{#if video.thumbnail_url}
 				<img class="thumbnail" src={hqThumbnail(video.thumbnail_url)} alt="" loading="lazy" />
@@ -39,13 +42,13 @@
 			{#if video.duration}
 				<span class="duration">{formatDuration(video.duration)}</span>
 			{/if}
-			{#if getLabel(video)}
-				<span class="label {getLabelClass(video)}">{getLabel(video)}</span>
+			{#if label}
+				<span class="label {getLabelClass(video)}">{label}</span>
 			{/if}
 		</div>
 	</a>
 	<div class="info">
-		<a class="title" href={getVideoUrl(video)} target="_blank" rel="noopener">{video.title}</a>
+		<a class="title" href={videoUrl} target="_blank" rel="noopener">{video.title}</a>
 		<div class="meta">
 			{#if video.channel_title}
 				<a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>

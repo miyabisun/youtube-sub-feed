@@ -6,10 +6,7 @@
 
 	loadGroups();
 
-	let selectValue = $state('');
-	$effect(() => {
-		selectValue = router.index === 1 ? router.params.id : '';
-	});
+	let selectValue = $derived(router.index === 1 ? router.params.id : '');
 
 	function isActive(href) {
 		if (href === '/') return router.index === 0;
@@ -26,7 +23,7 @@
 </script>
 
 <header>
-	<select class="group-select" bind:value={selectValue} onchange={onGroupSelect}>
+	<select class="group-select" value={selectValue} onchange={onGroupSelect}>
 		<option value="">すべて</option>
 		{#each groups as group}
 			<option value={String(group.id)}>{group.name}</option>

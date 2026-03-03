@@ -45,21 +45,13 @@
 		}
 	}
 
-	async function hideVideo(id) {
+	async function setVideoHidden(id, hide) {
+		const action = hide ? 'hide' : 'unhide';
+		const message = hide ? '非表示にしました' : '復元しました';
 		try {
-			await fetcher(`${config.path.api}/videos/${id}/hide`, { method: 'PATCH' });
-			videos = videos.map((v) => v.id === id ? { ...v, is_hidden: 1 } : v);
-			toast = { message: '非表示にしました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
-
-	async function unhideVideo(id) {
-		try {
-			await fetcher(`${config.path.api}/videos/${id}/unhide`, { method: 'PATCH' });
-			videos = videos.map((v) => v.id === id ? { ...v, is_hidden: 0 } : v);
-			toast = { message: '復元しました', type: 'success' };
+			await fetcher(`${config.path.api}/videos/${id}/${action}`, { method: 'PATCH' });
+			videos = videos.map((v) => v.id === id ? { ...v, is_hidden: hide ? 1 : 0 } : v);
+			toast = { message, type: 'success' };
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
 		}
@@ -85,7 +77,7 @@
 		try {
 			const result = await fetcher(`${config.path.api}/channels/${channelId}/refresh`, { method: 'POST' });
 			toast = { message: `${result.newVideos}件の新着`, type: 'success' };
-			loadData(true);
+			await loadData(true);
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
 		}
@@ -132,17 +124,17 @@
 					<div class="swipe-bg">{video.is_hidden ? '復元' : '非表示'}</div>
 					<div class="video-item"
 						use:swipeable={{
-							onSwipeLeft: video.is_hidden ? null : () => hideVideo(video.id),
-							onSwipeRight: video.is_hidden ? () => unhideVideo(video.id) : null,
+							onSwipeLeft: video.is_hidden ? null : () => setVideoHidden(video.id, true),
+							onSwipeRight: video.is_hidden ? () => setVideoHidden(video.id, false) : null,
 						}}
 					>
 						{#if video.is_hidden}<div class="hidden-badge"></div>{/if}
 						<VideoCard {video} />
 						<div class="action-btns">
 							{#if video.is_hidden}
-								<button class="action-btn restore" onclick={() => unhideVideo(video.id)}>復元</button>
+								<button class="action-btn restore" onclick={() => setVideoHidden(video.id, false)}>復元</button>
 							{:else}
-								<button class="action-btn hide" onclick={() => hideVideo(video.id)}>非表示</button>
+								<button class="action-btn hide" onclick={() => setVideoHidden(video.id, true)}>非表示</button>
 							{/if}
 						</div>
 					</div>

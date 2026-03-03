@@ -63,25 +63,16 @@
 		window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`);
 	}
 
-	function swipeLeft() {
-		const cycle = [null, ...groups.map((g) => String(g.id))];
-		const currentIndex = cycle.indexOf(groupId ?? null);
-		const nextIndex = (currentIndex + 1) % cycle.length;
-		const next = cycle[nextIndex];
+	let groupCycle = $derived([null, ...groups.map((g) => String(g.id))]);
+
+	function navigateGroup(delta) {
+		const currentIndex = groupCycle.indexOf(groupId ?? null);
+		const nextIndex = (currentIndex + delta + groupCycle.length) % groupCycle.length;
+		const next = groupCycle[nextIndex];
 		navigate(next ? `/group/${next}` : '/');
 	}
 
-	function swipeRight() {
-		const cycle = [null, ...groups.map((g) => String(g.id))];
-		const currentIndex = cycle.indexOf(groupId ?? null);
-		const prevIndex = (currentIndex - 1 + cycle.length) % cycle.length;
-		const prev = cycle[prevIndex];
-		navigate(prev ? `/group/${prev}` : '/');
-	}
-
-	$effect(() => {
-		untrack(() => loadGroups());
-	});
+	loadGroups();
 
 	$effect(() => {
 		groupId;
@@ -100,7 +91,7 @@
 	});
 </script>
 
-<div class="feed" use:swipeNav={{ onLeft: swipeLeft, onRight: swipeRight }}>
+<div class="feed" use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}>
 	{#if loading}
 		<Spinner />
 	{:else if videos.length === 0}
