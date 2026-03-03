@@ -1,8 +1,11 @@
 use regex_lite::Regex;
+use std::sync::LazyLock;
+
+static ISO_DURATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?").unwrap());
 
 pub fn parse_iso_duration(iso: &str) -> u64 {
-    let re = Regex::new(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?").unwrap();
-    let caps = match re.captures(iso) {
+    let caps = match ISO_DURATION_RE.captures(iso) {
         Some(c) => c,
         None => return 0,
     };

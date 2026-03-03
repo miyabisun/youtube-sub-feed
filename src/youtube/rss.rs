@@ -1,4 +1,14 @@
 use regex_lite::Regex;
+use std::sync::LazyLock;
+
+static ENTRY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<entry>([\s\S]*?)</entry>").unwrap());
+static VIDEO_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<yt:videoId>([^<]+)</yt:videoId>").unwrap());
+static TITLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<title>([^<]+)</title>").unwrap());
+static PUBLISHED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<published>([^<]+)</published>").unwrap());
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -9,23 +19,19 @@ pub struct RssEntry {
 }
 
 pub fn parse_atom_feed(xml: &str) -> Vec<RssEntry> {
-    let entry_re = Regex::new(r"<entry>([\s\S]*?)</entry>").unwrap();
-    let video_id_re = Regex::new(r"<yt:videoId>([^<]+)</yt:videoId>").unwrap();
-    let title_re = Regex::new(r"<title>([^<]+)</title>").unwrap();
-    let published_re = Regex::new(r"<published>([^<]+)</published>").unwrap();
 
     let mut entries = Vec::new();
 
-    for cap in entry_re.captures_iter(xml) {
+    for cap in ENTRY_RE.captures_iter(xml) {
         let block = &cap[1];
-        let video_id = video_id_re
+        let video_id = VIDEO_ID_RE
             .captures(block)
             .map(|c| c[1].to_string());
-        let title = title_re
+        let title = TITLE_RE
             .captures(block)
             .map(|c| c[1].to_string())
             .unwrap_or_default();
-        let published = published_re
+        let published = PUBLISHED_RE
             .captures(block)
             .map(|c| c[1].to_string())
             .unwrap_or_default();

@@ -50,7 +50,7 @@ pub async fn sync_subscriptions(
         // Add new channels
         for sub in &subs {
             if !local_ids.contains(&sub.channel_id) {
-                let upload_playlist_id = format!("UU{}", &sub.channel_id[2..]);
+                let upload_playlist_id = format!("UU{}", sub.channel_id.get(2..).unwrap_or(&sub.channel_id));
                 conn.execute(
                     "INSERT INTO channels (id, title, thumbnail_url, upload_playlist_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![sub.channel_id, sub.title, sub.thumbnail_url, upload_playlist_id, now],

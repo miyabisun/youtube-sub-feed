@@ -67,7 +67,7 @@ pub async fn fetch_uush_playlist(
     channel_id: &str,
     access_token: &str,
 ) -> Vec<String> {
-    let uush_id = format!("UUSH{}", &channel_id[2..]);
+    let uush_id = format!("UUSH{}", channel_id.get(2..).unwrap_or(channel_id));
 
     match fetch_playlist_items(http, quota, &uush_id, access_token, 50).await {
         Ok(items) => items.into_iter().map(|i| i.video_id).collect(),

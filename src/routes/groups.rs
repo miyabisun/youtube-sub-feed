@@ -127,12 +127,17 @@ async fn reorder_groups(
 ) -> Result<Json<Value>, AppError> {
     {
         let conn = state.db.lock().unwrap();
+        conn.execute_batch("BEGIN")?;
         for (i, id) in body.order.iter().enumerate() {
-            conn.execute(
+            if let Err(e) = conn.execute(
                 "UPDATE groups SET sort_order = ?1 WHERE id = ?2",
                 rusqlite::params![i as i64, id],
-            )?;
+            ) {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e.into());
+            }
         }
+        conn.execute_batch("COMMIT")?;
     }
     Ok(Json(json!({"ok": true})))
 }
@@ -177,16 +182,24 @@ async fn set_group_channels(
 ) -> Result<Json<Value>, AppError> {
     {
         let conn = state.db.lock().unwrap();
-        conn.execute(
-            "DELETE FROM channel_groups WHERE group_id = ?1",
-            [id],
-        )?;
-        for channel_id in &body.channel_ids {
+        conn.execute_batch("BEGIN")?;
+        if let Err(e) = (|| -> Result<(), rusqlite::Error> {
             conn.execute(
-                "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
-                rusqlite::params![channel_id, id],
+                "DELETE FROM channel_groups WHERE group_id = ?1",
+                [id],
             )?;
+            for channel_id in &body.channel_ids {
+                conn.execute(
+                    "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
+                    rusqlite::params![channel_id, id],
+                )?;
+            }
+            Ok(())
+        })() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e.into());
         }
+        conn.execute_batch("COMMIT")?;
     }
     Ok(Json(json!({"ok": true})))
 }

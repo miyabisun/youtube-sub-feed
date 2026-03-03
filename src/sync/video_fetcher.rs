@@ -147,27 +147,30 @@ pub async fn fetch_channel_videos(
 
     // 5. Fetch UUSH list if any short-duration videos exist (async, before DB lock)
     let has_short_candidate = details.iter().any(|d| is_short_duration(&d.duration));
-    let uush_list: Vec<String> = if has_short_candidate {
+    let uush_set: std::collections::HashSet<String> = if has_short_candidate {
         let cache_key = format!("uush:{}", channel_id);
         if let Some(cached) = state.cache.get(&cache_key) {
-            serde_json::from_value(cached).unwrap_or_default()
+            serde_json::from_value::<Vec<String>>(cached)
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
         } else {
             let uush_ids =
                 fetch_uush_playlist(&state.http, &state.quota, channel_id, access_token).await;
             state
                 .cache
                 .set(&cache_key, json!(uush_ids), Some(3600));
-            uush_ids
+            uush_ids.into_iter().collect()
         }
     } else {
-        Vec::new()
+        std::collections::HashSet::new()
     };
 
     // 6. Update duration, livestream, shorts info
     {
         let conn = state.db.lock().unwrap();
         for detail in &details {
-            let is_short = if is_short_duration(&detail.duration) && uush_list.contains(&detail.id)
+            let is_short = if is_short_duration(&detail.duration) && uush_set.contains(&detail.id)
             {
                 1i64
             } else {
