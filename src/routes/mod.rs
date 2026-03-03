@@ -6,7 +6,7 @@ pub mod groups;
 use crate::middleware::auth_middleware;
 use crate::spa;
 use crate::state::AppState;
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
@@ -40,7 +40,10 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn spa_fallback() -> impl IntoResponse {
     match spa::get_index_html() {
-        Some(html) => Html(html).into_response(),
+        Some(html) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Html(html),
+        ).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({"error": "Frontend not built. Run: cd client && npm install && npx vite build"})),
