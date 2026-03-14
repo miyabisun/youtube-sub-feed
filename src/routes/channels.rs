@@ -34,7 +34,8 @@ async fn get_channels(State(state): State<AppState>) -> Result<Json<Value>, AppE
             "SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
               (SELECT GROUP_CONCAT(g.name, ', ')
                FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
-               WHERE cg.channel_id = c.id) as group_names
+               WHERE cg.channel_id = c.id) as group_names,
+              c.is_favorite
             FROM channels c
             ORDER BY c.title COLLATE NOCASE",
         )?;
@@ -47,6 +48,7 @@ async fn get_channels(State(state): State<AppState>) -> Result<Json<Value>, AppE
                     "show_livestreams": row.get::<_, i64>(3)?,
                     "last_fetched_at": row.get::<_, Option<String>>(4)?,
                     "group_names": row.get::<_, Option<String>>(5)?,
+                    "is_favorite": row.get::<_, i64>(6)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -163,6 +165,8 @@ async fn refresh_channel(
 pub(crate) struct UpdateChannelBody {
     /// ライブ配信表示 (0: 無効, 1: 有効)
     show_livestreams: Option<i64>,
+    /// お気に入り (0: 無効, 1: 有効)
+    is_favorite: Option<i64>,
 }
 
 #[utoipa::path(
@@ -170,7 +174,7 @@ pub(crate) struct UpdateChannelBody {
     path = "/api/channels/{id}",
     tag = "チャンネル",
     summary = "チャンネル設定更新",
-    description = "show_livestreams を更新する。有効にするとフィードへのライブ表示 + 5分間隔のライブ察知巡回が適用される。",
+    description = "show_livestreams, is_favorite を更新する。show_livestreams を有効にするとフィードへのライブ表示 + 5分間隔のライブ察知巡回が適用される。is_favorite を有効にすると /api/rss にそのチャンネルの動画が含まれる。",
     params(("id" = String, Path, description = "チャンネルID")),
     request_body(content = UpdateChannelBody),
     responses(
@@ -184,21 +188,31 @@ async fn update_channel(
     Path(id): Path<String>,
     Json(body): Json<UpdateChannelBody>,
 ) -> Result<Json<Value>, AppError> {
-    let val = body
-        .show_livestreams
-        .ok_or_else(|| AppError::BadRequest("No fields to update".to_string()))?;
+    if body.show_livestreams.is_none() && body.is_favorite.is_none() {
+        return Err(AppError::BadRequest("No fields to update".to_string()));
+    }
 
-    if val != 0 && val != 1 {
-        return Err(AppError::BadRequest(
-            "show_livestreams must be 0 or 1".to_string(),
-        ));
+    let validate_bool = |val: i64, name: &str| -> Result<(), AppError> {
+        if val != 0 && val != 1 {
+            return Err(AppError::BadRequest(format!("{} must be 0 or 1", name)));
+        }
+        Ok(())
+    };
+
+    if let Some(v) = body.show_livestreams {
+        validate_bool(v, "show_livestreams")?;
+    }
+    if let Some(v) = body.is_favorite {
+        validate_bool(v, "is_favorite")?;
     }
 
     {
         let conn = state.db.lock().unwrap();
         conn.execute(
-            "UPDATE channels SET show_livestreams = ?1 WHERE id = ?2",
-            rusqlite::params![val, id],
+            "UPDATE channels SET show_livestreams = COALESCE(?1, show_livestreams),
+                                 is_favorite = COALESCE(?2, is_favorite)
+             WHERE id = ?3",
+            rusqlite::params![body.show_livestreams, body.is_favorite, id],
         )?;
     }
     Ok(Json(json!({"ok": true})))
@@ -332,6 +346,51 @@ mod tests {
             .query_row("SELECT show_livestreams FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, 1);
+    }
+
+    #[test]
+    fn test_update_channel_is_favorite() {
+        let conn = crate::db::open_memory();
+        insert_channel(&conn, "UC1", "Ch1");
+
+        let val: i64 = conn
+            .query_row("SELECT is_favorite FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(val, 0);
+
+        conn.execute(
+            "UPDATE channels SET is_favorite = ?1 WHERE id = ?2",
+            params![1_i64, "UC1"],
+        )
+        .unwrap();
+
+        let val: i64 = conn
+            .query_row("SELECT is_favorite FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(val, 1);
+    }
+
+    #[test]
+    fn test_channels_list_includes_is_favorite() {
+        let conn = crate::db::open_memory();
+        insert_channel(&conn, "UC1", "Ch1");
+        conn.execute("UPDATE channels SET is_favorite = 1 WHERE id = 'UC1'", []).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
+                  (SELECT GROUP_CONCAT(g.name, ', ')
+                   FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
+                   WHERE cg.channel_id = c.id) as group_names,
+                  c.is_favorite
+                FROM channels c
+                ORDER BY c.title COLLATE NOCASE",
+            )
+            .unwrap();
+        let is_favorite: i64 = stmt
+            .query_row([], |row| row.get::<_, i64>(6))
+            .unwrap();
+        assert_eq!(is_favorite, 1);
     }
 
     #[test]

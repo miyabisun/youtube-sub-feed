@@ -14,6 +14,7 @@ pub fn open(path: &str) -> Connection {
     .expect("Failed to set PRAGMA");
 
     create_tables(&conn);
+    migrate(&conn);
 
     conn
 }
@@ -25,6 +26,7 @@ pub fn open_memory() -> Connection {
         .expect("Failed to set PRAGMA");
 
     create_tables(&conn);
+    migrate(&conn);
 
     conn
 }
@@ -37,6 +39,7 @@ fn create_tables(conn: &Connection) {
             thumbnail_url TEXT,
             upload_playlist_id TEXT,
             show_livestreams INTEGER NOT NULL DEFAULT 0,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
             last_fetched_at TEXT,
             created_at TEXT NOT NULL
         );
@@ -92,9 +95,21 @@ fn create_tables(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_videos_published ON videos (published_at DESC);
         CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos (channel_id);
         CREATE INDEX IF NOT EXISTS idx_videos_hidden ON videos (is_hidden, published_at DESC);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_google_id ON auth(google_id);",
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_google_id ON auth(google_id);
+        CREATE INDEX IF NOT EXISTS idx_channels_is_favorite ON channels(is_favorite);",
     )
     .expect("Failed to create tables");
+}
+
+fn migrate(conn: &Connection) {
+    // Add is_favorite column to channels (for existing databases)
+    let has_column = conn
+        .prepare("SELECT is_favorite FROM channels LIMIT 0")
+        .is_ok();
+    if !has_column {
+        conn.execute_batch("ALTER TABLE channels ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0")
+            .expect("Failed to add is_favorite column");
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +190,7 @@ mod tests {
 
         let expected = [
             "idx_auth_google_id",
+            "idx_channels_is_favorite",
             "idx_videos_channel",
             "idx_videos_hidden",
             "idx_videos_published",
@@ -241,14 +257,15 @@ mod tests {
         )
         .unwrap();
 
-        let show_livestreams: i64 = conn
+        let (show_livestreams, is_favorite): (i64, i64) = conn
             .query_row(
-                "SELECT show_livestreams FROM channels WHERE id = 'UC1'",
+                "SELECT show_livestreams, is_favorite FROM channels WHERE id = 'UC1'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(show_livestreams, 0);
+        assert_eq!(is_favorite, 0);
     }
 
     #[test]

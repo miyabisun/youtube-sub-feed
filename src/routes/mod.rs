@@ -2,6 +2,7 @@ pub mod auth;
 pub mod channels;
 pub mod feed;
 pub mod groups;
+pub mod rss;
 
 use crate::middleware::auth_middleware;
 use crate::openapi;
@@ -43,6 +44,7 @@ use utoipa_swagger_ui::SwaggerUi;
         groups::delete_group,
         groups::get_group_channels,
         groups::set_group_channels,
+        rss::get_rss_feed,
     ),
     components(schemas(
         openapi::ErrorResponse,
@@ -64,6 +66,7 @@ use utoipa_swagger_ui::SwaggerUi;
         (name = "動画フィード", description = "動画一覧の取得・非表示/復元"),
         (name = "チャンネル", description = "登録チャンネルの管理・同期・更新"),
         (name = "グループ", description = "チャンネルグループの管理・並び替え・割り当て"),
+        (name = "RSS", description = "お気に入りチャンネルのRSSフィード配信"),
     ),
 )]
 struct ApiDoc;
@@ -71,7 +74,8 @@ struct ApiDoc;
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
-        .merge(auth::routes());
+        .merge(auth::routes())
+        .merge(rss::routes());
 
     let protected = Router::new()
         .merge(feed::routes())
@@ -148,22 +152,24 @@ mod tests {
         Endpoint { method: "PUT",    path: "/api/groups/reorder",        auth_required: true },
         Endpoint { method: "DELETE", path: "/api/groups/:id",            auth_required: true },
         Endpoint { method: "PUT",    path: "/api/groups/:id/channels",   auth_required: true },
+        Endpoint { method: "GET",    path: "/api/rss",                   auth_required: false },
     ];
 
     mod endpoint_inventory {
         use super::*;
 
         #[test]
-        fn total_endpoint_count_is_20() {
-            assert_eq!(ENDPOINTS.len(), 20);
+        fn total_endpoint_count_is_21() {
+            assert_eq!(ENDPOINTS.len(), 21);
         }
 
         #[test]
-        fn middleware_public_endpoints_count_is_5() {
+        fn middleware_public_endpoints_count_is_6() {
             // health, login, callback: no middleware, no handler-level auth
             // logout, me: no middleware, but handler-level auth
+            // rss: public feed, no auth required
             let public_count = ENDPOINTS.iter().filter(|e| !e.auth_required).count();
-            assert_eq!(public_count, 5);
+            assert_eq!(public_count, 6);
         }
 
         #[test]

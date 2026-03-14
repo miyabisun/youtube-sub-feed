@@ -60,6 +60,8 @@ pub struct ChannelItem {
     pub last_fetched_at: Option<String>,
     /// 所属グループ名 (カンマ区切り)
     pub group_names: Option<String>,
+    /// お気に入り (0: 無効, 1: 有効)
+    pub is_favorite: i64,
 }
 
 /// チャンネル詳細の動画アイテム (非表示動画含む)
