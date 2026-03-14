@@ -72,6 +72,14 @@ fn get_next_pacific_midnight() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    // Quota Management Spec
+    //
+    // Manages YouTube Data API v3 daily quota (10,000 units/day).
+    // On quota exceeded: stop polling loops, wait for Pacific midnight reset.
+    // All used endpoints (Subscriptions.list, PlaylistItems.list, Videos.list) cost 1 unit each.
+    // Estimated daily cost with RSS-First: ~2,500/10,000 (~25%).
+    // Pacific midnight (quota reset) = UTC 08:00 = JST 17:00.
+
     use super::*;
 
     #[test]

@@ -95,6 +95,11 @@ mod tests {
 </entry>
 </feed>"#;
 
+    // RSS-First Strategy Spec
+    //
+    // RSS URL: https://www.youtube.com/feeds/videos.xml?channel_id={id}
+    // Check RSS feed before making API calls to save quota.
+
     #[test]
     fn test_parse_basic() {
         let entries = parse_atom_feed(SAMPLE_FEED);

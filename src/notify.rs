@@ -99,6 +99,11 @@ pub struct VideoInfo {
 
 #[cfg(test)]
 mod tests {
+    // Discord Notification Spec
+    //
+    // Posts embeds to a Discord channel via Webhook.
+    // Configured via DISCORD_WEBHOOK_URL env var (disabled when omitted).
+
     use super::*;
 
     #[test]

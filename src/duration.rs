@@ -22,6 +22,11 @@ pub fn is_short_duration(iso: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // ISO 8601 Duration Spec
+    //
+    // YouTube Data API's `contentDetails.duration` uses ISO 8601 duration format (e.g. "PT1H2M3S").
+    // Parsed into seconds. Also used for Shorts candidate detection (duration > 0 and <= 180s).
+
     use super::*;
 
     #[test]
@@ -65,6 +70,8 @@ mod tests {
         assert!(!is_short_duration("PT3M1S"));
         assert!(!is_short_duration("PT181S"));
         assert!(!is_short_duration("PT4M"));
+        assert!(!is_short_duration("PT10M"));
+        assert!(!is_short_duration("PT1H"));
         assert!(!is_short_duration("PT0S"));
     }
 
@@ -79,8 +86,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_hours_and_minutes() {
+        assert_eq!(parse_iso_duration("PT1H30M"), 5400);
+    }
+
+    #[test]
     fn test_parse_empty_string() {
         assert_eq!(parse_iso_duration(""), 0);
+    }
+
+    #[test]
+    fn test_parse_long_duration_over_12h() {
+        assert_eq!(parse_iso_duration("PT12H34M56S"), 45296);
     }
 
     #[test]

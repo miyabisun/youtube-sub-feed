@@ -2,7 +2,8 @@
 
 ## ドキュメント
 
-- `docs/*.md` はコード変更時に常に最新化すること
+- `docs/deploy.md` はデプロイ手順変更時に最新化すること
+- 仕様は `src/*.rs` のインラインテスト（`#[cfg(test)]`）に living documentation として記述
 
 ## 開発
 

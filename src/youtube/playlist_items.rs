@@ -61,6 +61,8 @@ pub async fn fetch_playlist_items(
     Ok(items)
 }
 
+/// Fetch the UUSH (Shorts) playlist for a channel.
+/// The playlist ID is derived by replacing the "UC" prefix with "UUSH".
 pub async fn fetch_uush_playlist(
     http: &reqwest::Client,
     quota: &Arc<QuotaState>,
@@ -74,3 +76,9 @@ pub async fn fetch_uush_playlist(
         Err(_) => Vec::new(),
     }
 }
+
+// Playlist ID Derivation Spec
+//
+// YouTube uses playlist ID prefixes to identify content types:
+// - "UU" prefix: uploads playlist (derived from channel's "UC" prefix)
+// - "UUSH" prefix: Shorts playlist (derived from channel's "UC" prefix)

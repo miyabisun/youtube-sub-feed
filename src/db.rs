@@ -99,6 +99,11 @@ fn create_tables(conn: &Connection) {
 
 #[cfg(test)]
 mod tests {
+    // Database Schema Spec
+    //
+    // SQLite with 6 tables. Raw SQL without ORM.
+    // Tables are auto-created on startup via `CREATE TABLE IF NOT EXISTS` (no migration needed).
+
     use super::*;
 
     #[test]
@@ -304,5 +309,108 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0, "Session should be deleted when auth is deleted");
+    }
+
+    #[test]
+    fn test_last_fetched_at_is_nullable() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC2', 'ch', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT last_fetched_at FROM channels WHERE id = 'UC2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(val.is_none(), "last_fetched_at should be NULL before first fetch");
+    }
+
+    #[test]
+    fn test_duplicate_id_fails_primary_key() {
+        let conn = open_memory();
+        let insert = "INSERT INTO channels (id, title, created_at) VALUES ('UC3', 'ch', '2025-01-01T00:00:00Z')";
+        conn.execute(insert, []).unwrap();
+        assert!(conn.execute(insert, []).is_err(), "duplicate PK insert should fail");
+    }
+
+    #[test]
+    fn test_upsert_updates_utf8_title_and_thumbnail() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'ch', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES ('vid1', 'UC1', 'video', '2025-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, thumbnail_url, fetched_at)
+             VALUES ('vid1', 'UC1', '新しいタイトル', 'new_url', '2025-06-01T00:00:00Z')
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               thumbnail_url = excluded.thumbnail_url
+             WHERE title != excluded.title OR thumbnail_url != excluded.thumbnail_url",
+            [],
+        )
+        .unwrap();
+
+        let title: String = conn
+            .query_row("SELECT title FROM videos WHERE id = 'vid1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "新しいタイトル", "UPSERT should update title to follow author edits");
+    }
+
+    // M2M test (channel belongs to multiple groups) is in routes/groups.rs
+
+    #[test]
+    fn test_duplicate_composite_pk_fails() {
+        let conn = open_memory();
+        conn.execute_batch(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'ch1', '2025-01-01T00:00:00Z');
+             INSERT INTO groups (name, sort_order, created_at) VALUES ('G1', 1, '2025-01-01T00:00:00Z');",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)", []).unwrap();
+        let result = conn.execute("INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)", []);
+        assert!(result.is_err(), "composite PK (channel_id, group_id) prevents duplicates");
+    }
+
+    #[test]
+    fn test_insert_and_select_utf8_channel() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UCxxxxxxxx', 'テストチャンネル', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM channels WHERE id = 'UCxxxxxxxx'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "テストチャンネル");
+    }
+
+    #[test]
+    fn test_insert_video_with_nonexistent_channel_fails_fk() {
+        let conn = open_memory();
+        let result = conn.execute(
+            "INSERT INTO videos (id, channel_id, title) VALUES ('vid1', 'UC_nonexistent', 'v')",
+            [],
+        );
+        assert!(result.is_err(), "FK constraint rejects nonexistent channel_id");
     }
 }

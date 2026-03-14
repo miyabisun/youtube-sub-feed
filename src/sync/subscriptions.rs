@@ -19,3 +19,15 @@ pub fn start_periodic_sync(state: AppState) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Subscription sync runs every 10 minutes to keep channel list up to date.
+
+    #[test]
+    fn sync_interval_is_10min() {
+        assert_eq!(SYNC_INTERVAL_MS, 600_000);
+    }
+}

@@ -292,6 +292,11 @@ async fn set_group_channels(
 
 #[cfg(test)]
 mod tests {
+    // Group Management Spec
+    //
+    // Categorize channels into groups for feed filtering.
+    // A channel can belong to multiple groups (many-to-many).
+
     use rusqlite::params;
 
     fn insert_group(conn: &rusqlite::Connection, name: &str, sort_order: i64) -> i64 {
@@ -469,6 +474,34 @@ mod tests {
 
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "UC2");
+    }
+
+    #[test]
+    fn test_channel_can_belong_to_multiple_groups() {
+        let conn = crate::db::open_memory();
+        insert_channel(&conn, "UC1", "Ch1");
+        let g1 = insert_group(&conn, "G1", 0);
+        let g2 = insert_group(&conn, "G2", 1);
+
+        conn.execute(
+            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
+            params!["UC1", g1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
+            params!["UC1", g2],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_groups WHERE channel_id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "Channel should belong to both groups");
     }
 
     #[test]

@@ -78,6 +78,11 @@ pub fn start_sweep(cache: Arc<Cache>) {
 
 #[cfg(test)]
 mod tests {
+    // Cache Spec
+    //
+    // serde_json::Value-based TTL in-memory cache. Max 10,000 entries.
+    // Thread-safe with Mutex. Sweeps every hour.
+
     use super::*;
     use serde_json::json;
 
@@ -124,6 +129,21 @@ mod tests {
         cache.set("key", json!("v1"), None);
         cache.set("key", json!("v2"), None);
         assert_eq!(cache.get("key"), Some(json!("v2")));
+    }
+
+    #[test]
+    fn test_ttl_none_means_no_expiry() {
+        let cache = Cache::new();
+        cache.set("key", json!("v"), None);
+        assert!(cache.get("key").is_some(), "None TTL means no expiry");
+    }
+
+    #[test]
+    fn test_expired_entry_auto_removed_on_get() {
+        let cache = Cache::new();
+        cache.set("key", json!("v"), Some(0));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert_eq!(cache.get("key"), None, "expired entry returns None and is auto-removed");
     }
 
     #[test]

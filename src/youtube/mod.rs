@@ -110,6 +110,9 @@ where
 mod tests {
     use super::*;
 
+    // Retry Spec: max 3 attempts, linear backoff (1s, 2s, 3s).
+    // Quota exceeded (403 + quotaExceeded) aborts immediately without retry.
+
     #[test]
     fn test_url_no_comma_encoding() {
         // Verify that format!() doesn't encode commas (unlike reqwest .query())

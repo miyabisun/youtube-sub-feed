@@ -77,3 +77,8 @@ pub async fn sync_subscriptions(
 
     Ok(SyncResult { added, removed })
 }
+
+// Channel Sync Spec
+//
+// When a new channel is added, its upload playlist ID is derived from the
+// channel ID by replacing the "UC" prefix with "UU".

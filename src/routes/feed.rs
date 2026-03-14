@@ -164,6 +164,14 @@ async fn unhide_video(
 
 #[cfg(test)]
 mod tests {
+    // Feed Display Spec
+    //
+    // Feed display rules:
+    // - Exclude hidden videos (is_hidden=1)
+    // - Show livestreams only when channel's show_livestreams=1
+    // - Sort by published_at DESC
+    // - Group filter and pagination support
+
     use rusqlite::params;
 
     fn setup() -> rusqlite::Connection {
@@ -264,6 +272,17 @@ mod tests {
         let ids = query_feed(&conn, 100, 0);
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "v1");
+    }
+
+    #[test]
+    fn test_feed_sorted_by_published_at_desc() {
+        let conn = setup();
+        insert_video(&conn, "old", "UC1", "2024-01-01T00:00:00Z", 0, 0);
+        insert_video(&conn, "mid", "UC1", "2024-01-15T00:00:00Z", 0, 0);
+        insert_video(&conn, "new", "UC1", "2024-01-30T00:00:00Z", 0, 0);
+
+        let ids = query_feed(&conn, 100, 0);
+        assert_eq!(ids, vec!["new", "mid", "old"]);
     }
 
     #[test]

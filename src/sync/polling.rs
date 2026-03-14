@@ -168,3 +168,32 @@ fn start_livestream_loop(state: AppState) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two concurrent polling loops (following novel-server's round-robin sync pattern):
+    /// - New video detection loop (15min/cycle): RSS-First for show_livestreams=0 channels
+    /// - Livestream detection loop (5min/cycle): API-direct for show_livestreams=1 channels only
+
+    #[test]
+    fn new_video_loop_interval_200ch() {
+        let channel_count: u64 = 200;
+        assert_eq!(
+            POLLING_INTERVAL_MS / channel_count,
+            4500,
+            "200ch -> 4.5s interval"
+        );
+    }
+
+    #[test]
+    fn livestream_loop_interval_5ch() {
+        let channel_count: u64 = 5;
+        assert_eq!(
+            LIVESTREAM_INTERVAL_MS / channel_count,
+            60000,
+            "5ch -> 60s interval"
+        );
+    }
+}

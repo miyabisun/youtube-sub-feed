@@ -57,6 +57,15 @@ pub fn delete_session(conn: &Connection, session_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    // Auth & Session Spec
+    //
+    // Google OAuth2 authentication, session management (UUID v4, 30-day TTL), auth middleware.
+    //
+    // Auth middleware:
+    //   - Public endpoints (no session required): /api/health, /api/auth/login, /api/auth/callback
+    //   - Session cookie: name="session", HttpOnly (XSS protection),
+    //     SameSite=Lax (CSRF protection), Secure (production only, HTTPS)
+
     use super::*;
     use crate::db;
 
@@ -130,5 +139,13 @@ mod tests {
         let conn = setup();
         let result = create_session(&conn, 9999);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_session_id_is_uuid_v4_format() {
+        let conn = setup();
+        let (session_id, _) = create_session(&conn, 1).unwrap();
+        assert_eq!(session_id.len(), 36, "UUID v4 is 36 chars (8-4-4-4-12)");
+        assert_eq!(session_id.chars().filter(|c| *c == '-').count(), 4);
     }
 }

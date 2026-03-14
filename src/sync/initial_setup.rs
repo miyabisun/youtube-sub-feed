@@ -68,3 +68,8 @@ pub async fn run_initial_setup(state: &AppState) {
     tracing::info!("[setup] Initial setup complete");
     notify_setup_complete(&state.http, &state.config, ch_count, vid_count).await;
 }
+
+// Initial Setup Spec
+//
+// Triggers when channels table is empty (first startup).
+// Skipped when channels already exist (server restart).
