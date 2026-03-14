@@ -172,6 +172,14 @@
 	cursor: pointer
 	z-index: 2
 
+	&::before
+		content: ''
+		position: absolute
+		top: -12px
+		right: -8px
+		bottom: -12px
+		left: -8px
+
 	&:hover
 		background: var(--c-danger-bg)
 		color: var(--c-danger)

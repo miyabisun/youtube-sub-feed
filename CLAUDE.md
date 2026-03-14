@@ -7,7 +7,7 @@
 ## 開発
 
 - `/dev` で実装する際は TDD (Red → Green → Refactor) で進めること
-- `client/` 配下の変更後は必ず `cd client && bunx vite build` で成功確認
+- `client/` 配下の変更後は必ず `cd client && npx vite build` で成功確認
 
 ## レビュー
 

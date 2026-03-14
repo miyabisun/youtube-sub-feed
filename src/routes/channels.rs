@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::openapi::*;
 use crate::state::AppState;
 use crate::sync::{channel_sync, token, video_fetcher};
 use axum::extract::{Path, Query, State};
@@ -16,6 +17,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/channels/{id}", patch(update_channel))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/channels",
+    tag = "チャンネル",
+    summary = "登録チャンネル一覧",
+    responses(
+        (status = 200, description = "チャンネル一覧 (タイトル昇順)", body = Vec<ChannelItem>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn get_channels(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let rows = {
         let conn = state.db.lock().unwrap();
@@ -50,6 +61,22 @@ struct VideosQuery {
     offset: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/channels/{id}/videos",
+    tag = "チャンネル",
+    summary = "チャンネルの動画一覧",
+    description = "指定チャンネルの全動画を取得する (非表示動画含む)。",
+    params(
+        ("id" = String, Path, description = "チャンネルID"),
+        ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
+        ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
+    ),
+    responses(
+        (status = 200, description = "動画一覧", body = Vec<ChannelVideoItem>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn get_channel_videos(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -88,6 +115,17 @@ async fn get_channel_videos(
     Ok(Json(Value::Array(rows)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/channels/sync",
+    tag = "チャンネル",
+    summary = "登録チャンネルを再同期",
+    description = "YouTube の Subscriptions.list から登録チャンネルを再取得し、DB と同期する。",
+    responses(
+        (status = 200, description = "同期結果"),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn sync_channels(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let access_token = token::get_valid_access_token(&state)
         .await
@@ -97,6 +135,18 @@ async fn sync_channels(State(state): State<AppState>) -> Result<Json<Value>, App
     Ok(Json(json!(result)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/channels/{id}/refresh",
+    tag = "チャンネル",
+    summary = "チャンネルを手動更新",
+    description = "指定チャンネルの動画を即座に再取得する。RSS を介さず API 直接呼び出し。",
+    params(("id" = String, Path, description = "チャンネルID")),
+    responses(
+        (status = 200, description = "更新結果", body = RefreshResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn refresh_channel(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -109,11 +159,26 @@ async fn refresh_channel(
     Ok(Json(json!({"newVideos": new_video_ids.len()})))
 }
 
-#[derive(Deserialize)]
-struct UpdateChannelBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateChannelBody {
+    /// ライブ配信表示 (0: 無効, 1: 有効)
     show_livestreams: Option<i64>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/channels/{id}",
+    tag = "チャンネル",
+    summary = "チャンネル設定更新",
+    description = "show_livestreams を更新する。有効にするとフィードへのライブ表示 + 5分間隔のライブ察知巡回が適用される。",
+    params(("id" = String, Path, description = "チャンネルID")),
+    request_body(content = UpdateChannelBody),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 400, description = "バリデーションエラー", body = ErrorResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn update_channel(
     State(state): State<AppState>,
     Path(id): Path<String>,

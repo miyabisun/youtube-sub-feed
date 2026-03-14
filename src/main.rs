@@ -1,21 +1,11 @@
-mod auth;
-mod cache;
-mod config;
-mod db;
-mod duration;
-mod error;
-mod middleware;
-mod notify;
-mod quota;
-mod routes;
-mod session;
-mod spa;
-mod state;
-mod sync;
-mod youtube;
+use youtube_sub_feed::cache;
+use youtube_sub_feed::config::Config;
+use youtube_sub_feed::db;
+use youtube_sub_feed::quota;
+use youtube_sub_feed::routes;
+use youtube_sub_feed::state::AppState;
+use youtube_sub_feed::sync;
 
-use config::Config;
-use state::AppState;
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]

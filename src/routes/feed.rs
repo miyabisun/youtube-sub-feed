@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::openapi::*;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch};
@@ -20,6 +21,22 @@ struct FeedQuery {
     group: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/feed",
+    tag = "動画フィード",
+    summary = "動画一覧取得",
+    description = "全チャンネルの動画を公開日時の降順で取得する。\n\n- 非表示動画 (is_hidden=1) を除外\n- ライブ配信はチャンネルの show_livestreams=1 の場合のみ表示\n- グループIDで絞り込み可能",
+    params(
+        ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
+        ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
+        ("group" = Option<i64>, Query, description = "グループIDで絞り込み"),
+    ),
+    responses(
+        (status = 200, description = "動画一覧", body = Vec<FeedItem>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn get_feed(
     State(state): State<AppState>,
     Query(query): Query<FeedQuery>,
@@ -98,6 +115,18 @@ async fn get_feed(
     Ok(Json(Value::Array(rows)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/videos/{id}/hide",
+    tag = "動画フィード",
+    summary = "動画を非表示にする",
+    description = "指定した動画を論理削除 (is_hidden=1) してフィードから除外する。",
+    params(("id" = String, Path, description = "動画ID")),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn hide_video(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -110,6 +139,17 @@ async fn hide_video(
     Ok(Json(json!({"ok": true})))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/videos/{id}/unhide",
+    tag = "動画フィード",
+    summary = "非表示動画を復元する",
+    params(("id" = String, Path, description = "動画ID")),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn unhide_video(
     State(state): State<AppState>,
     Path(id): Path<String>,

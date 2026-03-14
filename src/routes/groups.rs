@@ -1,4 +1,5 @@
 use crate::error::AppError;
+use crate::openapi::*;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::routing::{get, patch, put};
@@ -20,6 +21,16 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/groups",
+    tag = "グループ",
+    summary = "グループ一覧",
+    responses(
+        (status = 200, description = "グループ一覧 (sort_order 昇順)", body = Vec<GroupItem>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn get_groups(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let rows = {
         let conn = state.db.lock().unwrap();
@@ -40,11 +51,24 @@ async fn get_groups(State(state): State<AppState>) -> Result<Json<Value>, AppErr
     Ok(Json(Value::Array(rows)))
 }
 
-#[derive(Deserialize)]
-struct CreateGroupBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateGroupBody {
+    /// グループ名 (1〜50文字)
     name: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/groups",
+    tag = "グループ",
+    summary = "グループ作成",
+    request_body(content = CreateGroupBody),
+    responses(
+        (status = 201, description = "作成されたグループ", body = GroupItem),
+        (status = 400, description = "バリデーションエラー", body = ErrorResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn create_group(
     State(state): State<AppState>,
     Json(body): Json<CreateGroupBody>,
@@ -85,11 +109,25 @@ async fn create_group(
     Ok((axum::http::StatusCode::CREATED, Json(row)))
 }
 
-#[derive(Deserialize)]
-struct UpdateGroupBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateGroupBody {
+    /// グループ名 (1〜50文字)
     name: Option<String>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/groups/{id}",
+    tag = "グループ",
+    summary = "グループ更新",
+    params(("id" = i64, Path, description = "グループID")),
+    request_body(content = UpdateGroupBody),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 400, description = "バリデーションエラー", body = ErrorResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn update_group(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -116,11 +154,23 @@ async fn update_group(
     Ok(Json(json!({"ok": true})))
 }
 
-#[derive(Deserialize)]
-struct ReorderBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct ReorderBody {
+    /// グループIDの配列 (インデックス順に sort_order を割り当て)
     order: Vec<i64>,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/groups/reorder",
+    tag = "グループ",
+    summary = "グループ並び替え",
+    request_body(content = ReorderBody, example = json!({"order": [3, 1, 2]})),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn reorder_groups(
     State(state): State<AppState>,
     Json(body): Json<ReorderBody>,
@@ -142,6 +192,17 @@ async fn reorder_groups(
     Ok(Json(json!({"ok": true})))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/groups/{id}",
+    tag = "グループ",
+    summary = "グループ削除",
+    params(("id" = i64, Path, description = "グループID")),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn delete_group(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -153,6 +214,17 @@ async fn delete_group(
     Ok(Json(json!({"ok": true})))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/groups/{id}/channels",
+    tag = "グループ",
+    summary = "グループのチャンネル一覧",
+    params(("id" = i64, Path, description = "グループID")),
+    responses(
+        (status = 200, description = "チャンネルID一覧", body = Vec<String>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn get_group_channels(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -169,12 +241,26 @@ async fn get_group_channels(
     Ok(Json(json!(channel_ids)))
 }
 
-#[derive(Deserialize)]
-struct SetChannelsBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct SetChannelsBody {
+    /// チャンネルIDの配列 (全置換方式)
     #[serde(rename = "channelIds")]
     channel_ids: Vec<String>,
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/groups/{id}/channels",
+    tag = "グループ",
+    summary = "グループにチャンネルを設定",
+    description = "グループのチャンネル割り当てを全置換する。",
+    params(("id" = i64, Path, description = "グループID")),
+    request_body(content = SetChannelsBody, example = json!({"channelIds": ["UC..."]})),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn set_group_channels(
     State(state): State<AppState>,
     Path(id): Path<i64>,

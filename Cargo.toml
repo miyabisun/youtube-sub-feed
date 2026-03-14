@@ -21,6 +21,8 @@ tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v4"] }
 regex-lite = "0.1"
 urlencoding = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 [profile.release]
 lto = true

@@ -1,5 +1,6 @@
 use crate::auth::{exchange_code, get_auth_url, get_user_info};
 use crate::error::AppError;
+use crate::openapi::*;
 use crate::session;
 use crate::state::AppState;
 use axum::extract::{Query, State};
@@ -19,6 +20,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/me", get(me))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/login",
+    tag = "認証",
+    summary = "Google OAuth2 ログイン",
+    description = "Google 認証画面へリダイレクトする。",
+    responses((status = 307, description = "Google 認証画面へリダイレクト")),
+)]
 async fn login(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -42,6 +51,21 @@ struct CallbackQuery {
     state: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/callback",
+    tag = "認証",
+    summary = "OAuth2 コールバック",
+    description = "Google からのコールバックを処理し、セッション Cookie を設定後 / にリダイレクトする。",
+    params(
+        ("code" = Option<String>, Query, description = "認証コード"),
+        ("state" = Option<String>, Query, description = "CSRF state"),
+    ),
+    responses(
+        (status = 307, description = "/ へリダイレクト"),
+        (status = 400, description = "パラメータ不正", body = ErrorResponse),
+    ),
+)]
 async fn callback(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -139,6 +163,14 @@ async fn callback(
     Ok(Redirect::temporary("/"))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "認証",
+    summary = "ログアウト",
+    description = "セッションを破棄し Cookie を削除する。",
+    responses((status = 200, description = "成功", body = OkResponse)),
+)]
 async fn logout(
     State(state): State<AppState>,
     cookies: Cookies,
@@ -154,6 +186,16 @@ async fn logout(
     Json(json!({"ok": true}))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    tag = "認証",
+    summary = "ログイン状態確認",
+    responses(
+        (status = 200, description = "ログイン中", body = MeResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
 async fn me(
     State(state): State<AppState>,
     cookies: Cookies,

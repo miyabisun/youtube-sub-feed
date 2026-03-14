@@ -18,7 +18,6 @@ pub fn open(path: &str) -> Connection {
     conn
 }
 
-#[cfg(test)]
 pub fn open_memory() -> Connection {
     let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
 
