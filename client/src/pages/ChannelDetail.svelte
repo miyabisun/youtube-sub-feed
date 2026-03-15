@@ -57,8 +57,11 @@
 		}
 	}
 
+	let toggling = $state(false);
+
 	async function toggleSetting(field) {
-		if (!channel) return;
+		if (!channel || toggling) return;
+		toggling = true;
 		const newVal = channel[field] ? 0 : 1;
 		try {
 			await fetcher(`${config.path.api}/channels/${channelId}`, {
@@ -70,16 +73,8 @@
 			toast = { message: '設定を更新しました', type: 'success' };
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
-		}
-	}
-
-	async function refreshChannel() {
-		try {
-			const result = await fetcher(`${config.path.api}/channels/${channelId}/refresh`, { method: 'POST' });
-			toast = { message: `${result.newVideos}件の新着`, type: 'success' };
-			await loadData(true);
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
+		} finally {
+			toggling = false;
 		}
 	}
 
@@ -109,11 +104,14 @@
 					<a class="youtube-link" href="https://www.youtube.com/channel/{channel.id}" target="_blank" rel="noopener">YouTube</a>
 				</div>
 				<div class="channel-settings">
-					<label class="toggle">
-						<input type="checkbox" checked={channel.show_livestreams} onchange={() => toggleSetting('show_livestreams')} />
+					<button class="toggle-btn" class:active={channel.is_favorite} role="switch" aria-checked={!!channel.is_favorite} onclick={() => toggleSetting('is_favorite')}>
+						<span class="toggle-track"><span class="toggle-thumb"></span></span>
+						お気に入り
+					</button>
+					<button class="toggle-btn" class:active={channel.show_livestreams} role="switch" aria-checked={!!channel.show_livestreams} onclick={() => toggleSetting('show_livestreams')}>
+						<span class="toggle-track"><span class="toggle-thumb"></span></span>
 						ライブ表示
-					</label>
-					<button class="refresh-btn" onclick={refreshChannel}>更新</button>
+					</button>
 				</div>
 			</div>
 		{/if}
@@ -196,28 +194,44 @@
 	gap: var(--sp-4)
 	flex-wrap: wrap
 
-.toggle
+.toggle-btn
 	display: flex
 	align-items: center
 	gap: var(--sp-2)
+	padding: 0
+	background: none
+	border: none
 	font-size: var(--fs-sm)
 	color: var(--c-text-sub)
 	cursor: pointer
 
-	input
-		accent-color: var(--c-accent)
+	&.active
+		color: var(--c-text)
 
-.refresh-btn
-	padding: var(--sp-2) var(--sp-4)
-	background: var(--c-surface)
-	border: 1px solid var(--c-border)
-	border-radius: var(--radius-sm)
-	color: var(--c-text-sub)
-	font-size: var(--fs-sm)
-	cursor: pointer
+.toggle-track
+	display: inline-block
+	position: relative
+	width: 36px
+	height: 20px
+	background: var(--c-border)
+	border-radius: 10px
+	transition: background 0.2s
 
-	&:hover
-		background: var(--c-overlay-2)
+	.active &
+		background: var(--c-accent)
+
+.toggle-thumb
+	position: absolute
+	top: 2px
+	left: 2px
+	width: 16px
+	height: 16px
+	background: var(--c-text)
+	border-radius: 50%
+	transition: left 0.2s
+
+	.active &
+		left: 18px
 
 .video-list
 	display: flex
