@@ -5,7 +5,7 @@ const SESSION_TTL_DAYS: i64 = 30;
 
 pub fn create_session(
     conn: &Connection,
-    auth_id: i64,
+    user_id: i64,
 ) -> Result<(String, String), rusqlite::Error> {
     let session_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
@@ -14,8 +14,8 @@ pub fn create_session(
     let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     conn.execute(
-        "INSERT INTO sessions (id, auth_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![session_id, auth_id, expires_at, created_at],
+        "INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![session_id, user_id, expires_at, created_at],
     )?;
 
     Ok((session_id, expires_at))
@@ -23,7 +23,7 @@ pub fn create_session(
 
 pub fn get_session(conn: &Connection, session_id: &str) -> Option<(String, i64, String)> {
     let result = conn.query_row(
-        "SELECT id, auth_id, expires_at FROM sessions WHERE id = ?1",
+        "SELECT id, user_id, expires_at FROM sessions WHERE id = ?1",
         rusqlite::params![session_id],
         |row| {
             Ok((
@@ -35,14 +35,14 @@ pub fn get_session(conn: &Connection, session_id: &str) -> Option<(String, i64, 
     );
 
     match result {
-        Ok((id, auth_id, expires_at)) => {
+        Ok((id, user_id, expires_at)) => {
             if let Ok(exp) = chrono::DateTime::parse_from_rfc3339(&expires_at) {
                 if exp < chrono::Utc::now() {
                     delete_session(conn, session_id);
                     return None;
                 }
             }
-            Some((id, auth_id, expires_at))
+            Some((id, user_id, expires_at))
         }
         Err(_) => None,
     }
@@ -72,7 +72,7 @@ mod tests {
     fn setup() -> Connection {
         let conn = db::open_memory();
         conn.execute(
-            "INSERT INTO auth (google_id, email, updated_at) VALUES ('g1', 'test@example.com', '2024-01-01T00:00:00Z')",
+            "INSERT INTO users (google_id, email, updated_at) VALUES ('g1', 'test@example.com', '2024-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
@@ -85,8 +85,8 @@ mod tests {
         let (session_id, _) = create_session(&conn, 1).unwrap();
         let result = get_session(&conn, &session_id);
         assert!(result.is_some());
-        let (_, auth_id, _) = result.unwrap();
-        assert_eq!(auth_id, 1);
+        let (_, user_id, _) = result.unwrap();
+        assert_eq!(user_id, 1);
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
         let conn = setup();
         let session_id = "expired-session";
         conn.execute(
-            "INSERT INTO sessions (id, auth_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![session_id, 1, "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"],
         )
         .unwrap();
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_session_with_invalid_auth_id_returns_error() {
+    fn test_create_session_with_invalid_user_id_returns_error() {
         let conn = setup();
         let result = create_session(&conn, 9999);
         assert!(result.is_err());

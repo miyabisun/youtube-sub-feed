@@ -20,7 +20,9 @@ fn start_normal_loop(state: AppState) {
             let channels = {
                 let conn = state.db.lock().unwrap();
                 let result = match conn.prepare(
-                    "SELECT id, last_fetched_at FROM channels WHERE show_livestreams = 0 ORDER BY last_fetched_at ASC NULLS FIRST",
+                    "SELECT c.id, c.last_fetched_at FROM channels c
+                     WHERE NOT EXISTS (SELECT 1 FROM user_channels uc WHERE uc.channel_id = c.id AND uc.show_livestreams = 1)
+                     ORDER BY c.last_fetched_at ASC NULLS FIRST",
                 ) {
                     Ok(mut stmt) => stmt
                         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -110,7 +112,9 @@ fn start_livestream_loop(state: AppState) {
             let channels = {
                 let conn = state.db.lock().unwrap();
                 let result = match conn.prepare(
-                    "SELECT id, last_fetched_at FROM channels WHERE show_livestreams = 1 ORDER BY last_fetched_at ASC NULLS FIRST",
+                    "SELECT DISTINCT c.id, c.last_fetched_at FROM channels c
+                     JOIN user_channels uc ON uc.channel_id = c.id AND uc.show_livestreams = 1
+                     ORDER BY c.last_fetched_at ASC NULLS FIRST",
                 ) {
                     Ok(mut stmt) => stmt
                         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))

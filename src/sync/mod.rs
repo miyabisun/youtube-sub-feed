@@ -20,6 +20,17 @@ pub(crate) async fn wait_for_token(state: &AppState) -> String {
     }
 }
 
+/// Returns `(user_id, access_token)` — blocks until a valid token is available.
+pub(crate) async fn wait_for_token_with_user(state: &AppState) -> (i64, String) {
+    loop {
+        if let Some(result) = token::get_valid_token(state).await {
+            return result;
+        }
+        tracing::info!("[sync] No valid token, waiting 60s...");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
 pub(crate) async fn wait_for_quota(state: &AppState) {
     if !state.quota.is_exceeded() {
         return;

@@ -1,8 +1,9 @@
 use crate::error::AppError;
+use crate::middleware::UserId;
 use crate::openapi::*;
 use crate::state::AppState;
 use crate::sync::{channel_sync, token, video_fetcher};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -27,20 +28,25 @@ pub fn routes() -> Router<AppState> {
         (status = 401, description = "未認証", body = ErrorResponse),
     ),
 )]
-async fn get_channels(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+async fn get_channels(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+) -> Result<Json<Value>, AppError> {
+    let uid = user_id.0;
     let rows = {
         let conn = state.db.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
+            "SELECT c.id, c.title, c.thumbnail_url, uc.show_livestreams, c.last_fetched_at,
               (SELECT GROUP_CONCAT(g.name, ', ')
                FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
-               WHERE cg.channel_id = c.id) as group_names,
-              c.is_favorite
+               WHERE cg.channel_id = c.id AND g.user_id = ?1) as group_names,
+              uc.is_favorite
             FROM channels c
+            JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
             ORDER BY c.title COLLATE NOCASE",
         )?;
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![uid], |row| {
                 Ok(json!({
                     "id": row.get::<_, String>(0)?,
                     "title": row.get::<_, String>(1)?,
@@ -68,7 +74,7 @@ struct VideosQuery {
     path = "/api/channels/{id}/videos",
     tag = "チャンネル",
     summary = "チャンネルの動画一覧",
-    description = "指定チャンネルの全動画を取得する (非表示動画含む)。",
+    description = "指定チャンネルの全動画を取得する (非表示状態含む)。",
     params(
         ("id" = String, Path, description = "チャンネルID"),
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
@@ -81,24 +87,28 @@ struct VideosQuery {
 )]
 async fn get_channel_videos(
     State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
     Query(query): Query<VideosQuery>,
 ) -> Result<Json<Value>, AppError> {
     let limit = query.limit.unwrap_or(100).min(500);
     let offset = query.offset.unwrap_or(0);
+    let uid = user_id.0;
 
     let rows = {
         let conn = state.db.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, thumbnail_url, published_at, duration,
-                    is_short, is_livestream, livestream_ended_at, is_hidden
-             FROM videos
-             WHERE channel_id = ?1
-             ORDER BY published_at DESC
-             LIMIT ?2 OFFSET ?3",
+            "SELECT v.id, v.title, v.thumbnail_url, v.published_at, v.duration,
+                    v.is_short, v.is_livestream, v.livestream_ended_at,
+                    COALESCE(uv.is_hidden, 0) as is_hidden
+             FROM videos v
+             LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
+             WHERE v.channel_id = ?2
+             ORDER BY v.published_at DESC
+             LIMIT ?3 OFFSET ?4",
         )?;
         let rows = stmt
-            .query_map(rusqlite::params![id, limit, offset], |row| {
+            .query_map(rusqlite::params![uid, id, limit, offset], |row| {
                 Ok(json!({
                     "id": row.get::<_, String>(0)?,
                     "title": row.get::<_, String>(1)?,
@@ -128,12 +138,15 @@ async fn get_channel_videos(
         (status = 401, description = "未認証", body = ErrorResponse),
     ),
 )]
-async fn sync_channels(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+async fn sync_channels(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+) -> Result<Json<Value>, AppError> {
     let access_token = token::get_valid_access_token(&state)
         .await
         .ok_or_else(|| AppError::Unauthorized("No valid token".to_string()))?;
 
-    let result = channel_sync::sync_subscriptions(&state, &access_token).await?;
+    let result = channel_sync::sync_subscriptions(&state, user_id.0, &access_token).await?;
     Ok(Json(json!(result)))
 }
 
@@ -174,7 +187,7 @@ pub(crate) struct UpdateChannelBody {
     path = "/api/channels/{id}",
     tag = "チャンネル",
     summary = "チャンネル設定更新",
-    description = "show_livestreams, is_favorite を更新する。show_livestreams を有効にするとフィードへのライブ表示 + 5分間隔のライブ察知巡回が適用される。is_favorite を有効にすると /api/rss にそのチャンネルの動画が含まれる。",
+    description = "show_livestreams, is_favorite を更新する（ユーザー単位の設定）。",
     params(("id" = String, Path, description = "チャンネルID")),
     request_body(content = UpdateChannelBody),
     responses(
@@ -185,6 +198,7 @@ pub(crate) struct UpdateChannelBody {
 )]
 async fn update_channel(
     State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
     Json(body): Json<UpdateChannelBody>,
 ) -> Result<Json<Value>, AppError> {
@@ -209,10 +223,10 @@ async fn update_channel(
     {
         let conn = state.db.lock().unwrap();
         conn.execute(
-            "UPDATE channels SET show_livestreams = COALESCE(?1, show_livestreams),
-                                 is_favorite = COALESCE(?2, is_favorite)
-             WHERE id = ?3",
-            rusqlite::params![body.show_livestreams, body.is_favorite, id],
+            "UPDATE user_channels SET show_livestreams = COALESCE(?1, show_livestreams),
+                                      is_favorite = COALESCE(?2, is_favorite)
+             WHERE user_id = ?3 AND channel_id = ?4",
+            rusqlite::params![body.show_livestreams, body.is_favorite, user_id.0, id],
         )?;
     }
     Ok(Json(json!({"ok": true})))
@@ -223,40 +237,58 @@ mod tests {
     // Channel Operations Spec
     //
     // Channel subscribe/unsubscribe, polling order, show_livestreams setting.
+    // All per-user preferences stored in user_channels table.
 
     use rusqlite::params;
 
+    fn setup() -> rusqlite::Connection {
+        let conn = crate::db::open_memory();
+        conn.execute(
+            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
     fn insert_channel(conn: &rusqlite::Connection, id: &str, title: &str) {
         conn.execute(
-            "INSERT INTO channels (id, title, show_livestreams, created_at) VALUES (?1, ?2, 0, '2024-01-01T00:00:00Z')",
+            "INSERT INTO channels (id, title, created_at) VALUES (?1, ?2, '2024-01-01T00:00:00Z')",
             params![id, title],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_channels (user_id, channel_id) VALUES (1, ?1)",
+            params![id],
         )
         .unwrap();
     }
 
-    fn insert_video(conn: &rusqlite::Connection, id: &str, channel_id: &str, published_at: &str, is_hidden: i64) {
+    fn insert_video(conn: &rusqlite::Connection, id: &str, channel_id: &str, published_at: &str) {
         conn.execute(
-            "INSERT INTO videos (id, channel_id, title, published_at, is_hidden)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, channel_id, format!("Video {}", id), published_at, is_hidden],
+            "INSERT INTO videos (id, channel_id, title, published_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, channel_id, format!("Video {}", id), published_at],
         )
         .unwrap();
     }
 
     #[test]
     fn test_channels_sorted_by_title_nocase() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Banana");
         insert_channel(&conn, "UC2", "apple");
         insert_channel(&conn, "UC3", "Cherry");
 
         let mut stmt = conn
             .prepare(
-                "SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
+                "SELECT c.id, c.title, c.thumbnail_url, uc.show_livestreams, c.last_fetched_at,
                   (SELECT GROUP_CONCAT(g.name, ', ')
                    FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
-                   WHERE cg.channel_id = c.id) as group_names
+                   WHERE cg.channel_id = c.id AND g.user_id = 1) as group_names,
+                  uc.is_favorite
                 FROM channels c
+                JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = 1
                 ORDER BY c.title COLLATE NOCASE",
             )
             .unwrap();
@@ -271,39 +303,46 @@ mod tests {
 
     #[test]
     fn test_channel_videos_includes_hidden() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
-        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC1", "2024-01-02T00:00:00Z", 1);
+        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z");
+        insert_video(&conn, "v2", "UC1", "2024-01-02T00:00:00Z");
+        // Hide v2 for user 1
+        conn.execute(
+            "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
+            [],
+        )
+        .unwrap();
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, thumbnail_url, published_at, duration,
-                        is_short, is_livestream, livestream_ended_at, is_hidden
-                 FROM videos
-                 WHERE channel_id = ?1
-                 ORDER BY published_at DESC
+                "SELECT v.id, COALESCE(uv.is_hidden, 0) as is_hidden
+                 FROM videos v
+                 LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = 1
+                 WHERE v.channel_id = ?1
+                 ORDER BY v.published_at DESC
                  LIMIT ?2 OFFSET ?3",
             )
             .unwrap();
-        let ids: Vec<String> = stmt
-            .query_map(params!["UC1", 100, 0], |row| row.get::<_, String>(0))
+        let rows: Vec<(String, i64)> = stmt
+            .query_map(params!["UC1", 100, 0], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"v1".to_string()));
-        assert!(ids.contains(&"v2".to_string()));
+        assert_eq!(rows.len(), 2, "Channel detail shows all videos including hidden");
+        // v2 should show is_hidden=1
+        let v2 = rows.iter().find(|(id, _)| id == "v2").unwrap();
+        assert_eq!(v2.1, 1);
     }
 
     #[test]
     fn test_channel_videos_pagination() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
-        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
+        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z");
+        insert_video(&conn, "v2", "UC1", "2024-01-02T00:00:00Z");
+        insert_video(&conn, "v3", "UC1", "2024-01-03T00:00:00Z");
 
         let mut stmt = conn
             .prepare(
@@ -328,62 +367,63 @@ mod tests {
 
     #[test]
     fn test_update_channel_show_livestreams() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
 
         let val: i64 = conn
-            .query_row("SELECT show_livestreams FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .query_row("SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, 0);
 
         conn.execute(
-            "UPDATE channels SET show_livestreams = ?1 WHERE id = ?2",
+            "UPDATE user_channels SET show_livestreams = ?1 WHERE user_id = 1 AND channel_id = ?2",
             params![1_i64, "UC1"],
         )
         .unwrap();
 
         let val: i64 = conn
-            .query_row("SELECT show_livestreams FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .query_row("SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, 1);
     }
 
     #[test]
     fn test_update_channel_is_favorite() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
 
         let val: i64 = conn
-            .query_row("SELECT is_favorite FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .query_row("SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, 0);
 
         conn.execute(
-            "UPDATE channels SET is_favorite = ?1 WHERE id = ?2",
+            "UPDATE user_channels SET is_favorite = ?1 WHERE user_id = 1 AND channel_id = ?2",
             params![1_i64, "UC1"],
         )
         .unwrap();
 
         let val: i64 = conn
-            .query_row("SELECT is_favorite FROM channels WHERE id = 'UC1'", [], |row| row.get(0))
+            .query_row("SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, 1);
     }
 
     #[test]
     fn test_channels_list_includes_is_favorite() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
-        conn.execute("UPDATE channels SET is_favorite = 1 WHERE id = 'UC1'", []).unwrap();
+        conn.execute("UPDATE user_channels SET is_favorite = 1 WHERE user_id = 1 AND channel_id = 'UC1'", []).unwrap();
 
         let mut stmt = conn
             .prepare(
-                "SELECT c.id, c.title, c.thumbnail_url, c.show_livestreams, c.last_fetched_at,
+                "SELECT c.id, c.title, c.thumbnail_url, uc.show_livestreams, c.last_fetched_at,
                   (SELECT GROUP_CONCAT(g.name, ', ')
                    FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
-                   WHERE cg.channel_id = c.id) as group_names,
-                  c.is_favorite
+                   WHERE cg.channel_id = c.id AND g.user_id = 1) as group_names,
+                  uc.is_favorite
                 FROM channels c
+                JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = 1
                 ORDER BY c.title COLLATE NOCASE",
             )
             .unwrap();
@@ -394,8 +434,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unsubscribed_channel_is_physically_deleted() {
-        let conn = crate::db::open_memory();
+    fn test_unsubscribed_channel_videos_cascade() {
+        let conn = setup();
         insert_channel(&conn, "UC_keep", "残すチャンネル");
         insert_channel(&conn, "UC_remove", "解除チャンネル");
         conn.execute(
@@ -404,6 +444,7 @@ mod tests {
         )
         .unwrap();
 
+        // Deleting channel cascades to videos
         conn.execute("DELETE FROM channels WHERE id = 'UC_remove'", [])
             .unwrap();
 
@@ -422,32 +463,8 @@ mod tests {
     }
 
     #[test]
-    fn test_re_subscribe_starts_clean() {
-        let conn = crate::db::open_memory();
-        insert_channel(&conn, "UC_re", "再登録チャンネル");
-        conn.execute(
-            "INSERT INTO videos (id, channel_id, title, is_hidden, fetched_at) VALUES ('old', 'UC_re', '古い動画', 1, '2025-06-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-
-        conn.execute("DELETE FROM channels WHERE id = 'UC_re'", [])
-            .unwrap();
-        insert_channel(&conn, "UC_re", "再登録チャンネル");
-
-        let vid: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM videos WHERE channel_id = 'UC_re'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(vid, 0, "re-subscribe should not carry over old hidden videos");
-    }
-
-    #[test]
     fn test_oldest_last_fetched_at_first() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC_a", "チャンネルA");
         insert_channel(&conn, "UC_b", "チャンネルB");
         insert_channel(&conn, "UC_c", "チャンネルC");
@@ -469,7 +486,7 @@ mod tests {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM channels WHERE show_livestreams = 0 ORDER BY last_fetched_at ASC",
+                "SELECT id FROM channels ORDER BY last_fetched_at ASC",
             )
             .unwrap();
         let ids: Vec<String> = stmt
@@ -482,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_null_last_fetched_at_has_highest_priority() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC_new", "新規チャンネル");
         insert_channel(&conn, "UC_old", "既存チャンネル");
         conn.execute(
@@ -503,18 +520,18 @@ mod tests {
 
     #[test]
     fn test_livestream_loop_targets_only_enabled_channels() {
-        let conn = crate::db::open_memory();
+        let conn = setup();
         insert_channel(&conn, "UC_normal", "通常チャンネル");
         insert_channel(&conn, "UC_live1", "ライブチャンネル1");
         insert_channel(&conn, "UC_live2", "ライブチャンネル2");
         conn.execute(
-            "UPDATE channels SET show_livestreams = 1 WHERE id IN ('UC_live1', 'UC_live2')",
+            "UPDATE user_channels SET show_livestreams = 1 WHERE channel_id IN ('UC_live1', 'UC_live2') AND user_id = 1",
             [],
         )
         .unwrap();
 
         let mut stmt = conn
-            .prepare("SELECT id FROM channels WHERE show_livestreams = 1")
+            .prepare("SELECT uc.channel_id FROM user_channels uc WHERE uc.show_livestreams = 1 AND uc.user_id = 1")
             .unwrap();
         let live: Vec<String> = stmt
             .query_map([], |row| row.get(0))

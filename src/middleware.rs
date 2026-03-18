@@ -7,10 +7,13 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use tower_cookies::Cookies;
 
+#[derive(Clone, Copy)]
+pub struct UserId(pub i64);
+
 pub async fn auth_middleware(
     State(state): State<AppState>,
     cookies: Cookies,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let session_id = match cookies.get("session") {
@@ -24,18 +27,20 @@ pub async fn auth_middleware(
         }
     };
 
-    let valid = {
+    let user_id = {
         let conn = state.db.lock().unwrap();
-        session::get_session(&conn, &session_id).is_some()
+        session::get_session(&conn, &session_id).map(|(_, user_id, _)| user_id)
     };
 
-    if !valid {
-        return (
+    match user_id {
+        Some(id) => {
+            request.extensions_mut().insert(UserId(id));
+            next.run(request).await
+        }
+        None => (
             StatusCode::UNAUTHORIZED,
             axum::Json(json!({"error": "Unauthorized"})),
         )
-            .into_response();
+            .into_response(),
     }
-
-    next.run(request).await
 }

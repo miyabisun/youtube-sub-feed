@@ -3,13 +3,13 @@ use crate::state::AppState;
 
 const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
 
-/// Returns a valid access token, refreshing if needed.
-/// Returns None if no auth record exists or tokens are missing.
-pub async fn get_valid_access_token(state: &AppState) -> Option<String> {
-    let (access_token, refresh_token, expires_at_str, auth_id) = {
+/// Returns `(user_id, access_token)` for the master user, refreshing if needed.
+/// Returns None if no user record exists or tokens are missing.
+pub async fn get_valid_token(state: &AppState) -> Option<(i64, String)> {
+    let (access_token, refresh_token, expires_at_str, user_id) = {
         let conn = state.db.lock().unwrap();
         let result = conn.query_row(
-            "SELECT id, access_token, refresh_token, token_expires_at FROM auth LIMIT 1",
+            "SELECT id, access_token, refresh_token, token_expires_at FROM users ORDER BY id ASC LIMIT 1",
             [],
             |row| {
                 Ok((
@@ -34,7 +34,7 @@ pub async fn get_valid_access_token(state: &AppState) -> Option<String> {
         .unwrap_or(0);
 
     if expires_ms - now_ms > REFRESH_MARGIN_MS {
-        return Some(access_token);
+        return Some((user_id, access_token));
     }
 
     // Token expired or about to expire - refresh
@@ -48,12 +48,12 @@ pub async fn get_valid_access_token(state: &AppState) -> Option<String> {
             {
                 let conn = state.db.lock().unwrap();
                 let _ = conn.execute(
-                    "UPDATE auth SET access_token = ?1, token_expires_at = ?2, updated_at = ?3 WHERE id = ?4",
-                    rusqlite::params![result.access_token, new_expires_at, updated_at, auth_id],
+                    "UPDATE users SET access_token = ?1, token_expires_at = ?2, updated_at = ?3 WHERE id = ?4",
+                    rusqlite::params![result.access_token, new_expires_at, updated_at, user_id],
                 );
             }
 
-            Some(result.access_token)
+            Some((user_id, result.access_token))
         }
         Err(e) => {
             tracing::error!("[token] Failed to refresh token: {}", e);
@@ -62,11 +62,16 @@ pub async fn get_valid_access_token(state: &AppState) -> Option<String> {
     }
 }
 
+/// Convenience wrapper: returns only the access_token (for callers that don't need user_id).
+pub async fn get_valid_access_token(state: &AppState) -> Option<String> {
+    get_valid_token(state).await.map(|(_, token)| token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn insert_auth(
+    fn insert_user(
         state: &AppState,
         access_token: Option<&str>,
         refresh_token: Option<&str>,
@@ -74,7 +79,7 @@ mod tests {
     ) {
         let conn = state.db.lock().unwrap();
         conn.execute(
-            "INSERT INTO auth (google_id, email, access_token, refresh_token, token_expires_at, updated_at)
+            "INSERT INTO users (google_id, email, access_token, refresh_token, token_expires_at, updated_at)
              VALUES ('g1', 'test@example.com', ?1, ?2, ?3, '2024-01-01T00:00:00Z')",
             rusqlite::params![access_token, refresh_token, expires_at],
         )
@@ -82,7 +87,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_auth_row_returns_none() {
+    async fn no_user_row_returns_none() {
         let state = AppState::test();
         assert!(get_valid_access_token(&state).await.is_none());
     }
@@ -90,29 +95,30 @@ mod tests {
     #[tokio::test]
     async fn null_access_token_returns_none() {
         let state = AppState::test();
-        insert_auth(&state, None, Some("refresh"), Some("2099-01-01T00:00:00Z"));
+        insert_user(&state, None, Some("refresh"), Some("2099-01-01T00:00:00Z"));
         assert!(get_valid_access_token(&state).await.is_none());
     }
 
     #[tokio::test]
     async fn null_refresh_token_returns_none() {
         let state = AppState::test();
-        insert_auth(&state, Some("access"), None, Some("2099-01-01T00:00:00Z"));
+        insert_user(&state, Some("access"), None, Some("2099-01-01T00:00:00Z"));
         assert!(get_valid_access_token(&state).await.is_none());
     }
 
     #[tokio::test]
     async fn valid_token_returned_without_refresh() {
         let state = AppState::test();
-        insert_auth(
+        insert_user(
             &state,
             Some("my-token"),
             Some("refresh"),
             Some("2099-01-01T00:00:00Z"),
         );
-        assert_eq!(
-            get_valid_access_token(&state).await,
-            Some("my-token".to_string())
-        );
+        let result = get_valid_token(&state).await;
+        assert!(result.is_some());
+        let (user_id, token) = result.unwrap();
+        assert_eq!(user_id, 1);
+        assert_eq!(token, "my-token");
     }
 }

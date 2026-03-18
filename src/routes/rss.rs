@@ -1,10 +1,12 @@
 use crate::error::AppError;
+use crate::openapi::*;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
+use serde::Deserialize;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/rss", get(get_rss_feed))
@@ -17,33 +19,62 @@ struct RssItem {
     channel_title: String,
 }
 
+#[derive(Deserialize)]
+struct RssQuery {
+    token: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/rss",
     tag = "RSS",
     summary = "お気に入りチャンネルのRSSフィード",
-    description = "お気に入り (is_favorite=1) チャンネルの動画をRSS 2.0形式で配信する。認証不要。",
+    description = "お気に入り (is_favorite=1) チャンネルの動画をRSS 2.0形式で配信する。認証不要。token パラメータ（UUID）でユーザーを特定する。",
+    params(
+        ("token" = Option<String>, Query, description = "RSSトークン (UUID)"),
+    ),
     responses(
         (status = 200, description = "RSS 2.0 XML", content_type = "application/rss+xml"),
+        (status = 404, description = "トークンが無効", body = ErrorResponse),
     ),
 )]
 async fn get_rss_feed(
     State(state): State<AppState>,
+    Query(query): Query<RssQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let items = {
         let conn = state.db.lock().unwrap();
+
+        let user_id: i64 = match query.token {
+            Some(ref token) => conn
+                .query_row(
+                    "SELECT id FROM users WHERE rss_token = ?1",
+                    [token],
+                    |row| row.get(0),
+                )
+                .map_err(|_| AppError::NotFound("Invalid RSS token".to_string()))?,
+            // Fallback: return first user's feed for backward compatibility with existing
+            // RSS consumers (e.g. Discord webhook via rss_checker).
+            // TODO: Remove once all RSS consumers are updated to use ?token=<uuid>.
+            None => conn
+                .query_row("SELECT id FROM users ORDER BY id LIMIT 1", [], |row| row.get::<_, i64>(0))
+                .map_err(|_| AppError::NotFound("No users found".to_string()))?,
+        };
+
         let mut stmt = conn.prepare(
             "SELECT v.id, v.title, v.published_at, c.title as channel_title
              FROM videos v
              JOIN channels c ON v.channel_id = c.id
-             WHERE c.is_favorite = 1
-               AND v.is_hidden = 0
-               AND (v.is_livestream = 0 OR c.show_livestreams = 1)
+             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
+             LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
+             WHERE uc.is_favorite = 1
+               AND COALESCE(uv.is_hidden, 0) = 0
+               AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
              ORDER BY v.published_at DESC
              LIMIT 100",
         )?;
         let items = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![user_id], |row| {
                 Ok(RssItem {
                     video_id: row.get(0)?,
                     title: row.get(1)?,
@@ -107,7 +138,6 @@ fn escape_xml(s: &str) -> String {
 }
 
 fn iso8601_to_rfc2822(s: &str) -> Option<String> {
-    // Parse "2024-01-15T10:30:00Z" -> RFC 2822 "Mon, 15 Jan 2024 10:30:00 +0000"
     let s = s.trim();
     if s.len() < 19 {
         return None;
@@ -124,7 +154,6 @@ fn iso8601_to_rfc2822(s: &str) -> Option<String> {
     ]
     .get(month.checked_sub(1)? as usize)?;
 
-    // Compute day of week using Tomohiko Sakamoto's algorithm
     let dow = day_of_week(year, month, day)?;
     let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
 
@@ -149,11 +178,11 @@ mod tests {
     // RSS Feed Spec
     //
     // GET /api/rss delivers RSS 2.0 XML for favorite channels.
-    // - Only videos from channels with is_favorite=1
-    // - Excludes hidden videos (is_hidden=1)
-    // - Respects livestream filter (is_livestream=0 OR show_livestreams=1)
+    // - Only videos from channels with user's is_favorite=1
+    // - Excludes user's hidden videos
+    // - Respects user's livestream filter
     // - Sorted by published_at DESC, limited to 100
-    // - No authentication required
+    // - No authentication required (public endpoint with rss_token param)
 
     use super::{build_rss_xml, RssItem};
     use rusqlite::params;
@@ -161,12 +190,28 @@ mod tests {
     fn setup() -> rusqlite::Connection {
         let conn = crate::db::open_memory();
         conn.execute(
-            "INSERT INTO channels (id, title, show_livestreams, is_favorite, created_at) VALUES ('UC_fav', 'Fav Ch', 0, 1, '2024-01-01T00:00:00Z')",
+            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO channels (id, title, show_livestreams, is_favorite, created_at) VALUES ('UC_nofav', 'Normal Ch', 0, 0, '2024-01-01T00:00:00Z')",
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC_fav', 'Fav Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC_nofav', 'Normal Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // User subscribes: UC_fav is favorite, UC_nofav is not
+        conn.execute(
+            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_fav', 1, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_nofav', 0, 0)",
             [],
         )
         .unwrap();
@@ -178,38 +223,38 @@ mod tests {
         id: &str,
         channel_id: &str,
         published_at: &str,
-        is_hidden: i64,
         is_livestream: i64,
     ) {
         conn.execute(
-            "INSERT INTO videos (id, channel_id, title, published_at, is_hidden, is_livestream)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 id,
                 channel_id,
                 format!("Video {}", id),
                 published_at,
-                is_hidden,
                 is_livestream
             ],
         )
         .unwrap();
     }
 
-    fn query_rss_videos(conn: &rusqlite::Connection) -> Vec<String> {
+    fn query_rss_videos(conn: &rusqlite::Connection, user_id: i64) -> Vec<String> {
         let mut stmt = conn
             .prepare(
                 "SELECT v.id
                  FROM videos v
                  JOIN channels c ON v.channel_id = c.id
-                 WHERE c.is_favorite = 1
-                   AND v.is_hidden = 0
-                   AND (v.is_livestream = 0 OR c.show_livestreams = 1)
+                 JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
+                 LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
+                 WHERE uc.is_favorite = 1
+                   AND COALESCE(uv.is_hidden, 0) = 0
+                   AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
                  ORDER BY v.published_at DESC
                  LIMIT 100",
             )
             .unwrap();
-        stmt.query_map([], |row| row.get::<_, String>(0))
+        stmt.query_map(params![user_id], |row| row.get::<_, String>(0))
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
@@ -218,31 +263,37 @@ mod tests {
     #[test]
     fn test_rss_only_favorite_channels() {
         let conn = setup();
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0, 0);
-        insert_video(&conn, "v2", "UC_nofav", "2024-01-03T00:00:00Z", 0, 0);
+        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        insert_video(&conn, "v2", "UC_nofav", "2024-01-03T00:00:00Z", 0);
 
-        let ids = query_rss_videos(&conn);
+        let ids = query_rss_videos(&conn, 1);
         assert_eq!(ids, vec!["v1"]);
     }
 
     #[test]
     fn test_rss_excludes_hidden() {
         let conn = setup();
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0, 0);
-        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 1, 0);
+        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        // Hide v2 for user 1
+        conn.execute(
+            "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
+            [],
+        )
+        .unwrap();
 
-        let ids = query_rss_videos(&conn);
+        let ids = query_rss_videos(&conn, 1);
         assert_eq!(ids, vec!["v1"]);
     }
 
     #[test]
     fn test_rss_excludes_livestreams_unless_enabled() {
         let conn = setup();
-        // UC_fav has show_livestreams=0
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0, 1);
-        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0, 0);
+        // UC_fav has show_livestreams=0 for user 1
+        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 1);
+        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
 
-        let ids = query_rss_videos(&conn);
+        let ids = query_rss_videos(&conn, 1);
         assert_eq!(ids, vec!["v2"]);
     }
 
@@ -250,24 +301,34 @@ mod tests {
     fn test_rss_includes_livestreams_when_enabled() {
         let conn = crate::db::open_memory();
         conn.execute(
-            "INSERT INTO channels (id, title, show_livestreams, is_favorite, created_at) VALUES ('UC_live', 'Live Ch', 1, 1, '2024-01-01T00:00:00Z')",
+            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
             [],
         )
         .unwrap();
-        insert_video(&conn, "v1", "UC_live", "2024-01-02T00:00:00Z", 0, 1);
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC_live', 'Live Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_live', 1, 1)",
+            [],
+        )
+        .unwrap();
+        insert_video(&conn, "v1", "UC_live", "2024-01-02T00:00:00Z", 1);
 
-        let ids = query_rss_videos(&conn);
+        let ids = query_rss_videos(&conn, 1);
         assert_eq!(ids, vec!["v1"]);
     }
 
     #[test]
     fn test_rss_sorted_by_published_at_desc() {
         let conn = setup();
-        insert_video(&conn, "old", "UC_fav", "2024-01-01T00:00:00Z", 0, 0);
-        insert_video(&conn, "mid", "UC_fav", "2024-01-15T00:00:00Z", 0, 0);
-        insert_video(&conn, "new", "UC_fav", "2024-01-30T00:00:00Z", 0, 0);
+        insert_video(&conn, "old", "UC_fav", "2024-01-01T00:00:00Z", 0);
+        insert_video(&conn, "mid", "UC_fav", "2024-01-15T00:00:00Z", 0);
+        insert_video(&conn, "new", "UC_fav", "2024-01-30T00:00:00Z", 0);
 
-        let ids = query_rss_videos(&conn);
+        let ids = query_rss_videos(&conn, 1);
         assert_eq!(ids, vec!["new", "mid", "old"]);
     }
 
@@ -290,17 +351,14 @@ mod tests {
 
     #[test]
     fn test_iso8601_to_rfc2822_boundary_dates() {
-        // Leap year
         assert_eq!(
             super::iso8601_to_rfc2822("2024-02-29T00:00:00Z"),
             Some("Thu, 29 Feb 2024 00:00:00 +0000".to_string())
         );
-        // Year end
         assert_eq!(
             super::iso8601_to_rfc2822("2024-12-31T23:59:59Z"),
             Some("Tue, 31 Dec 2024 23:59:59 +0000".to_string())
         );
-        // Year start
         assert_eq!(
             super::iso8601_to_rfc2822("2025-01-01T00:00:00Z"),
             Some("Wed, 01 Jan 2025 00:00:00 +0000".to_string())

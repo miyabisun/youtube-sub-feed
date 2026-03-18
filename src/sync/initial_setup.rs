@@ -16,11 +16,11 @@ pub async fn run_initial_setup(state: &AppState) {
 
     tracing::info!("[setup] Waiting for login...");
 
-    let access_token = crate::sync::wait_for_token(state).await;
+    let (user_id, access_token) = crate::sync::wait_for_token_with_user(state).await;
 
     tracing::info!("[setup] Starting initial setup...");
 
-    if let Err(e) = channel_sync::sync_subscriptions(state, &access_token).await {
+    if let Err(e) = channel_sync::sync_subscriptions(state, user_id, &access_token).await {
         tracing::error!("[setup] Error syncing subscriptions: {}", e);
         return;
     }

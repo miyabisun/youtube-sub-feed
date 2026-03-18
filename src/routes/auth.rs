@@ -56,7 +56,7 @@ struct CallbackQuery {
     path = "/api/auth/callback",
     tag = "認証",
     summary = "OAuth2 コールバック",
-    description = "Google からのコールバックを処理し、セッション Cookie を設定後 / にリダイレクトする。",
+    description = "Google からのコールバックを処理し、セッション Cookie を設定後 / にリダイレクトする。\n\n未登録ユーザーは最初のユーザーとして master ロールで自動登録される。2人目以降は既存ユーザーのみログイン可能。",
     params(
         ("code" = Option<String>, Query, description = "認証コード"),
         ("state" = Option<String>, Query, description = "CSRF state"),
@@ -64,6 +64,7 @@ struct CallbackQuery {
     responses(
         (status = 307, description = "/ へリダイレクト"),
         (status = 400, description = "パラメータ不正", body = ErrorResponse),
+        (status = 403, description = "未登録ユーザー", body = ErrorResponse),
     ),
 )]
 async fn callback(
@@ -102,20 +103,27 @@ async fn callback(
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let updated_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    let (auth_id, session_id, expires_at) = {
+    let (session_id, expires_at) = {
         let conn = state.db.lock().unwrap();
 
         let existing: Option<i64> = conn
             .query_row(
-                "SELECT id FROM auth WHERE google_id = ?1",
+                "SELECT id FROM users WHERE google_id = ?1",
                 [&user_info.id],
                 |row| row.get(0),
             )
             .ok();
 
-        let auth_id = if let Some(id) = existing {
+        let user_id = if let Some(id) = existing {
+            // Generate rss_token for users migrated from old schema (rss_token = NULL)
+            let rss_token_update = {
+                let has_token: bool = conn
+                    .query_row("SELECT rss_token IS NOT NULL FROM users WHERE id = ?1", [id], |row| row.get(0))
+                    .unwrap_or(false);
+                if has_token { None } else { Some(uuid::Uuid::new_v4().to_string()) }
+            };
             conn.execute(
-                "UPDATE auth SET email = ?1, access_token = ?2, refresh_token = COALESCE(?3, refresh_token), token_expires_at = ?4, updated_at = ?5 WHERE id = ?6",
+                "UPDATE users SET email = ?1, access_token = ?2, refresh_token = COALESCE(?3, refresh_token), token_expires_at = ?4, updated_at = ?5, rss_token = COALESCE(?7, rss_token) WHERE id = ?6",
                 rusqlite::params![
                     user_info.email,
                     tokens.access_token,
@@ -123,15 +131,26 @@ async fn callback(
                     token_expires_at,
                     updated_at,
                     id,
+                    rss_token_update,
                 ],
             )?;
             id
         } else {
+            // First user becomes master, subsequent unregistered users are rejected
+            let user_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+
+            if user_count > 0 {
+                return Err(AppError::Forbidden("User not registered".to_string()));
+            }
+
+            let rss_token = uuid::Uuid::new_v4().to_string();
             conn.execute(
-                "INSERT INTO auth (google_id, email, access_token, refresh_token, token_expires_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO users (google_id, email, role, rss_token, access_token, refresh_token, token_expires_at, updated_at) VALUES (?1, ?2, 'master', ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     user_info.id,
                     user_info.email,
+                    rss_token,
                     tokens.access_token,
                     tokens.refresh_token,
                     token_expires_at,
@@ -141,11 +160,9 @@ async fn callback(
             conn.last_insert_rowid()
         };
 
-        let (session_id, expires_at) = session::create_session(&conn, auth_id)?;
-        (auth_id, session_id, expires_at)
+        let (session_id, expires_at) = session::create_session(&conn, user_id)?;
+        (session_id, expires_at)
     };
-
-    let _ = auth_id;
 
     let mut cookie = Cookie::new("session", session_id);
     cookie.set_http_only(true);
@@ -211,7 +228,7 @@ async fn me(
 
     let email: String = conn
         .query_row(
-            "SELECT email FROM auth WHERE id = ?1",
+            "SELECT email FROM users WHERE id = ?1",
             [session.1],
             |row| row.get(0),
         )
