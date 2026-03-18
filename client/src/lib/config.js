@@ -1,7 +1,9 @@
-import { getBasePath } from '$lib/router.svelte.js';
+import { getBasePath } from '$lib/router.svelte.js'
 
 export default {
-	path: {
-		get api() { return `${getBasePath()}/api`; }
-	}
-};
+  path: {
+    get api() {
+      return `${getBasePath()}/api`
+    },
+  },
+}

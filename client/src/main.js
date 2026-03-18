@@ -1,6 +1,6 @@
-import { mount } from 'svelte';
-import 'normalize.css';
-import './global.sass';
-import App from './App.svelte';
+import { mount } from 'svelte'
+import 'normalize.css'
+import './global.sass'
+import App from './App.svelte'
 
-mount(App, { target: document.getElementById('app') });
+mount(App, { target: document.getElementById('app') })
