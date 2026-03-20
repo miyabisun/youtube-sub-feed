@@ -1,5 +1,5 @@
 use crate::duration::is_short_duration;
-use crate::notify::{notify_new_video, notify_warning, VideoInfo};
+use crate::notify::notify_warning;
 use crate::state::AppState;
 use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uush_playlist};
 use crate::youtube::videos::fetch_video_details;
@@ -9,7 +9,6 @@ pub async fn fetch_channel_videos(
     state: &AppState,
     channel_id: &str,
     access_token: &str,
-    notify: bool,
 ) -> Vec<String> {
     // 1. Get upload_playlist_id from DB
     let upload_playlist_id = {
@@ -65,6 +64,13 @@ pub async fn fetch_channel_videos(
                 return Vec::new();
             }
             tracing::error!("[video-fetcher] Error fetching playlist: {}", e);
+            notify_warning(
+                &state.http,
+                &state.config,
+                "プレイリスト取得エラー",
+                &format!("チャンネル {} のプレイリスト取得に失敗: {}", channel_id, e),
+            )
+            .await;
             return Vec::new();
         }
     };
@@ -196,45 +202,70 @@ pub async fn fetch_channel_videos(
         );
     }
 
-    // 7. Discord notifications
-    if notify {
-        let channel_title = {
-            let conn = state.db.lock().unwrap();
-            conn.query_row(
-                "SELECT title FROM channels WHERE id = ?1",
-                [channel_id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        };
+    new_video_ids
+}
 
-        if let Some(ch_title) = channel_title {
-            for video_id in &new_video_ids {
-                let video_info = {
-                    let conn = state.db.lock().unwrap();
-                    conn.query_row(
-                        "SELECT id, title, thumbnail_url, published_at, is_short FROM videos WHERE id = ?1",
-                        [video_id],
-                        |row| {
-                            Ok(VideoInfo {
-                                id: row.get::<_, String>(0)?,
-                                title: row.get::<_, String>(1)?,
-                                channel_title: ch_title.clone(),
-                                thumbnail_url: row.get::<_, Option<String>>(2)?,
-                                published_at: row.get::<_, Option<String>>(3)?,
-                                is_short: row.get::<_, i64>(4)? == 1,
-                            })
-                        },
-                    )
-                    .ok()
-                };
+#[cfg(test)]
+mod tests {
+    // Livestream Status Spec
+    //
+    // A video is "currently live" when is_livestream=1 AND livestream_ended_at IS NULL.
+    // When the stream ends, livestream_ended_at is updated with the end timestamp.
 
-                if let Some(info) = video_info {
-                    notify_new_video(&state.http, &state.config, &info).await;
-                }
-            }
-        }
+    use crate::db;
+
+    fn setup() -> rusqlite::Connection {
+        let conn = db::open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'テストチャンネル', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn
     }
 
-    new_video_ids
+    #[test]
+    fn live_status_when_is_livestream_1_and_ended_at_null() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, is_livestream, fetched_at) VALUES ('live1', 'UC1', 'ライブ配信中', 1, '2025-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let (is_livestream, ended_at): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT is_livestream, livestream_ended_at FROM videos WHERE id = 'live1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(is_livestream, 1);
+        assert!(ended_at.is_none(), "livestream_ended_at IS NULL means currently live");
+    }
+
+    #[test]
+    fn livestream_end_detected_by_updating_ended_at() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, is_livestream, fetched_at) VALUES ('live1', 'UC1', 'ライブ配信', 1, '2025-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "UPDATE videos SET livestream_ended_at = '2025-06-01T03:00:00Z' WHERE id = 'live1'",
+            [],
+        )
+        .unwrap();
+
+        let ended: Option<String> = conn
+            .query_row(
+                "SELECT livestream_ended_at FROM videos WHERE id = 'live1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(ended.is_some(), "livestream_ended_at is set when stream ends");
+    }
 }

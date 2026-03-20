@@ -1,6 +1,5 @@
 pub mod channel_sync;
 pub mod initial_setup;
-pub mod livestream;
 pub mod polling;
 pub mod rss_checker;
 pub mod subscriptions;

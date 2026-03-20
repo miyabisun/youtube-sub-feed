@@ -51,7 +51,7 @@ pub fn parse_atom_feed(xml: &str) -> Vec<RssEntry> {
 pub async fn fetch_rss_feed(
     http: &reqwest::Client,
     channel_id: &str,
-) -> Vec<RssEntry> {
+) -> Result<Vec<RssEntry>, String> {
     let url = format!(
         "https://www.youtube.com/feeds/videos.xml?channel_id={}",
         channel_id
@@ -66,14 +66,15 @@ pub async fn fetch_rss_feed(
     match result {
         Ok(Ok(res)) => {
             if !res.status().is_success() {
-                return Vec::new();
+                return Err(format!("HTTP {}", res.status().as_u16()));
             }
             match res.text().await {
-                Ok(xml) => parse_atom_feed(&xml),
-                Err(_) => Vec::new(),
+                Ok(xml) => Ok(parse_atom_feed(&xml)),
+                Err(e) => Err(format!("Body read error: {}", e)),
             }
         }
-        _ => Vec::new(),
+        Ok(Err(e)) => Err(format!("Network error: {}", e)),
+        Err(_) => Err("Timeout (10s)".to_string()),
     }
 }
 

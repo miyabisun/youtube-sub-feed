@@ -9,6 +9,8 @@ pub fn start_periodic_sync(state: AppState) {
         tracing::info!("[polling] Starting periodic subscription sync (10min)");
 
         loop {
+            super::wait_for_quota(&state).await;
+
             if let Some((user_id, access_token)) = token::get_valid_token(&state).await {
                 if let Err(e) = channel_sync::sync_subscriptions(&state, user_id, &access_token).await {
                     tracing::error!("[polling] Sync error: {}", e);

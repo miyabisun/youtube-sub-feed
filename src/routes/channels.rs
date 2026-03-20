@@ -170,7 +170,7 @@ async fn refresh_channel(
         .await
         .ok_or_else(|| AppError::Unauthorized("No valid token".to_string()))?;
 
-    let new_video_ids = video_fetcher::fetch_channel_videos(&state, &id, &access_token, true).await;
+    let new_video_ids = video_fetcher::fetch_channel_videos(&state, &id, &access_token).await;
     Ok(Json(json!({"newVideos": new_video_ids.len()})))
 }
 

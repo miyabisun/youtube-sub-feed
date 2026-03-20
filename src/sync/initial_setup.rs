@@ -1,4 +1,3 @@
-use crate::notify::notify_setup_complete;
 use crate::state::AppState;
 use crate::sync::{channel_sync, video_fetcher};
 
@@ -51,22 +50,20 @@ pub async fn run_initial_setup(state: &AppState) {
     tracing::info!("[setup] Fetching videos for {} channels...", channels.len());
 
     for channel_id in &channels {
-        video_fetcher::fetch_channel_videos(state, channel_id, &access_token, false).await;
+        video_fetcher::fetch_channel_videos(state, channel_id, &access_token).await;
     }
 
-    let (ch_count, vid_count) = {
+    let vid_count: i64 = {
         let conn = state.db.lock().unwrap();
-        let ch: i64 = conn
-            .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
-            .unwrap_or(0);
-        let vid: i64 = conn
-            .query_row("SELECT COUNT(*) FROM videos", [], |row| row.get(0))
-            .unwrap_or(0);
-        (ch, vid)
+        conn.query_row("SELECT COUNT(*) FROM videos", [], |row| row.get(0))
+            .unwrap_or(0)
     };
 
-    tracing::info!("[setup] Initial setup complete");
-    notify_setup_complete(&state.http, &state.config, ch_count, vid_count).await;
+    tracing::info!(
+        "[setup] Initial setup complete: {} channels, {} videos",
+        channels.len(),
+        vid_count
+    );
 }
 
 // Initial Setup Spec
