@@ -9,11 +9,18 @@ pub struct RssCheckResult {
     pub rss_error: bool,
 }
 
+const MAX_RETRIES: u32 = 3;
+const RETRY_INTERVAL_SECS: u64 = 3;
+
+fn is_retryable(error: &RssError) -> bool {
+    matches!(error, RssError::Http(404 | 500))
+}
+
 pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channel_title: &str) -> RssCheckResult {
-    let entries = match fetch_rss_feed(&state.http, channel_id).await {
+    let entries = match fetch_with_retry(&state.http, channel_id).await {
         Ok(entries) => entries,
         Err(error) => {
-            tracing::warn!("[rss-checker] {} RSS failed: {}", channel_id, error);
+            tracing::warn!("[rss-checker] {} RSS failed after retries: {}", channel_id, error);
 
             // Notify Discord (throttled: once per hour per channel)
             let cache_key = format!("rss_err:{}", channel_id);
@@ -94,13 +101,63 @@ pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channe
     }
 }
 
+async fn fetch_with_retry(
+    http: &reqwest::Client,
+    channel_id: &str,
+) -> Result<Vec<crate::youtube::rss::RssEntry>, RssError> {
+    let mut last_error = None;
+
+    for attempt in 0..=MAX_RETRIES {
+        match fetch_rss_feed(http, channel_id).await {
+            Ok(entries) => return Ok(entries),
+            Err(error) => {
+                if attempt < MAX_RETRIES && is_retryable(&error) {
+                    tracing::info!(
+                        "[rss-checker] {} retry {}/{} after {}",
+                        channel_id, attempt + 1, MAX_RETRIES, error
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(RETRY_INTERVAL_SECS)).await;
+                    last_error = Some(error);
+                } else {
+                    last_error = Some(error);
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // RSS Error Handling Spec
     //
-    // On RSS error (HTTP 404/500, timeout, network error):
-    // - Return rss_error: true to caller
+    // On RSS error (HTTP 404/500):
+    // - Retry up to 3 times with 3-second intervals (4 attempts total)
+    // - Other errors (timeout, network) fail immediately without retry
+    // - After all retries exhausted: notify Discord, return rss_error: true
     // - Caller (polling loop) pauses entire cycle for 15 minutes
     // - Discord notification: once per hour per channel (rss_err: cache, 3600s TTL)
-    // - After 15 min pause, resume from next channel in round-robin
+
+    #[test]
+    fn retryable_status_codes() {
+        assert!(is_retryable(&RssError::Http(404)));
+        assert!(is_retryable(&RssError::Http(500)));
+    }
+
+    #[test]
+    fn non_retryable_errors() {
+        assert!(!is_retryable(&RssError::Http(429)));
+        assert!(!is_retryable(&RssError::Http(403)));
+        assert!(!is_retryable(&RssError::Other("Timeout".to_string())));
+    }
+
+    #[test]
+    fn retry_constants() {
+        assert_eq!(MAX_RETRIES, 3);
+        assert_eq!(RETRY_INTERVAL_SECS, 3);
+    }
 }
