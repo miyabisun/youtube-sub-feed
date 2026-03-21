@@ -1,21 +1,12 @@
 use crate::notify::notify_warning;
 use crate::state::AppState;
-use crate::youtube::rss::{fetch_rss_feed, rss_url};
+use crate::youtube::rss::{fetch_rss_feed, rss_url, RssError};
 use serde_json::json;
 
-const RSS_SKIP_TTL: u64 = 15 * 60;
-
-#[allow(dead_code)]
 pub struct RssCheckResult {
     pub has_new_videos: bool,
     pub new_video_ids: Vec<String>,
-}
-
-pub fn is_rss_skipped(state: &AppState, channel_id: &str) -> bool {
-    state
-        .cache
-        .get(&format!("rss_skip:{}", channel_id))
-        .is_some()
+    pub rss_error: bool,
 }
 
 pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channel_title: &str) -> RssCheckResult {
@@ -24,18 +15,13 @@ pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channe
         Err(error) => {
             tracing::warn!("[rss-checker] {} RSS failed: {}", channel_id, error);
 
-            // Skip this channel for 15 minutes
-            state
-                .cache
-                .set(&format!("rss_skip:{}", channel_id), json!(true), Some(RSS_SKIP_TTL));
-
+            // Notify Discord (throttled: once per hour per channel)
             let cache_key = format!("rss_err:{}", channel_id);
             if state.cache.get(&cache_key).is_none() {
                 state
                     .cache
                     .set(&cache_key, json!(true), Some(3600));
 
-                use crate::youtube::rss::RssError;
                 let detail = match &error {
                     RssError::Http(code) => format!("Status code: {}", code),
                     RssError::Other(msg) => format!("Error: {}", msg),
@@ -56,6 +42,7 @@ pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channe
             return RssCheckResult {
                 has_new_videos: false,
                 new_video_ids: Vec::new(),
+                rss_error: true,
             };
         }
     };
@@ -64,6 +51,7 @@ pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channe
         return RssCheckResult {
             has_new_videos: false,
             new_video_ids: Vec::new(),
+            rss_error: false,
         };
     }
 
@@ -102,22 +90,17 @@ pub async fn check_rss_for_new_videos(state: &AppState, channel_id: &str, channe
     RssCheckResult {
         has_new_videos: !new_video_ids.is_empty(),
         new_video_ids,
+        rss_error: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // RSS Skip Spec
+    // RSS Error Handling Spec
     //
     // On RSS error (HTTP 404/500, timeout, network error):
-    // - Skip the channel for 15 minutes (RSS_SKIP_TTL = 900s)
-    // - Notify Discord once per hour per channel (rss_err: cache, 3600s TTL)
-    // - Resume normal polling after skip expires
-
-    #[test]
-    fn skip_ttl_is_15_minutes() {
-        assert_eq!(RSS_SKIP_TTL, 900, "RSS skip TTL should be 15 minutes (900s)");
-    }
+    // - Return rss_error: true to caller
+    // - Caller (polling loop) pauses entire cycle for 15 minutes
+    // - Discord notification: once per hour per channel (rss_err: cache, 3600s TTL)
+    // - After 15 min pause, resume from next channel in round-robin
 }

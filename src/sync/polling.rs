@@ -60,14 +60,16 @@ fn start_channel_loop(state: AppState, label: &'static str, cycle_ms: u64, query
             index %= count;
             let (channel_id, channel_title, last_fetched_at) = &channels[index];
 
-            let interval = Duration::from_millis(cycle_ms / count as u64);
+            let mut sleep_duration = Duration::from_millis(cycle_ms / count as u64);
 
             // Determine if API call is needed
-            let needs_api = if rss_checker::is_rss_skipped(&state, channel_id) {
-                false
-            } else if last_fetched_at.is_some() {
+            let needs_api = if last_fetched_at.is_some() {
                 let rss = rss_checker::check_rss_for_new_videos(&state, channel_id, channel_title).await;
-                if !rss.has_new_videos {
+                if rss.rss_error {
+                    tracing::info!("[{}] RSS error, pausing {}min", label, cycle_ms / 60_000);
+                    sleep_duration = Duration::from_millis(cycle_ms);
+                    false
+                } else if !rss.has_new_videos {
                     let now =
                         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
                     let conn = state.db.lock().unwrap();
@@ -105,7 +107,7 @@ fn start_channel_loop(state: AppState, label: &'static str, cycle_ms: u64, query
                 state.cache.clear_prefix("uush:");
                 index = 0;
             }
-            tokio::time::sleep(interval).await;
+            tokio::time::sleep(sleep_duration).await;
         }
     });
 }
