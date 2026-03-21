@@ -48,14 +48,32 @@ pub fn parse_atom_feed(xml: &str) -> Vec<RssEntry> {
     entries
 }
 
+pub enum RssError {
+    Http(u16),
+    Other(String),
+}
+
+impl std::fmt::Display for RssError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RssError::Http(code) => write!(f, "HTTP {}", code),
+            RssError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+pub fn rss_url(channel_id: &str) -> String {
+    format!(
+        "https://www.youtube.com/feeds/videos.xml?channel_id={}",
+        channel_id
+    )
+}
+
 pub async fn fetch_rss_feed(
     http: &reqwest::Client,
     channel_id: &str,
-) -> Result<Vec<RssEntry>, String> {
-    let url = format!(
-        "https://www.youtube.com/feeds/videos.xml?channel_id={}",
-        channel_id
-    );
+) -> Result<Vec<RssEntry>, RssError> {
+    let url = rss_url(channel_id);
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -66,15 +84,15 @@ pub async fn fetch_rss_feed(
     match result {
         Ok(Ok(res)) => {
             if !res.status().is_success() {
-                return Err(format!("HTTP {}", res.status().as_u16()));
+                return Err(RssError::Http(res.status().as_u16()));
             }
             match res.text().await {
                 Ok(xml) => Ok(parse_atom_feed(&xml)),
-                Err(e) => Err(format!("Body read error: {}", e)),
+                Err(e) => Err(RssError::Other(format!("Body read error: {}", e))),
             }
         }
-        Ok(Err(e)) => Err(format!("Network error: {}", e)),
-        Err(_) => Err("Timeout (10s)".to_string()),
+        Ok(Err(e)) => Err(RssError::Other(format!("Network error: {}", e))),
+        Err(_) => Err(RssError::Other("Timeout (10s)".to_string())),
     }
 }
 
@@ -141,5 +159,26 @@ mod tests {
     fn test_parse_invalid_xml() {
         let entries = parse_atom_feed("not xml at all");
         assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_rss_url_format() {
+        assert_eq!(
+            rss_url("UC_x5XG1OV2P6uZZ5FSM9Ttw"),
+            "https://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw"
+        );
+    }
+
+    #[test]
+    fn test_rss_error_display_http() {
+        assert_eq!(format!("{}", RssError::Http(500)), "HTTP 500");
+    }
+
+    #[test]
+    fn test_rss_error_display_other() {
+        assert_eq!(
+            format!("{}", RssError::Other("Timeout (10s)".to_string())),
+            "Timeout (10s)"
+        );
     }
 }

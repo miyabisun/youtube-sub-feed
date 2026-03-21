@@ -10,7 +10,7 @@ pub fn start_polling(state: AppState) {
         state.clone(),
         "polling",
         POLLING_INTERVAL_MS,
-        "SELECT c.id, c.last_fetched_at FROM channels c
+        "SELECT c.id, c.title, c.last_fetched_at FROM channels c
          WHERE NOT EXISTS (SELECT 1 FROM user_channels uc WHERE uc.channel_id = c.id AND uc.show_livestreams = 1)
          ORDER BY c.last_fetched_at ASC NULLS FIRST",
     );
@@ -18,7 +18,7 @@ pub fn start_polling(state: AppState) {
         state,
         "livestream",
         LIVESTREAM_INTERVAL_MS,
-        "SELECT DISTINCT c.id, c.last_fetched_at FROM channels c
+        "SELECT DISTINCT c.id, c.title, c.last_fetched_at FROM channels c
          JOIN user_channels uc ON uc.channel_id = c.id AND uc.show_livestreams = 1
          ORDER BY c.last_fetched_at ASC NULLS FIRST",
     );
@@ -34,10 +34,10 @@ fn start_channel_loop(state: AppState, label: &'static str, cycle_ms: u64, query
                 let conn = state.db.lock().unwrap();
                 let result = match conn.prepare(query) {
                     Ok(mut stmt) => stmt
-                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                         .map(|rows| {
                             rows.filter_map(|r| r.ok())
-                                .collect::<Vec<(String, Option<String>)>>()
+                                .collect::<Vec<(String, String, Option<String>)>>()
                         })
                         .unwrap_or_else(|e| {
                             tracing::error!("[{}] DB query error: {}", label, e);
@@ -58,47 +58,46 @@ fn start_channel_loop(state: AppState, label: &'static str, cycle_ms: u64, query
             }
 
             index %= count;
-            let (channel_id, last_fetched_at) = &channels[index];
+            let (channel_id, channel_title, last_fetched_at) = &channels[index];
 
             let interval = Duration::from_millis(cycle_ms / count as u64);
 
-            // RSS-first check
-            if last_fetched_at.is_some() {
-                let rss = rss_checker::check_rss_for_new_videos(&state, channel_id).await;
+            // Determine if API call is needed
+            let needs_api = if rss_checker::is_rss_skipped(&state, channel_id) {
+                false
+            } else if last_fetched_at.is_some() {
+                let rss = rss_checker::check_rss_for_new_videos(&state, channel_id, channel_title).await;
                 if !rss.has_new_videos {
                     let now =
                         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                    {
-                        let conn = state.db.lock().unwrap();
-                        let _ = conn.execute(
-                            "UPDATE channels SET last_fetched_at = ?1 WHERE id = ?2",
-                            rusqlite::params![now, channel_id],
-                        );
-                    }
-                    index += 1;
-                    if index >= count {
-                        state.cache.clear_prefix("uush:");
-                        index = 0;
-                    }
-                    tokio::time::sleep(interval).await;
-                    continue;
+                    let conn = state.db.lock().unwrap();
+                    let _ = conn.execute(
+                        "UPDATE channels SET last_fetched_at = ?1 WHERE id = ?2",
+                        rusqlite::params![now, channel_id],
+                    );
+                    false
+                } else {
+                    true
                 }
-            }
+            } else {
+                true
+            };
 
-            // Need API call
-            let access_token = super::wait_for_token(&state).await;
-            super::wait_for_quota(&state).await;
+            if needs_api {
+                let access_token = super::wait_for_token(&state).await;
+                super::wait_for_quota(&state).await;
 
-            let new_ids =
-                video_fetcher::fetch_channel_videos(&state, channel_id, &access_token)
-                    .await;
-            if !new_ids.is_empty() {
-                tracing::info!(
-                    "[{}] {} - {} new videos",
-                    label,
-                    channel_id,
-                    new_ids.len()
-                );
+                let new_ids =
+                    video_fetcher::fetch_channel_videos(&state, channel_id, &access_token)
+                        .await;
+                if !new_ids.is_empty() {
+                    tracing::info!(
+                        "[{}] {} - {} new videos",
+                        label,
+                        channel_id,
+                        new_ids.len()
+                    );
+                }
             }
 
             index += 1;
