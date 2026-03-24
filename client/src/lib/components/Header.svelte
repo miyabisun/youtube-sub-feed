@@ -69,8 +69,8 @@ header
 	justify-content: space-between
 	border-bottom: 1px solid var(--c-border)
 	background: var(--c-bg)
-	overflow-x: auto
-	-webkit-overflow-scrolling: touch
+	position: relative
+	z-index: 10
 
 .group-select
 	display: none
