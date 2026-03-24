@@ -1,8 +1,10 @@
 <script>
 	import { router, link, navigate } from '$lib/router.svelte.js';
 	import { getGroups, loadGroups } from '$lib/groups.svelte.js';
+	import config from '$lib/config.js';
 
 	let groups = $derived(getGroups());
+	let menuOpen = $state(false);
 
 	loadGroups();
 
@@ -20,6 +22,14 @@
 		const value = e.target.value;
 		navigate(value ? `/group/${value}` : '/');
 	}
+
+	function toggleMenu() {
+		menuOpen = !menuOpen;
+	}
+
+	function closeMenu() {
+		menuOpen = false;
+	}
 </script>
 
 <header>
@@ -35,10 +45,21 @@
 			<a class="nav-item" class:active={isActive(`/group/${group.id}`)} href={link(`/group/${group.id}`)}>{group.name}</a>
 		{/each}
 	</nav>
-	<nav class="nav-right">
-		<a class="nav-item" class:active={isActive('/channels')} href={link('/channels')}>CH</a>
-		<a class="nav-item" class:active={isActive('/settings')} href={link('/settings')}>設定</a>
-	</nav>
+	<div class="menu-wrapper">
+		<button class="menu-button" onclick={toggleMenu} aria-label="メニュー">
+			<span class="hamburger"></span>
+			<span class="hamburger"></span>
+			<span class="hamburger"></span>
+		</button>
+		{#if menuOpen}
+			<button class="menu-overlay" onclick={closeMenu} aria-label="メニューを閉じる"></button>
+			<nav class="menu-dropdown">
+				<a class="menu-item" class:active={isActive('/channels')} href={link('/channels')} onclick={closeMenu}>チャンネル</a>
+				<a class="menu-item" class:active={isActive('/settings')} href={link('/settings')} onclick={closeMenu}>グループ管理</a>
+				<a class="menu-item" href={`${config.path.api}/auth/login`} onclick={closeMenu}>再ログイン</a>
+			</nav>
+		{/if}
+	</div>
 </header>
 
 <style lang="sass">
@@ -77,12 +98,6 @@ header
 	&::-webkit-scrollbar
 		display: none
 
-.nav-right
-	display: flex
-	align-items: center
-	flex-shrink: 0
-	border-left: 1px solid var(--c-border)
-
 .nav-item
 	padding: var(--sp-3) var(--sp-4)
 	color: var(--c-text-sub)
@@ -100,6 +115,69 @@ header
 	&.active
 		color: var(--c-text)
 		border-bottom-color: var(--c-accent)
+
+.menu-wrapper
+	position: relative
+	flex-shrink: 0
+	border-left: 1px solid var(--c-border)
+
+.menu-button
+	display: flex
+	flex-direction: column
+	justify-content: center
+	align-items: center
+	gap: 4px
+	padding: var(--sp-3) var(--sp-4)
+	background: none
+	border: none
+	cursor: pointer
+
+.hamburger
+	display: block
+	width: 18px
+	height: 2px
+	background: var(--c-text-sub)
+	border-radius: 1px
+
+.menu-overlay
+	position: fixed
+	inset: 0
+	background: transparent
+	border: none
+	cursor: default
+	z-index: 9
+
+.menu-dropdown
+	position: absolute
+	right: 0
+	top: 100%
+	background: var(--c-surface)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-md)
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15)
+	z-index: 10
+	min-width: 160px
+
+.menu-item
+	display: block
+	padding: var(--sp-3) var(--sp-4)
+	color: var(--c-text-sub)
+	text-decoration: none
+	font-size: var(--fs-sm)
+	white-space: nowrap
+
+	&:hover
+		color: var(--c-text)
+		background: var(--c-overlay-1)
+
+	&.active
+		color: var(--c-text)
+
+	&:first-child
+		border-radius: var(--radius-md) var(--radius-md) 0 0
+
+	&:last-child
+		border-radius: 0 0 var(--radius-md) var(--radius-md)
 
 @media (max-width: 799px)
 	.group-select

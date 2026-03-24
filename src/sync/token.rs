@@ -1,4 +1,5 @@
 use crate::auth::refresh_access_token;
+use crate::notify::notify_warning;
 use crate::state::AppState;
 
 const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
@@ -57,6 +58,16 @@ pub async fn get_valid_token(state: &AppState) -> Option<(i64, String)> {
         }
         Err(e) => {
             tracing::error!("[token] Failed to refresh token: {}", e);
+            if state.cache.get("token_refresh_err").is_none() {
+                state.cache.set("token_refresh_err", serde_json::json!(true), Some(3600));
+                notify_warning(
+                    &state.http,
+                    &state.config,
+                    "OAuthトークン更新失敗",
+                    &format!("トークンのリフレッシュに失敗しました。再ログインが必要です。\nエラー: {}", e),
+                )
+                .await;
+            }
             None
         }
     }
