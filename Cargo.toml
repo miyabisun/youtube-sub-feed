@@ -21,6 +21,10 @@ tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v4"] }
 regex-lite = "0.1"
 urlencoding = "2"
+hmac = "0.12"
+sha1 = "0.10"
+hex = "0.4"
+rand = "0.8"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 

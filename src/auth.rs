@@ -105,6 +105,7 @@ mod tests {
             google_client_secret: "test-secret".to_string(),
             google_redirect_uri: "http://localhost:3000/api/auth/callback".to_string(),
             discord_webhook_url: None,
+            websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),
             is_production: false,
         }
     }

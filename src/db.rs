@@ -114,6 +114,16 @@ fn create_tables(conn: &Connection) {
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS channel_subscriptions (
+            channel_id TEXT PRIMARY KEY,
+            hub_secret TEXT NOT NULL,
+            lease_seconds INTEGER NOT NULL DEFAULT 0,
+            subscribed_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            verification_status TEXT NOT NULL DEFAULT 'pending',
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        );
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);
         CREATE INDEX IF NOT EXISTS idx_videos_published ON videos (published_at DESC);
@@ -122,7 +132,8 @@ fn create_tables(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_user_channels_favorite ON user_channels(user_id, is_favorite);
         CREATE INDEX IF NOT EXISTS idx_user_videos_user ON user_videos(user_id);
         CREATE INDEX IF NOT EXISTS idx_user_videos_hidden ON user_videos(user_id, is_hidden);
-        CREATE INDEX IF NOT EXISTS idx_groups_user ON groups(user_id);",
+        CREATE INDEX IF NOT EXISTS idx_groups_user ON groups(user_id);
+        CREATE INDEX IF NOT EXISTS idx_channel_subscriptions_expires ON channel_subscriptions(expires_at);",
     )
     .expect("Failed to create tables");
 }
@@ -417,6 +428,58 @@ mod tests {
     fn test_idempotent_ddl() {
         let _conn1 = open_memory();
         let _conn2 = open_memory();
+    }
+
+    #[test]
+    fn test_channel_subscriptions_cascade_delete() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Test', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO channel_subscriptions (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at)
+             VALUES ('UC1', 'secret', 432000, '2024-01-01T00:00:00Z', '2024-01-06T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM channels WHERE id = 'UC1'", []).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_subscriptions WHERE channel_id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "Subscription should be deleted when channel is deleted");
+    }
+
+    #[test]
+    fn test_channel_subscriptions_default_verification_status() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Test', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO channel_subscriptions (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at)
+             VALUES ('UC1', 'secret', 0, '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]

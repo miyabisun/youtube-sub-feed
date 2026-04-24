@@ -17,9 +17,12 @@ docker run -d \
   -e GOOGLE_CLIENT_ID=xxx \
   -e GOOGLE_CLIENT_SECRET=xxx \
   -e GOOGLE_REDIRECT_URI=https://feed.sis.jp/api/auth/callback \
+  -e WEBSUB_CALLBACK_URL=https://feed.sis.jp/api/websub/callback \
   -e DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx \
   youtube-sub-feed
 ```
+
+WebSub (PubSubHubbub) 経由で YouTube から新着動画のプッシュ通知を受信するため、`WEBSUB_CALLBACK_URL` には **公開 HTTPS URL** を指定する必要があります。
 
 ## nginx 設定例
 
@@ -61,4 +64,5 @@ server {
 | `GOOGLE_CLIENT_ID` | Google OAuth2 クライアントID |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth2 クライアントシークレット |
 | `GOOGLE_REDIRECT_URI` | OAuth2 コールバックURL |
+| `WEBSUB_CALLBACK_URL` | WebSub 通知受信エンドポイント（例: `https://feed.sis.jp/api/websub/callback`）。公開 HTTPS URL 必須 |
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL（省略可） |

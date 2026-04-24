@@ -147,7 +147,10 @@ async fn sync_channels(
         .ok_or_else(|| AppError::Unauthorized("No valid token".to_string()))?;
 
     let result = channel_sync::sync_subscriptions(&state, user_id.0, &access_token).await?;
-    Ok(Json(json!(result)))
+    Ok(Json(json!({
+        "added": result.added.len(),
+        "removed": result.removed.len(),
+    })))
 }
 
 #[utoipa::path(

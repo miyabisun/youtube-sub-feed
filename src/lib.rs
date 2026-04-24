@@ -13,4 +13,5 @@ pub mod session;
 pub(crate) mod spa;
 pub mod state;
 pub mod sync;
+pub mod websub;
 pub(crate) mod youtube;

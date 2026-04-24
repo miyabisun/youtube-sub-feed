@@ -5,8 +5,8 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct SyncResult {
-    pub added: i64,
-    pub removed: i64,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
 }
 
 pub async fn sync_subscriptions(
@@ -22,8 +22,8 @@ pub async fn sync_subscriptions(
         subs.iter().map(|s| s.channel_id.clone()).collect();
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let mut added: i64 = 0;
-    let mut removed: i64 = 0;
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
 
     {
         let conn = state.db.lock().unwrap();
@@ -53,20 +53,25 @@ pub async fn sync_subscriptions(
                         "INSERT OR IGNORE INTO user_channels (user_id, channel_id, created_at) VALUES (?1, ?2, ?3)",
                         rusqlite::params![user_id, sub.channel_id, now],
                     )?;
-                    added += 1;
+                    added.push(sub.channel_id.clone());
                 }
             }
 
-            let to_remove: Vec<&String> = local_ids.iter().filter(|id| !remote_ids.contains(*id)).collect();
+            let to_remove: Vec<String> = local_ids
+                .iter()
+                .filter(|id| !remote_ids.contains(*id))
+                .cloned()
+                .collect();
             for local_id in &to_remove {
                 conn.execute(
                     "DELETE FROM user_channels WHERE user_id = ?1 AND channel_id = ?2",
                     rusqlite::params![user_id, local_id],
                 )?;
             }
-            removed = to_remove.len() as i64;
+            removed = to_remove;
 
-            // Batch cleanup: delete orphaned channels (no subscribers left)
+            // Batch cleanup: delete orphaned channels (no subscribers left).
+            // channel_subscriptions rows are CASCADE-deleted via FK.
             conn.execute(
                 "DELETE FROM channels WHERE id NOT IN (SELECT DISTINCT channel_id FROM user_channels)",
                 [],
@@ -86,8 +91,8 @@ pub async fn sync_subscriptions(
 
     tracing::info!(
         "[sync] Subscriptions synced: +{} -{} (total: {})",
-        added,
-        removed,
+        added.len(),
+        removed.len(),
         remote_ids.len()
     );
 

@@ -8,6 +8,7 @@ pub struct Config {
     pub google_client_secret: String,
     pub google_redirect_uri: String,
     pub discord_webhook_url: Option<String>,
+    pub websub_callback_url: String,
     pub is_production: bool,
 }
 
@@ -28,6 +29,9 @@ impl Config {
 
         let discord_webhook_url = env::var("DISCORD_WEBHOOK_URL").ok().filter(|s| !s.is_empty());
 
+        let websub_callback_url = env::var("WEBSUB_CALLBACK_URL")
+            .unwrap_or_else(|_| "http://localhost:3000/api/websub/callback".to_string());
+
         let is_production = env::var("NODE_ENV")
             .map(|v| v == "production")
             .unwrap_or(false);
@@ -45,6 +49,7 @@ impl Config {
             google_client_secret,
             google_redirect_uri,
             discord_webhook_url,
+            websub_callback_url,
             is_production,
         }
     }

@@ -26,6 +26,7 @@ impl AppState {
                 google_client_secret: String::new(),
                 google_redirect_uri: String::new(),
                 discord_webhook_url: None,
+                websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),
                 is_production: false,
             },
             http: reqwest::Client::new(),

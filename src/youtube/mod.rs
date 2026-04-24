@@ -1,5 +1,4 @@
 pub mod playlist_items;
-pub mod rss;
 pub mod subscriptions;
 pub mod videos;
 

@@ -3,6 +3,7 @@ pub mod channels;
 pub mod feed;
 pub mod groups;
 pub mod rss;
+pub mod websub;
 
 use crate::middleware::auth_middleware;
 use crate::openapi;
@@ -75,7 +76,8 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
         .merge(auth::routes())
-        .merge(rss::routes());
+        .merge(rss::routes())
+        .merge(websub::routes());
 
     let protected = Router::new()
         .merge(feed::routes())
@@ -153,23 +155,26 @@ mod tests {
         Endpoint { method: "DELETE", path: "/api/groups/:id",            auth_required: true },
         Endpoint { method: "PUT",    path: "/api/groups/:id/channels",   auth_required: true },
         Endpoint { method: "GET",    path: "/api/rss",                   auth_required: false },
+        Endpoint { method: "GET",    path: "/api/websub/callback",       auth_required: false }, // Hub verification (echo challenge)
+        Endpoint { method: "POST",   path: "/api/websub/callback",       auth_required: false }, // Hub push notification (HMAC-verified)
     ];
 
     mod endpoint_inventory {
         use super::*;
 
         #[test]
-        fn total_endpoint_count_is_21() {
-            assert_eq!(ENDPOINTS.len(), 21);
+        fn total_endpoint_count_is_23() {
+            assert_eq!(ENDPOINTS.len(), 23);
         }
 
         #[test]
-        fn middleware_public_endpoints_count_is_6() {
+        fn middleware_public_endpoints_count_is_8() {
             // health, login, callback: no middleware, no handler-level auth
             // logout, me: no middleware, but handler-level auth
             // rss: public feed, no auth required
+            // websub/callback (GET/POST): WebSub hub verification and push notification
             let public_count = ENDPOINTS.iter().filter(|e| !e.auth_required).count();
-            assert_eq!(public_count, 6);
+            assert_eq!(public_count, 8);
         }
 
         #[test]
