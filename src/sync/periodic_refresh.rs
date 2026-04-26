@@ -86,6 +86,23 @@ async fn run_once(state: &AppState) {
         video_fetcher::fetch_channel_videos(state, ch_id, &access_token).await;
     }
 
+    // 4.5. Backfill: subscribe any channel that lives in `channels` but has no
+    // `channel_subscriptions` row. This recovers from migrations from the legacy
+    // RSS-pull era and from any drift caused by manual DB edits or past failures
+    // where the subscribe POST never landed in the DB.
+    //
+    // Backfilled channels are deliberately NOT added to the skip set below: this
+    // step only sends a subscribe POST (no initial fetch), so refresh_existing_channels
+    // should still run for them. If hub verification later fails for any reason,
+    // the 3-hour API scan remains a redundancy net for new videos.
+    let backfill_ids = find_channels_missing_subscription(state);
+    if !backfill_ids.is_empty() {
+        tracing::info!("[refresh] Backfilling {} unsubscribed channel(s)", backfill_ids.len());
+    }
+    for ch_id in &backfill_ids {
+        register_new_subscription(state, ch_id, &callback).await;
+    }
+
     // 5. Safety-net refresh for all OTHER channels (added ones were already fetched in step 4).
     // WebSub occasionally misses pushes (lease expiry, hub outages, server restarts);
     // this 3-hour scan catches anything that slipped through.
@@ -93,6 +110,22 @@ async fn run_once(state: &AppState) {
 
     // 6. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
     renew_expiring_subscriptions(state, &callback).await;
+}
+
+fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
+    let conn = state.db.lock().unwrap();
+    let result = match conn.prepare(
+        "SELECT c.id FROM channels c
+         LEFT JOIN channel_subscriptions s ON s.channel_id = c.id
+         WHERE s.channel_id IS NULL",
+    ) {
+        Ok(mut stmt) => stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    result
 }
 
 async fn register_new_subscription(state: &AppState, channel_id: &str, callback: &str) {
@@ -319,6 +352,37 @@ mod tests {
         };
         assert_eq!(secret.len(), 64, "Secret must be generated before hub call");
         assert_eq!(status, "pending", "Status stays 'pending' until Hub verification GET arrives");
+    }
+
+    #[test]
+    fn find_channels_missing_subscription_returns_only_unsubscribed_channels() {
+        // Regression guard for the migration bug: channels carried over from the
+        // RSS-pull era have rows in `channels` but none in `channel_subscriptions`,
+        // so they would otherwise be silently skipped by run_once forever.
+        let state = AppState::test();
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES
+                   ('UC_subbed', 'Subbed', ?1),
+                   ('UC_orphan_1', 'Orphan1', ?1),
+                   ('UC_orphan_2', 'Orphan2', ?1)",
+                [&now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channel_subscriptions
+                   (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
+                 VALUES ('UC_subbed', 's', 432000, ?1, ?1, 'verified')",
+                [&now],
+            )
+            .unwrap();
+        }
+
+        let mut ids = find_channels_missing_subscription(&state);
+        ids.sort();
+        assert_eq!(ids, vec!["UC_orphan_1".to_string(), "UC_orphan_2".to_string()]);
     }
 
     #[test]
