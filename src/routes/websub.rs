@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::websub::atom::parse_atom_feed;
+use crate::websub::atom::{parse_atom_feed, AtomEntry};
 use crate::websub::{extract_channel_id, signature};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -187,48 +187,87 @@ pub async fn notification(
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    let (affected, errors) = {
+    let new_count = {
         let conn = state.db.lock().unwrap();
-        let mut affected = 0;
-        let mut errors = 0;
-        for entry in &entries {
-            match conn.execute(
-                "INSERT INTO videos (id, channel_id, title, published_at, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET
-                   title = excluded.title
-                 WHERE title != excluded.title",
-                rusqlite::params![entry.video_id, channel_id, entry.title, entry.published, now],
-            ) {
-                Ok(n) => affected += n,
-                Err(e) => {
-                    errors += 1;
-                    tracing::warn!(
-                        "[websub] video insert failed for {} on {}: {}",
-                        entry.video_id, channel_id, e
-                    );
-                }
-            }
-        }
-        (affected, errors)
+        let channel_title = lookup_channel_title(&conn, &channel_id);
+        let newly_inserted = partition_new_entries(&conn, &channel_id, &entries, &now);
+        log_new_videos(&channel_title, &channel_id, &newly_inserted);
+        newly_inserted.len()
     };
 
-    // Push arrived for a channel whose row we still have, but the INSERTs all failed
-    // (most likely cause: FK violation — channel was deleted between HMAC check and
-    // INSERT, or the Atom entry's channelId doesn't match the subscription row).
-    if affected == 0 && errors == entries.len() {
-        tracing::warn!(
-            "[websub] all {} entries failed to insert for channel {}",
-            entries.len(), channel_id
-        );
-    } else if affected > 0 {
-        tracing::info!(
-            "[websub] {} — {} entries, {} DB rows affected (details deferred to next refresh)",
-            channel_id, entries.len(), affected
+    if new_count == 0 {
+        // All entries were already in the DB (likely a hub redelivery after a 5xx
+        // retry, or a metadata-only refresh). Logged at debug to avoid noise.
+        tracing::debug!(
+            "[websub] {} — {} entries, no new videos",
+            channel_id, entries.len()
         );
     }
 
     StatusCode::OK
+}
+
+fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {
+    conn.query_row(
+        "SELECT title FROM channels WHERE id = ?1",
+        [channel_id],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| channel_id.to_string())
+}
+
+/// Insert each entry into `videos` and return references to the entries that
+/// represent newly published videos (no prior row existed for that video_id).
+/// Existing rows have their title refreshed only when it differs.
+///
+/// Pulled out as a pure function so the new-video detection logic can be tested
+/// directly without going through HTTP/HMAC plumbing.
+fn partition_new_entries<'a>(
+    conn: &rusqlite::Connection,
+    channel_id: &str,
+    entries: &'a [AtomEntry],
+    now: &str,
+) -> Vec<&'a AtomEntry> {
+    let mut newly_inserted = Vec::new();
+    for entry in entries {
+        // RETURNING distinguishes INSERT from ON CONFLICT in a single round-trip:
+        // a row is returned only when the INSERT actually fired.
+        let result = conn.query_row(
+            "INSERT INTO videos (id, channel_id, title, published_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO NOTHING
+             RETURNING id",
+            rusqlite::params![entry.video_id, channel_id, entry.title, entry.published, now],
+            |_| Ok(()),
+        );
+
+        match result {
+            Ok(()) => newly_inserted.push(entry),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Row already existed: refresh the title if it changed.
+                let _ = conn.execute(
+                    "UPDATE videos SET title = ?1 WHERE id = ?2 AND title != ?1",
+                    rusqlite::params![entry.title, entry.video_id],
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[websub] video insert failed for {} on {}: {}",
+                    entry.video_id, channel_id, e
+                );
+            }
+        }
+    }
+    newly_inserted
+}
+
+fn log_new_videos(channel_title: &str, channel_id: &str, entries: &[&AtomEntry]) {
+    for entry in entries {
+        tracing::info!(
+            "[websub] new video: {} ({}) — \"{}\" https://www.youtube.com/watch?v={}",
+            channel_title, channel_id, entry.title, entry.video_id
+        );
+    }
 }
 
 #[cfg(test)]
@@ -481,6 +520,129 @@ mod tests {
         };
         assert_eq!(id, "vid_new");
         assert_eq!(title, "New Video");
+    }
+
+    #[test]
+    fn partition_new_entries_returns_only_unknown_video_ids() {
+        // Direct test of the pure new-video detection function. Verifies that:
+        // - already-known video_ids are NOT reported as new (idempotency)
+        // - genuinely new video_ids ARE reported
+        // - existing rows get their title refreshed when changed
+        let conn = crate::db::open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC_x', 'Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES ('existing', 'UC_x', 'Old Title', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let entries = vec![
+            AtomEntry {
+                video_id: "existing".to_string(),
+                title: "New Title".to_string(),
+                published: "2026-04-26T00:00:00Z".to_string(),
+            },
+            AtomEntry {
+                video_id: "fresh1".to_string(),
+                title: "First".to_string(),
+                published: "2026-04-26T00:00:00Z".to_string(),
+            },
+            AtomEntry {
+                video_id: "fresh2".to_string(),
+                title: "Second".to_string(),
+                published: "2026-04-26T00:00:00Z".to_string(),
+            },
+        ];
+
+        let new = partition_new_entries(&conn, "UC_x", &entries, "2026-04-26T00:00:00Z");
+
+        let new_ids: Vec<&str> = new.iter().map(|e| e.video_id.as_str()).collect();
+        assert_eq!(new_ids.len(), 2);
+        assert!(new_ids.contains(&"fresh1"));
+        assert!(new_ids.contains(&"fresh2"));
+        assert!(!new_ids.contains(&"existing"), "Already-known video_id must not be flagged as new");
+
+        // Existing row's title was refreshed
+        let title: String = conn
+            .query_row("SELECT title FROM videos WHERE id = 'existing'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "New Title", "Existing row's title should be refreshed when changed");
+    }
+
+    #[test]
+    fn partition_new_entries_drops_rows_with_unknown_channel() {
+        // Pushes for a channel that's no longer in the channels table (CASCADE race)
+        // should not crash; the FK violation gets logged and the entry is skipped.
+        let conn = crate::db::open_memory();
+        let entries = vec![AtomEntry {
+            video_id: "v1".to_string(),
+            title: "T".to_string(),
+            published: "2026-04-26T00:00:00Z".to_string(),
+        }];
+
+        let new = partition_new_entries(&conn, "UC_ghost", &entries, "2026-04-26T00:00:00Z");
+        assert!(new.is_empty(), "FK violation must not be reported as new video");
+    }
+
+    #[tokio::test]
+    async fn test_notification_idempotent_for_duplicate_push() {
+        // Hubs occasionally redeliver the same push (e.g. after a 5xx retry window).
+        // The endpoint must remain idempotent — we should NOT re-announce a "new video"
+        // log line for a video already present in the DB.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_dup", &secret);
+
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+  <entry>
+    <yt:videoId>same_vid</yt:videoId>
+    <yt:channelId>UC_dup</yt:channelId>
+    <title>Once</title>
+    <published>2026-04-24T10:00:00+00:00</published>
+  </entry>
+</feed>"#;
+
+        let sig = {
+            use hmac::{Hmac, Mac};
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(body.as_bytes());
+            format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
+        };
+
+        let send = |app: axum::Router| {
+            let sig = sig.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/websub/callback")
+                        .header("x-hub-signature", sig)
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // First delivery: video gets inserted.
+        let resp1 = send(routes().with_state(state.clone())).await;
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // Second delivery: same video, must not duplicate.
+        let resp2 = send(routes().with_state(state.clone())).await;
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        let count: i64 = {
+            let conn = state.db.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM videos WHERE id = 'same_vid'", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(count, 1, "Duplicate push must remain idempotent (one row total)");
     }
 
     #[tokio::test]
