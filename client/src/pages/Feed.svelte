@@ -171,6 +171,7 @@
 	font-size: var(--fs-xs)
 	cursor: pointer
 	z-index: 2
+	opacity: 0.7
 
 	&::before
 		content: ''
@@ -184,6 +185,7 @@
 		background: var(--c-danger-bg)
 		color: var(--c-danger)
 		border-color: var(--c-danger-border)
+		opacity: 1
 
 .play-all-bar
 	display: flex
@@ -209,20 +211,6 @@
 
 .sentinel
 	height: 1px
-
-@media (max-width: 599px)
-	.hide-btn
-		opacity: 0.7
-
-@media (min-width: 600px)
-	.hide-btn
-		opacity: 0
-
-	.video-wrapper:hover .hide-btn
-		opacity: 0.7
-
-	.video-wrapper:hover .hide-btn:hover
-		opacity: 1
 
 @media (min-width: 800px)
 	.feed
