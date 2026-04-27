@@ -81,16 +81,19 @@ pub async fn fetch_channel_videos(
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    // 3. UPSERT and detect new videos
+    // 3. UPSERT and detect videos needing detail fetch
+    //    Videos already in the DB WITH a duration are considered fully fetched.
+    //    WebSub-inserted videos (duration=NULL) are treated as unfetched so that
+    //    the detail pipeline below fills in duration, is_short, and is_livestream.
     let new_video_ids = {
         let conn = state.db.lock().unwrap();
 
         let video_ids: Vec<String> = items.iter().map(|i| i.video_id.clone()).collect();
         let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id FROM videos WHERE id IN ({})", placeholders);
+        let sql = format!("SELECT id FROM videos WHERE id IN ({}) AND duration IS NOT NULL", placeholders);
         let params: Vec<&dyn rusqlite::types::ToSql> =
             video_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-        let existing: std::collections::HashSet<String> = match conn.prepare(&sql) {
+        let fully_fetched: std::collections::HashSet<String> = match conn.prepare(&sql) {
             Ok(mut stmt) => stmt
                 .query_map(params.as_slice(), |row| row.get(0))
                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -111,7 +114,7 @@ pub async fn fetch_channel_videos(
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    thumbnail_url = excluded.thumbnail_url
-                 WHERE title != excluded.title OR thumbnail_url != excluded.thumbnail_url",
+                 WHERE title IS NOT excluded.title OR thumbnail_url IS NOT excluded.thumbnail_url",
                 rusqlite::params![
                     item.video_id,
                     channel_id,
@@ -126,7 +129,7 @@ pub async fn fetch_channel_videos(
 
         let new_ids: Vec<String> = video_ids
             .into_iter()
-            .filter(|id| !existing.contains(id))
+            .filter(|id| !fully_fetched.contains(id))
             .collect();
         new_ids
     };
@@ -196,6 +199,20 @@ pub async fn fetch_channel_videos(
             .unwrap_or(0);
         }
 
+        // 7. Mark videos the API did not return (deleted/private) with a sentinel
+        //    empty duration so they are not re-fetched every cycle.
+        let returned_ids: std::collections::HashSet<&str> =
+            details.iter().map(|d| d.id.as_str()).collect();
+        for vid in &new_video_ids {
+            if !returned_ids.contains(vid.as_str()) {
+                conn.execute(
+                    "UPDATE videos SET duration = '' WHERE id = ?1 AND duration IS NULL",
+                    rusqlite::params![vid],
+                )
+                .unwrap_or(0);
+            }
+        }
+
         let _ = conn.execute(
             "UPDATE channels SET last_fetched_at = ?1 WHERE id = ?2",
             rusqlite::params![now, channel_id],
@@ -207,10 +224,14 @@ pub async fn fetch_channel_videos(
 
 #[cfg(test)]
 mod tests {
-    // Livestream Status Spec
+    // Video Fetcher Spec
     //
-    // A video is "currently live" when is_livestream=1 AND livestream_ended_at IS NULL.
-    // When the stream ends, livestream_ended_at is updated with the end timestamp.
+    // - Livestream status: is_livestream=1 AND livestream_ended_at IS NULL means currently live
+    // - UPSERT: thumbnail_url is updated even when the existing value is NULL (IS NOT comparison)
+    // - Existing detection: videos with duration=NULL are treated as "unfetched" (not in `existing`)
+    //   so that WebSub-inserted videos get their details filled by the next refresh cycle
+    // - Sentinel: videos whose details the API did not return get duration='' to prevent
+    //   infinite re-fetch attempts on deleted/private videos
 
     use crate::db;
 
@@ -222,6 +243,89 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn upsert_updates_thumbnail_when_existing_is_null() {
+        let conn = setup();
+        // WebSub inserts a video without thumbnail
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES ('v1', 'UC1', 'Title', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let thumb: Option<String> = conn
+            .query_row("SELECT thumbnail_url FROM videos WHERE id = 'v1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(thumb.is_none(), "precondition: thumbnail starts as NULL");
+
+        // Periodic refresh UPSERTs with a thumbnail URL
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, thumbnail_url, published_at, fetched_at)
+             VALUES ('v1', 'UC1', 'Title', 'https://i.ytimg.com/vi/v1/mqdefault.jpg', '2025-01-01', '2025-01-02')
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               thumbnail_url = excluded.thumbnail_url
+             WHERE title IS NOT excluded.title OR thumbnail_url IS NOT excluded.thumbnail_url",
+            [],
+        )
+        .unwrap();
+
+        let thumb: Option<String> = conn
+            .query_row("SELECT thumbnail_url FROM videos WHERE id = 'v1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(thumb.as_deref(), Some("https://i.ytimg.com/vi/v1/mqdefault.jpg"));
+    }
+
+    #[test]
+    fn existing_query_excludes_videos_without_duration() {
+        let conn = setup();
+        // Fully fetched video (has duration)
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, duration, fetched_at) VALUES ('complete', 'UC1', 'A', 'PT10M', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // WebSub-inserted video (no duration)
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES ('partial', 'UC1', 'B', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM videos WHERE id IN ('complete', 'partial') AND duration IS NOT NULL")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert_eq!(ids, vec!["complete"]);
+    }
+
+    #[test]
+    fn sentinel_duration_prevents_refetch() {
+        let conn = setup();
+        // Video marked with sentinel empty duration (API didn't return details)
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, duration, fetched_at) VALUES ('gone', 'UC1', 'Deleted', '', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM videos WHERE id IN ('gone') AND duration IS NOT NULL")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        assert_eq!(ids, vec!["gone"], "Empty string duration is NOT NULL, so the video is treated as fully fetched");
     }
 
     #[test]
