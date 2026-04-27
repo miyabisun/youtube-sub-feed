@@ -2,6 +2,7 @@
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import { setGroups } from '$lib/groups.svelte.js';
+	import { videoThumbnail } from '$lib/youtube-thumbnail.js';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 
@@ -258,11 +259,7 @@
 											<div class="video-thumbs">
 												{#each videoCache[ch.id] as video}
 													<a class="video-thumb" href="https://www.youtube.com/watch?v={video.id}" target="_blank" rel="noopener">
-														{#if video.thumbnail_url}
-															<img src={video.thumbnail_url} alt={video.title} loading="lazy" />
-														{:else}
-															<div class="thumb-placeholder"></div>
-														{/if}
+														<img src={videoThumbnail(video.id, 'mqdefault')} alt={video.title} loading="lazy" />
 														<span class="video-title">{video.title}</span>
 													</a>
 												{/each}
@@ -517,12 +514,6 @@
 
 	&:hover img
 		opacity: 0.8
-
-.thumb-placeholder
-	width: 100%
-	aspect-ratio: 16 / 9
-	background: var(--c-surface)
-	border-radius: var(--radius-sm)
 
 .video-title
 	display: block

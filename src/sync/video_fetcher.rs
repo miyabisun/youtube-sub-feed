@@ -109,17 +109,15 @@ pub async fn fetch_channel_videos(
 
         for item in &items {
             conn.execute(
-                "INSERT INTO videos (id, channel_id, title, thumbnail_url, published_at, fetched_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO videos (id, channel_id, title, published_at, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(id) DO UPDATE SET
-                   title = excluded.title,
-                   thumbnail_url = excluded.thumbnail_url
-                 WHERE title IS NOT excluded.title OR thumbnail_url IS NOT excluded.thumbnail_url",
+                   title = excluded.title
+                 WHERE title IS NOT excluded.title",
                 rusqlite::params![
                     item.video_id,
                     channel_id,
                     item.title,
-                    item.thumbnail_url,
                     item.published_at,
                     now,
                 ],
@@ -227,11 +225,12 @@ mod tests {
     // Video Fetcher Spec
     //
     // - Livestream status: is_livestream=1 AND livestream_ended_at IS NULL means currently live
-    // - UPSERT: thumbnail_url is updated even when the existing value is NULL (IS NOT comparison)
     // - Existing detection: videos with duration=NULL are treated as "unfetched" (not in `existing`)
     //   so that WebSub-inserted videos get their details filled by the next refresh cycle
     // - Sentinel: videos whose details the API did not return get duration='' to prevent
     //   infinite re-fetch attempts on deleted/private videos
+    // - Thumbnails: NOT stored in DB. The frontend builds URLs deterministically as
+    //   https://i.ytimg.com/vi/{video_id}/hqdefault.jpg, so we don't waste quota fetching them.
 
     use crate::db;
 
@@ -243,39 +242,6 @@ mod tests {
         )
         .unwrap();
         conn
-    }
-
-    #[test]
-    fn upsert_updates_thumbnail_when_existing_is_null() {
-        let conn = setup();
-        // WebSub inserts a video without thumbnail
-        conn.execute(
-            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES ('v1', 'UC1', 'Title', '2025-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-
-        let thumb: Option<String> = conn
-            .query_row("SELECT thumbnail_url FROM videos WHERE id = 'v1'", [], |r| r.get(0))
-            .unwrap();
-        assert!(thumb.is_none(), "precondition: thumbnail starts as NULL");
-
-        // Periodic refresh UPSERTs with a thumbnail URL
-        conn.execute(
-            "INSERT INTO videos (id, channel_id, title, thumbnail_url, published_at, fetched_at)
-             VALUES ('v1', 'UC1', 'Title', 'https://i.ytimg.com/vi/v1/mqdefault.jpg', '2025-01-01', '2025-01-02')
-             ON CONFLICT(id) DO UPDATE SET
-               title = excluded.title,
-               thumbnail_url = excluded.thumbnail_url
-             WHERE title IS NOT excluded.title OR thumbnail_url IS NOT excluded.thumbnail_url",
-            [],
-        )
-        .unwrap();
-
-        let thumb: Option<String> = conn
-            .query_row("SELECT thumbnail_url FROM videos WHERE id = 'v1'", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(thumb.as_deref(), Some("https://i.ytimg.com/vi/v1/mqdefault.jpg"));
     }
 
     #[test]

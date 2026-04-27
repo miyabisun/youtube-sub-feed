@@ -5,7 +5,6 @@ use std::sync::Arc;
 pub struct PlaylistItem {
     pub video_id: String,
     pub title: String,
-    pub thumbnail_url: String,
     pub published_at: String,
 }
 
@@ -42,11 +41,6 @@ pub async fn fetch_playlist_items(
                         .to_string(),
                     title: item["snippet"]["title"]
                         .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    thumbnail_url: item["snippet"]["thumbnails"]["medium"]["url"]
-                        .as_str()
-                        .or_else(|| item["snippet"]["thumbnails"]["default"]["url"].as_str())
                         .unwrap_or_default()
                         .to_string(),
                     published_at: item["snippet"]["publishedAt"]

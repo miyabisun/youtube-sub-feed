@@ -15,8 +15,43 @@ pub fn open(path: &str) -> Connection {
 
     migrate(&conn);
     create_tables(&conn);
+    drop_videos_thumbnail_url(&conn);
 
     conn
+}
+
+/// One-shot migration: remove the obsolete `videos.thumbnail_url` column.
+///
+/// Thumbnails are derived from the video ID on the client side, so storing
+/// the URL adds no information and creates failure modes (NULL columns when
+/// videos arrive via WebSub push that doesn't carry thumbnail metadata).
+/// Idempotent: a no-op once the column has been dropped.
+fn drop_videos_thumbnail_url(conn: &Connection) {
+    let column_exists = column_exists(conn, "videos", "thumbnail_url");
+    if !column_exists {
+        return;
+    }
+    match conn.execute("ALTER TABLE videos DROP COLUMN thumbnail_url", []) {
+        Ok(_) => tracing::info!("[migrate] Dropped obsolete videos.thumbnail_url column"),
+        Err(e) => tracing::warn!("[migrate] Failed to drop videos.thumbnail_url: {}", e),
+    }
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({})", table);
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return false;
+    };
+    let Ok(names) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
+        return false;
+    };
+    // `names` borrows `stmt` (MappedRows<'_, _>). Returning the chained
+    // expression directly defers `stmt`'s drop past `names`'s borrow window
+    // and rustc rejects it. Binding to `found` finishes the borrow before
+    // the return value is produced.
+    #[allow(clippy::let_and_return)]
+    let found = names.filter_map(|r| r.ok()).any(|n| n == column);
+    found
 }
 
 pub fn open_memory() -> Connection {
@@ -58,7 +93,6 @@ fn create_tables(conn: &Connection) {
             id TEXT PRIMARY KEY,
             channel_id TEXT NOT NULL,
             title TEXT NOT NULL,
-            thumbnail_url TEXT,
             published_at TEXT,
             duration TEXT,
             is_short INTEGER NOT NULL DEFAULT 0,
@@ -431,6 +465,42 @@ mod tests {
     }
 
     #[test]
+    fn test_drop_videos_thumbnail_url_when_present() {
+        // Simulate a legacy DB that still carries the obsolete column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE TABLE videos (
+               id TEXT PRIMARY KEY,
+               channel_id TEXT NOT NULL,
+               title TEXT NOT NULL,
+               thumbnail_url TEXT,
+               fetched_at TEXT
+             );",
+        )
+        .unwrap();
+        assert!(super::column_exists(&conn, "videos", "thumbnail_url"), "precondition");
+
+        super::drop_videos_thumbnail_url(&conn);
+
+        assert!(
+            !super::column_exists(&conn, "videos", "thumbnail_url"),
+            "thumbnail_url should have been dropped"
+        );
+    }
+
+    #[test]
+    fn test_drop_videos_thumbnail_url_is_idempotent() {
+        // No column: should be a no-op without errors.
+        let conn = open_memory();
+        assert!(!super::column_exists(&conn, "videos", "thumbnail_url"), "precondition");
+
+        super::drop_videos_thumbnail_url(&conn);
+
+        assert!(!super::column_exists(&conn, "videos", "thumbnail_url"));
+    }
+
+    #[test]
     fn test_channel_subscriptions_cascade_delete() {
         let conn = open_memory();
         conn.execute(
@@ -754,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_updates_utf8_title_and_thumbnail() {
+    fn test_upsert_updates_utf8_title() {
         let conn = open_memory();
         conn.execute(
             "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'ch', '2025-01-01T00:00:00Z')",
@@ -768,12 +838,10 @@ mod tests {
         .unwrap();
 
         conn.execute(
-            "INSERT INTO videos (id, channel_id, title, thumbnail_url, fetched_at)
-             VALUES ('vid1', 'UC1', '新しいタイトル', 'new_url', '2025-06-01T00:00:00Z')
-             ON CONFLICT(id) DO UPDATE SET
-               title = excluded.title,
-               thumbnail_url = excluded.thumbnail_url
-             WHERE title != excluded.title OR thumbnail_url != excluded.thumbnail_url",
+            "INSERT INTO videos (id, channel_id, title, fetched_at)
+             VALUES ('vid1', 'UC1', '新しいタイトル', '2025-06-01T00:00:00Z')
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title
+             WHERE title != excluded.title",
             [],
         )
         .unwrap();

@@ -19,6 +19,9 @@ pub struct OkResponse {
 }
 
 /// フィード動画アイテム
+///
+/// 動画サムネイルはクライアント側で `id` から
+/// `https://i.ytimg.com/vi/{id}/hqdefault.jpg` を組み立てる。
 #[derive(Serialize, ToSchema)]
 pub struct FeedItem {
     /// 動画ID
@@ -27,8 +30,6 @@ pub struct FeedItem {
     pub channel_id: String,
     /// 動画タイトル
     pub title: String,
-    /// サムネイルURL
-    pub thumbnail_url: Option<String>,
     /// 公開日時 (ISO 8601)
     pub published_at: Option<String>,
     /// 再生時間 (ISO 8601 duration)
@@ -65,14 +66,15 @@ pub struct ChannelItem {
 }
 
 /// チャンネル詳細の動画アイテム (非表示動画含む)
+///
+/// 動画サムネイルはクライアント側で `id` から
+/// `https://i.ytimg.com/vi/{id}/hqdefault.jpg` を組み立てる。
 #[derive(Serialize, ToSchema)]
 pub struct ChannelVideoItem {
     /// 動画ID
     pub id: String,
     /// 動画タイトル
     pub title: String,
-    /// サムネイルURL
-    pub thumbnail_url: Option<String>,
     /// 公開日時 (ISO 8601)
     pub published_at: Option<String>,
     /// 再生時間 (ISO 8601 duration)

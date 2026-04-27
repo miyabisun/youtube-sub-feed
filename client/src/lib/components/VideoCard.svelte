@@ -2,6 +2,7 @@
 	import { relativeTime } from '$lib/relative-time.js';
 	import { formatDuration } from '$lib/format-duration.js';
 	import { link } from '$lib/router.svelte.js';
+	import { videoThumbnail } from '$lib/youtube-thumbnail.js';
 
 	let { video } = $props();
 
@@ -26,19 +27,12 @@
 		if (v.is_livestream) return 'label-archive';
 		return '';
 	}
-
-	function hqThumbnail(url) {
-		if (!url) return url;
-		return url.replace('/mqdefault.', '/hqdefault.');
-	}
 </script>
 
 <div class="video-card">
 	<a class="thumbnail-link" href={videoUrl} target="_blank" rel="noopener">
 		<div class="thumbnail-wrap">
-			{#if video.thumbnail_url}
-				<img class="thumbnail" src={hqThumbnail(video.thumbnail_url)} alt="" loading="lazy" />
-			{/if}
+			<img class="thumbnail" src={videoThumbnail(video.id)} alt="" loading="lazy" />
 			{#if video.duration}
 				<span class="duration">{formatDuration(video.duration)}</span>
 			{/if}

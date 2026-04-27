@@ -59,7 +59,7 @@ async fn get_feed(
         };
 
         let sql = format!(
-            "SELECT v.id, v.channel_id, v.title, v.thumbnail_url, v.published_at,
+            "SELECT v.id, v.channel_id, v.title, v.published_at,
                     v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
                     c.title as channel_title, c.thumbnail_url as channel_thumbnail
              FROM videos v
@@ -83,14 +83,13 @@ async fn get_feed(
                 "id": row.get::<_, String>(0)?,
                 "channel_id": row.get::<_, String>(1)?,
                 "title": row.get::<_, String>(2)?,
-                "thumbnail_url": row.get::<_, Option<String>>(3)?,
-                "published_at": row.get::<_, Option<String>>(4)?,
-                "duration": row.get::<_, Option<String>>(5)?,
-                "is_short": row.get::<_, i64>(6)?,
-                "is_livestream": row.get::<_, i64>(7)?,
-                "livestream_ended_at": row.get::<_, Option<String>>(8)?,
-                "channel_title": row.get::<_, String>(9)?,
-                "channel_thumbnail": row.get::<_, Option<String>>(10)?,
+                "published_at": row.get::<_, Option<String>>(3)?,
+                "duration": row.get::<_, Option<String>>(4)?,
+                "is_short": row.get::<_, i64>(5)?,
+                "is_livestream": row.get::<_, i64>(6)?,
+                "livestream_ended_at": row.get::<_, Option<String>>(7)?,
+                "channel_title": row.get::<_, String>(8)?,
+                "channel_thumbnail": row.get::<_, Option<String>>(9)?,
             }))
         };
 

@@ -98,7 +98,7 @@ async fn get_channel_videos(
     let rows = {
         let conn = state.db.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT v.id, v.title, v.thumbnail_url, v.published_at, v.duration,
+            "SELECT v.id, v.title, v.published_at, v.duration,
                     v.is_short, v.is_livestream, v.livestream_ended_at,
                     COALESCE(uv.is_hidden, 0) as is_hidden
              FROM videos v
@@ -112,13 +112,12 @@ async fn get_channel_videos(
                 Ok(json!({
                     "id": row.get::<_, String>(0)?,
                     "title": row.get::<_, String>(1)?,
-                    "thumbnail_url": row.get::<_, Option<String>>(2)?,
-                    "published_at": row.get::<_, Option<String>>(3)?,
-                    "duration": row.get::<_, Option<String>>(4)?,
-                    "is_short": row.get::<_, i64>(5)?,
-                    "is_livestream": row.get::<_, i64>(6)?,
-                    "livestream_ended_at": row.get::<_, Option<String>>(7)?,
-                    "is_hidden": row.get::<_, i64>(8)?,
+                    "published_at": row.get::<_, Option<String>>(2)?,
+                    "duration": row.get::<_, Option<String>>(3)?,
+                    "is_short": row.get::<_, i64>(4)?,
+                    "is_livestream": row.get::<_, i64>(5)?,
+                    "livestream_ended_at": row.get::<_, Option<String>>(6)?,
+                    "is_hidden": row.get::<_, i64>(7)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
