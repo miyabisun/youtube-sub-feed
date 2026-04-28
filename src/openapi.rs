@@ -85,6 +85,8 @@ pub struct ChannelVideoItem {
     pub is_livestream: i64,
     /// ライブ配信終了日時
     pub livestream_ended_at: Option<String>,
+    /// メンバー限定動画 (0: 通常, 1: メンバー限定 — フィードからは除外される)
+    pub is_members_only: i64,
     /// 非表示フラグ (0: 表示, 1: 非表示)
     pub is_hidden: i64,
 }

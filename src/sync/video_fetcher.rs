@@ -1,9 +1,12 @@
 use crate::duration::is_short_duration;
 use crate::notify::notify_warning;
 use crate::state::AppState;
-use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uush_playlist};
+use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uumo_playlist, fetch_uush_playlist};
 use crate::youtube::videos::fetch_video_details;
 use serde_json::json;
+
+const UUMO_CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
+const UUMO_FAST_CACHE_TTL_SECONDS: u64 = 5 * 60;
 
 pub async fn fetch_channel_videos(
     state: &AppState,
@@ -217,7 +220,94 @@ pub async fn fetch_channel_videos(
         );
     }
 
+    // 8. Tag members-only videos. Atom feed (WebSub) does not expose this state,
+    //    so we cross-reference the channel's UUMO playlist (404s for channels
+    //    without a membership program → empty Vec, which is harmless).
+    refresh_members_only_flags(state, channel_id, access_token).await;
+
     new_video_ids
+}
+
+/// Periodic-refresh path: 6-hour cache, since this scan only exists as a
+/// safety net for WebSub pushes the hub may have failed to deliver.
+async fn refresh_members_only_flags(state: &AppState, channel_id: &str, access_token: &str) {
+    refresh_members_only_flags_with_ttl(state, channel_id, access_token, UUMO_CACHE_TTL_SECONDS)
+        .await;
+}
+
+/// WebSub-callback path: 5-minute cache so a freshly published members-only
+/// video is identified on the same push that delivered it, while bursts of
+/// pushes within the same 5-minute window reuse one fetch instead of N.
+/// The hub-callback handler spawns this so the hub response isn't delayed.
+pub async fn refresh_members_only_flags_fast(
+    state: &AppState,
+    channel_id: &str,
+    access_token: &str,
+) {
+    refresh_members_only_flags_with_ttl(
+        state,
+        channel_id,
+        access_token,
+        UUMO_FAST_CACHE_TTL_SECONDS,
+    )
+    .await;
+}
+
+async fn refresh_members_only_flags_with_ttl(
+    state: &AppState,
+    channel_id: &str,
+    access_token: &str,
+    cache_ttl_seconds: u64,
+) {
+    let cache_key = format!("uumo:{}", channel_id);
+    let video_ids: Vec<String> = if let Some(cached) = state.cache.get(&cache_key) {
+        serde_json::from_value(cached).unwrap_or_default()
+    } else {
+        let ids = fetch_uumo_playlist(&state.http, &state.quota, channel_id, access_token).await;
+        state
+            .cache
+            .set(&cache_key, json!(ids), Some(cache_ttl_seconds));
+        ids
+    };
+
+    if video_ids.is_empty() {
+        return;
+    }
+
+    let conn = state.db.lock().unwrap();
+    let updated = mark_videos_as_members_only(&conn, channel_id, &video_ids);
+    if updated > 0 {
+        tracing::info!(
+            "[video-fetcher] {} marked {} videos as members-only",
+            channel_id, updated
+        );
+    }
+}
+
+/// UPDATE the `is_members_only` flag on rows whose `id` matches one of the
+/// supplied UUMO playlist entries. The SQL is built with `?` placeholders
+/// (fixed character) and all values are bound via `params.as_slice()`,
+/// so this is safe against SQL injection despite the format!() call.
+fn mark_videos_as_members_only(
+    conn: &rusqlite::Connection,
+    channel_id: &str,
+    video_ids: &[String],
+) -> usize {
+    if video_ids.is_empty() {
+        return 0;
+    }
+    let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "UPDATE videos SET is_members_only = 1
+         WHERE channel_id = ? AND is_members_only = 0 AND id IN ({})",
+        placeholders
+    );
+    let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(video_ids.len() + 1);
+    params.push(&channel_id);
+    for id in video_ids {
+        params.push(id);
+    }
+    conn.execute(&sql, params.as_slice()).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -231,6 +321,14 @@ mod tests {
     //   infinite re-fetch attempts on deleted/private videos
     // - Thumbnails: NOT stored in DB. The frontend builds URLs deterministically as
     //   https://i.ytimg.com/vi/{video_id}/hqdefault.jpg, so we don't waste quota fetching them.
+    // - Members-only: tagged by cross-referencing the channel's UUMO playlist.
+    //   Two cache windows share one cache key:
+    //     * periodic refresh   → 6 hour TTL  (safety-net scan, quota-friendly)
+    //     * WebSub callback    → 5 minute TTL (so newly pushed members-only
+    //                                          videos are tagged before they
+    //                                          surface in the feed, while
+    //                                          bursts of pushes still share
+    //                                          one fetch within the window)
 
     use crate::db;
 
@@ -337,5 +435,73 @@ mod tests {
             )
             .unwrap();
         assert!(ended.is_some(), "livestream_ended_at is set when stream ends");
+    }
+
+    #[test]
+    fn mark_videos_as_members_only_flags_only_matching_ids() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES
+              ('v_normal', 'UC1', 'normal',  '2025-06-01T00:00:00Z'),
+              ('v_member', 'UC1', 'member',  '2025-06-01T00:00:00Z'),
+              ('v_other_ch', 'UC1', 'other', '2025-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let uumo = vec!["v_member".to_string(), "v_unknown".to_string()];
+        let updated = super::mark_videos_as_members_only(&conn, "UC1", &uumo);
+        assert_eq!(updated, 1, "Only v_member should match (v_unknown is not in the table)");
+
+        let v_member: i64 = conn
+            .query_row("SELECT is_members_only FROM videos WHERE id = 'v_member'", [], |r| r.get(0))
+            .unwrap();
+        let v_normal: i64 = conn
+            .query_row("SELECT is_members_only FROM videos WHERE id = 'v_normal'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v_member, 1);
+        assert_eq!(v_normal, 0);
+    }
+
+    #[test]
+    fn mark_videos_as_members_only_isolates_to_channel() {
+        // Even if the same video_id existed in another channel (impossible in
+        // practice but we want the safety guard), only the matching channel
+        // gets touched.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC2', 'ch2', '2025-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES
+              ('v1', 'UC1', 'ch1 video', '2025-06-01T00:00:00Z'),
+              ('v2', 'UC2', 'ch2 video', '2025-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // We pretend UC1's UUMO contains v1, v2 (a hypothetical bug) — UC2's
+        // entry must remain untouched because the channel_id guard filters it.
+        let uumo = vec!["v1".to_string(), "v2".to_string()];
+        let updated = super::mark_videos_as_members_only(&conn, "UC1", &uumo);
+        assert_eq!(updated, 1);
+
+        let v1: i64 = conn
+            .query_row("SELECT is_members_only FROM videos WHERE id = 'v1'", [], |r| r.get(0))
+            .unwrap();
+        let v2: i64 = conn
+            .query_row("SELECT is_members_only FROM videos WHERE id = 'v2'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v1, 1, "UC1's video gets flagged");
+        assert_eq!(v2, 0, "UC2's video must not be flagged when scanning UC1");
+    }
+
+    #[test]
+    fn mark_videos_as_members_only_empty_input_is_noop() {
+        let conn = setup();
+        let updated = super::mark_videos_as_members_only(&conn, "UC1", &[]);
+        assert_eq!(updated, 0);
     }
 }

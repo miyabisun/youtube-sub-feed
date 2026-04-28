@@ -69,6 +69,7 @@ async fn get_rss_feed(
              LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
              WHERE uc.is_favorite = 1
                AND COALESCE(uv.is_hidden, 0) = 0
+               AND v.is_members_only = 0
                AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
              ORDER BY v.published_at DESC
              LIMIT 100",

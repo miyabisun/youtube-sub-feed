@@ -63,9 +63,30 @@ pub async fn fetch_uush_playlist(
     channel_id: &str,
     access_token: &str,
 ) -> Vec<String> {
-    let uush_id = format!("UUSH{}", channel_id.get(2..).unwrap_or(channel_id));
+    fetch_special_playlist_video_ids(http, quota, channel_id, access_token, "UUSH").await
+}
 
-    match fetch_playlist_items(http, quota, &uush_id, access_token, 50).await {
+/// Fetch the UUMO (Members-Only uploads) playlist for a channel.
+/// Returns an empty Vec when the channel has no membership program (404).
+pub async fn fetch_uumo_playlist(
+    http: &reqwest::Client,
+    quota: &Arc<QuotaState>,
+    channel_id: &str,
+    access_token: &str,
+) -> Vec<String> {
+    fetch_special_playlist_video_ids(http, quota, channel_id, access_token, "UUMO").await
+}
+
+async fn fetch_special_playlist_video_ids(
+    http: &reqwest::Client,
+    quota: &Arc<QuotaState>,
+    channel_id: &str,
+    access_token: &str,
+    prefix: &str,
+) -> Vec<String> {
+    let suffix = channel_id.get(2..).unwrap_or(channel_id);
+    let playlist_id = format!("{}{}", prefix, suffix);
+    match fetch_playlist_items(http, quota, &playlist_id, access_token, 50).await {
         Ok(items) => items.into_iter().map(|i| i.video_id).collect(),
         Err(_) => Vec::new(),
     }
@@ -73,6 +94,8 @@ pub async fn fetch_uush_playlist(
 
 // Playlist ID Derivation Spec
 //
-// YouTube uses playlist ID prefixes to identify content types:
-// - "UU" prefix: uploads playlist (derived from channel's "UC" prefix)
-// - "UUSH" prefix: Shorts playlist (derived from channel's "UC" prefix)
+// YouTube uses playlist ID prefixes to identify content types, all derived by
+// replacing the channel's "UC" prefix:
+// - "UU"   prefix: uploads playlist
+// - "UUSH" prefix: Shorts playlist
+// - "UUMO" prefix: members-only uploads playlist (404 when channel has no membership)

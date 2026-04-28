@@ -16,8 +16,26 @@ pub fn open(path: &str) -> Connection {
     migrate(&conn);
     create_tables(&conn);
     drop_videos_thumbnail_url(&conn);
+    add_videos_is_members_only(&conn);
 
     conn
+}
+
+/// One-shot migration: add `videos.is_members_only` to legacy databases.
+///
+/// Rows default to 0 (not members-only); the next periodic refresh fills in
+/// the truth via the channel's UUMO playlist. Idempotent.
+fn add_videos_is_members_only(conn: &Connection) {
+    if column_exists(conn, "videos", "is_members_only") {
+        return;
+    }
+    match conn.execute(
+        "ALTER TABLE videos ADD COLUMN is_members_only INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => tracing::info!("[migrate] Added videos.is_members_only column"),
+        Err(e) => tracing::warn!("[migrate] Failed to add videos.is_members_only: {}", e),
+    }
 }
 
 /// One-shot migration: remove the obsolete `videos.thumbnail_url` column.
@@ -97,6 +115,7 @@ fn create_tables(conn: &Connection) {
             duration TEXT,
             is_short INTEGER NOT NULL DEFAULT 0,
             is_livestream INTEGER NOT NULL DEFAULT 0,
+            is_members_only INTEGER NOT NULL DEFAULT 0,
             livestream_ended_at TEXT,
             fetched_at TEXT,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
@@ -487,6 +506,36 @@ mod tests {
             !super::column_exists(&conn, "videos", "thumbnail_url"),
             "thumbnail_url should have been dropped"
         );
+    }
+
+    #[test]
+    fn test_add_videos_is_members_only_when_missing() {
+        // Legacy DB without the new column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE channels (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL);
+             CREATE TABLE videos (
+               id TEXT PRIMARY KEY,
+               channel_id TEXT NOT NULL,
+               title TEXT NOT NULL,
+               fetched_at TEXT
+             );",
+        )
+        .unwrap();
+        assert!(!super::column_exists(&conn, "videos", "is_members_only"), "precondition");
+
+        super::add_videos_is_members_only(&conn);
+
+        assert!(super::column_exists(&conn, "videos", "is_members_only"));
+    }
+
+    #[test]
+    fn test_add_videos_is_members_only_is_idempotent() {
+        // Fresh DB already has the column from create_tables.
+        let conn = open_memory();
+        assert!(super::column_exists(&conn, "videos", "is_members_only"), "precondition");
+        super::add_videos_is_members_only(&conn);
+        assert!(super::column_exists(&conn, "videos", "is_members_only"));
     }
 
     #[test]

@@ -100,6 +100,7 @@ async fn get_channel_videos(
         let mut stmt = conn.prepare(
             "SELECT v.id, v.title, v.published_at, v.duration,
                     v.is_short, v.is_livestream, v.livestream_ended_at,
+                    v.is_members_only,
                     COALESCE(uv.is_hidden, 0) as is_hidden
              FROM videos v
              LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
@@ -117,7 +118,8 @@ async fn get_channel_videos(
                     "is_short": row.get::<_, i64>(4)?,
                     "is_livestream": row.get::<_, i64>(5)?,
                     "livestream_ended_at": row.get::<_, Option<String>>(6)?,
-                    "is_hidden": row.get::<_, i64>(7)?,
+                    "is_members_only": row.get::<_, i64>(7)?,
+                    "is_hidden": row.get::<_, i64>(8)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;

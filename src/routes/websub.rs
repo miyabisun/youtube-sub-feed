@@ -202,9 +202,32 @@ pub async fn notification(
             "[websub] {} — {} entries, no new videos",
             channel_id, entries.len()
         );
+        return StatusCode::OK;
     }
 
+    // Push delivered new videos. Cross-check the channel's UUMO playlist to
+    // tag any members-only entries before they reach the feed. Spawned so the
+    // hub gets its 200 OK without waiting on the YouTube API.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        check_channel_membership(state_clone, channel_id).await;
+    });
+
     StatusCode::OK
+}
+
+async fn check_channel_membership(state: AppState, channel_id: String) {
+    let Some(token) = crate::sync::token::get_valid_access_token(&state).await else {
+        tracing::debug!(
+            "[websub] no token, skipping membership check for {} (will be re-checked at next 3h refresh)",
+            channel_id
+        );
+        return;
+    };
+    crate::sync::video_fetcher::refresh_members_only_flags_fast(
+        &state, &channel_id, &token,
+    )
+    .await;
 }
 
 fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {

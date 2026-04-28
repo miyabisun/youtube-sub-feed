@@ -68,6 +68,7 @@ async fn get_feed(
              {group_join}
              LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
              WHERE COALESCE(uv.is_hidden, 0) = 0
+               AND v.is_members_only = 0
                AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
                {group_where}
              ORDER BY v.published_at DESC
@@ -228,6 +229,7 @@ mod tests {
                  JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
                  LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
                  WHERE COALESCE(uv.is_hidden, 0) = 0
+                   AND v.is_members_only = 0
                    AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
                  ORDER BY v.published_at DESC
                  LIMIT ?2 OFFSET ?3",
@@ -249,6 +251,7 @@ mod tests {
                  JOIN channel_groups cg ON v.channel_id = cg.channel_id
                  LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
                  WHERE COALESCE(uv.is_hidden, 0) = 0
+                   AND v.is_members_only = 0
                    AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
                    AND cg.group_id = ?2
                  ORDER BY v.published_at DESC
@@ -294,6 +297,21 @@ mod tests {
         let ids = query_feed(&conn, 1, 100, 0);
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "v1");
+    }
+
+    #[test]
+    fn test_feed_excludes_members_only_videos() {
+        // Members-only videos arrive via WebSub push (we can't tell from the Atom
+        // payload), then get tagged when the periodic refresh cross-references
+        // the channel's UUMO playlist. The feed must filter them out.
+        let conn = setup();
+        insert_video(&conn, "v_members", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&conn, "v_normal", "UC1", "2024-01-03T00:00:00Z", 0);
+        conn.execute("UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'", [])
+            .unwrap();
+
+        let ids = query_feed(&conn, 1, 100, 0);
+        assert_eq!(ids, vec!["v_normal"]);
     }
 
     #[test]
