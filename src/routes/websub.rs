@@ -187,15 +187,15 @@ pub async fn notification(
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    let new_count = {
+    let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
         let channel_title = lookup_channel_title(&conn, &channel_id);
         let newly_inserted = partition_new_entries(&conn, &channel_id, &entries, &now);
         log_new_videos(&channel_title, &channel_id, &newly_inserted);
-        newly_inserted.len()
+        newly_inserted.iter().map(|e| e.video_id.clone()).collect()
     };
 
-    if new_count == 0 {
+    if new_video_ids.is_empty() {
         // All entries were already in the DB (likely a hub redelivery after a 5xx
         // retry, or a metadata-only refresh). Logged at debug to avoid noise.
         tracing::debug!(
@@ -205,29 +205,33 @@ pub async fn notification(
         return StatusCode::OK;
     }
 
-    // Push delivered new videos. Cross-check the channel's UUMO playlist to
-    // tag any members-only entries before they reach the feed. Spawned so the
-    // hub gets its 200 OK without waiting on the YouTube API.
+    // Push delivered new videos. Spawn enrichment (details + members-only)
+    // so the hub gets its 200 OK without waiting on the YouTube API.
     let state_clone = state.clone();
     tokio::spawn(async move {
-        check_channel_membership(state_clone, channel_id).await;
+        enrich_pushed_videos(state_clone, channel_id, new_video_ids).await;
     });
 
     StatusCode::OK
 }
 
-async fn check_channel_membership(state: AppState, channel_id: String) {
+async fn enrich_pushed_videos(state: AppState, channel_id: String, new_video_ids: Vec<String>) {
     let Some(token) = crate::sync::token::get_valid_access_token(&state).await else {
         tracing::debug!(
-            "[websub] no token, skipping membership check for {} (will be re-checked at next 3h refresh)",
+            "[websub] no token, skipping enrichment for {} (will be re-checked at next 24h refresh)",
             channel_id
         );
         return;
     };
-    crate::sync::video_fetcher::refresh_members_only_flags_fast(
-        &state, &channel_id, &token,
-    )
-    .await;
+
+    // Run details (Videos.list) and membership (UUMO playlist) checks in parallel:
+    // both need the same token, both are idempotent, and joining them halves the
+    // wall-clock latency before the row is fully feed-ready.
+    let details_fut =
+        crate::sync::video_fetcher::backfill_video_details(&state, &new_video_ids, &token);
+    let members_fut =
+        crate::sync::video_fetcher::refresh_members_only_flags(&state, &channel_id, &token);
+    tokio::join!(details_fut, members_fut);
 }
 
 fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {

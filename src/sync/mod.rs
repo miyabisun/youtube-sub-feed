@@ -35,7 +35,7 @@ pub(crate) async fn wait_for_quota(state: &AppState) {
 }
 
 pub fn start_sync(state: AppState) {
-    tracing::info!("[sync] Starting background sync (WebSub push + 3h periodic refresh)");
+    tracing::info!("[sync] Starting background sync (WebSub push + 24h periodic refresh)");
 
     let state_clone = state.clone();
     tokio::spawn(async move {

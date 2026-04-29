@@ -5,8 +5,11 @@ use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uumo_playlist, 
 use crate::youtube::videos::fetch_video_details;
 use serde_json::json;
 
-const UUMO_CACHE_TTL_SECONDS: u64 = 6 * 60 * 60;
-const UUMO_FAST_CACHE_TTL_SECONDS: u64 = 5 * 60;
+/// Shared between periodic refresh and WebSub callback. The 5-minute window
+/// lets bursts of callbacks (multiple pushes for the same channel within a
+/// few minutes) share one fetch, while still being short enough that newly
+/// published members-only videos are detected on their actual push.
+const UUMO_CACHE_TTL_SECONDS: u64 = 5 * 60;
 
 pub async fn fetch_channel_videos(
     state: &AppState,
@@ -228,36 +231,88 @@ pub async fn fetch_channel_videos(
     new_video_ids
 }
 
-/// Periodic-refresh path: 6-hour cache, since this scan only exists as a
-/// safety net for WebSub pushes the hub may have failed to deliver.
-async fn refresh_members_only_flags(state: &AppState, channel_id: &str, access_token: &str) {
-    refresh_members_only_flags_with_ttl(state, channel_id, access_token, UUMO_CACHE_TTL_SECONDS)
-        .await;
+/// WebSub-callback path: enrich freshly inserted videos with the metadata
+/// the Atom payload doesn't carry (duration, is_livestream, livestream_ended_at).
+///
+/// Without this, livestream rows would linger with `is_livestream=0` until
+/// the next periodic refresh fills them in, and feeds with `show_livestreams=1`
+/// would show them without the LIVE badge.
+///
+/// Shorts detection (UUSH) is intentionally skipped here — the periodic
+/// refresh handles it because Shorts vs. regular video does not change the
+/// feed's correctness, only the per-card label, and adding another API
+/// call per push would burn quota on every channel.
+pub async fn backfill_video_details(state: &AppState, video_ids: &[String], access_token: &str) {
+    if video_ids.is_empty() {
+        return;
+    }
+
+    let details =
+        match fetch_video_details(&state.http, &state.quota, video_ids, access_token).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("[video-fetcher] backfill details fetch failed: {}", e);
+                return;
+            }
+        };
+
+    if details.is_empty() {
+        tracing::debug!(
+            "[video-fetcher] Videos.list returned no details for {} pushed ids (likely deleted/private)",
+            video_ids.len()
+        );
+        return;
+    }
+
+    let conn = state.db.lock().unwrap();
+    let updated = apply_video_details(&conn, &details);
+    let livestreams = details.iter().filter(|d| d.is_livestream).count();
+    if updated > 0 {
+        tracing::info!(
+            "[video-fetcher] backfilled details for {}/{} pushed videos ({} livestream)",
+            updated,
+            video_ids.len(),
+            livestreams
+        );
+    }
 }
 
-/// WebSub-callback path: 5-minute cache so a freshly published members-only
-/// video is identified on the same push that delivered it, while bursts of
-/// pushes within the same 5-minute window reuse one fetch instead of N.
-/// The hub-callback handler spawns this so the hub response isn't delayed.
-pub async fn refresh_members_only_flags_fast(
+/// Updates only `is_livestream` and `livestream_ended_at`. `duration` is
+/// deliberately left untouched: the periodic refresh keys its "fully fetched"
+/// filter on `duration IS NOT NULL`, and writing duration here would cause the
+/// Shorts (UUSH) detection step to be permanently skipped for WebSub-pushed
+/// videos. duration + is_short stay paired in the periodic refresh.
+fn apply_video_details(
+    conn: &rusqlite::Connection,
+    details: &[crate::youtube::videos::VideoDetails],
+) -> usize {
+    let mut updated = 0;
+    for detail in details {
+        let n = conn
+            .execute(
+                "UPDATE videos
+                 SET is_livestream = ?1, livestream_ended_at = ?2
+                 WHERE id = ?3",
+                rusqlite::params![
+                    if detail.is_livestream { 1i64 } else { 0i64 },
+                    detail.livestream_ended_at,
+                    detail.id,
+                ],
+            )
+            .unwrap_or(0);
+        updated += n;
+    }
+    updated
+}
+
+/// Cross-references the channel's UUMO playlist and flags any matching rows
+/// as members-only. Used by both the periodic refresh and the WebSub callback
+/// — the shared 5-minute cache absorbs callback bursts while keeping the
+/// data fresh enough for the once-a-day scan.
+pub async fn refresh_members_only_flags(
     state: &AppState,
     channel_id: &str,
     access_token: &str,
-) {
-    refresh_members_only_flags_with_ttl(
-        state,
-        channel_id,
-        access_token,
-        UUMO_FAST_CACHE_TTL_SECONDS,
-    )
-    .await;
-}
-
-async fn refresh_members_only_flags_with_ttl(
-    state: &AppState,
-    channel_id: &str,
-    access_token: &str,
-    cache_ttl_seconds: u64,
 ) {
     let cache_key = format!("uumo:{}", channel_id);
     let video_ids: Vec<String> = if let Some(cached) = state.cache.get(&cache_key) {
@@ -266,7 +321,7 @@ async fn refresh_members_only_flags_with_ttl(
         let ids = fetch_uumo_playlist(&state.http, &state.quota, channel_id, access_token).await;
         state
             .cache
-            .set(&cache_key, json!(ids), Some(cache_ttl_seconds));
+            .set(&cache_key, json!(ids), Some(UUMO_CACHE_TTL_SECONDS));
         ids
     };
 
@@ -322,13 +377,18 @@ mod tests {
     // - Thumbnails: NOT stored in DB. The frontend builds URLs deterministically as
     //   https://i.ytimg.com/vi/{video_id}/hqdefault.jpg, so we don't waste quota fetching them.
     // - Members-only: tagged by cross-referencing the channel's UUMO playlist.
-    //   Two cache windows share one cache key:
-    //     * periodic refresh   → 6 hour TTL  (safety-net scan, quota-friendly)
-    //     * WebSub callback    → 5 minute TTL (so newly pushed members-only
-    //                                          videos are tagged before they
-    //                                          surface in the feed, while
-    //                                          bursts of pushes still share
-    //                                          one fetch within the window)
+    //   A single 5-minute cache (key `uumo:{channel_id}`) is shared between
+    //   the periodic refresh and the WebSub callback. The callback path
+    //   benefits from cache hits when multiple pushes for the same channel
+    //   land within 5 minutes; the daily refresh always misses the cache
+    //   (since 24h ≫ 5min), which is fine — that's just one fetch per channel.
+    // - Live status / livestream_ended_at: WebSub Atom payloads do not carry
+    //   these. The callback path runs `backfill_video_details` against
+    //   Videos.list (batch up to 50 IDs per call) so the LIVE badge appears
+    //   immediately for newly pushed livestreams, instead of waiting until the
+    //   next periodic refresh. `duration` is intentionally NOT written on this
+    //   path — leaving it NULL is what keeps the row eligible for the periodic
+    //   refresh's UUSH (Shorts) detection step.
 
     use crate::db;
 
@@ -503,5 +563,143 @@ mod tests {
         let conn = setup();
         let updated = super::mark_videos_as_members_only(&conn, "UC1", &[]);
         assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn apply_video_details_sets_livestream_flag_without_touching_duration() {
+        // Simulates the WebSub-callback path: a bare row from Atom push gets
+        // tagged with is_livestream/livestream_ended_at, but duration must
+        // remain NULL so the periodic refresh's UUSH detection still runs.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES
+              ('v_live',   'UC1', 'live show',    '2026-04-29T00:00:00Z'),
+              ('v_normal', 'UC1', 'normal video', '2026-04-29T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let details = vec![
+            crate::youtube::videos::VideoDetails {
+                id: "v_live".to_string(),
+                duration: "P0D".to_string(),
+                is_livestream: true,
+                livestream_ended_at: None,
+            },
+            crate::youtube::videos::VideoDetails {
+                id: "v_normal".to_string(),
+                duration: "PT12M34S".to_string(),
+                is_livestream: false,
+                livestream_ended_at: None,
+            },
+        ];
+
+        let updated = super::apply_video_details(&conn, &details);
+        assert_eq!(updated, 2);
+
+        let (live_flag, live_duration): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT is_livestream, duration FROM videos WHERE id = 'v_live'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(live_flag, 1, "Livestream entry must be flagged immediately");
+        assert!(live_duration.is_none(), "duration must remain NULL for UUSH eligibility");
+
+        let (normal_flag, normal_duration): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT is_livestream, duration FROM videos WHERE id = 'v_normal'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(normal_flag, 0);
+        assert!(normal_duration.is_none(), "duration must remain NULL for UUSH eligibility");
+    }
+
+    #[test]
+    fn apply_video_details_keeps_row_eligible_for_periodic_uush_check() {
+        // Regression guard: callbacks must not mark a row as "fully fetched"
+        // (duration IS NOT NULL) because that would permanently skip Shorts
+        // detection in the next periodic refresh.
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at)
+             VALUES ('pushed', 'UC1', 'Pushed video', '2026-04-29T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let details = vec![crate::youtube::videos::VideoDetails {
+            id: "pushed".to_string(),
+            duration: "PT0S".to_string(),
+            is_livestream: false,
+            livestream_ended_at: None,
+        }];
+        super::apply_video_details(&conn, &details);
+
+        let still_pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM videos WHERE id = 'pushed' AND duration IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_pending, 1,
+            "duration NULL must survive the callback so periodic refresh runs UUSH detection"
+        );
+    }
+
+    #[test]
+    fn apply_video_details_records_livestream_ended_at_for_archived_streams() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, is_livestream, fetched_at)
+             VALUES ('archived', 'UC1', 'past stream', 1, '2026-04-29T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let details = vec![crate::youtube::videos::VideoDetails {
+            id: "archived".to_string(),
+            duration: "PT2H30M".to_string(),
+            is_livestream: true,
+            livestream_ended_at: Some("2026-04-28T10:00:00Z".to_string()),
+        }];
+
+        super::apply_video_details(&conn, &details);
+
+        let ended: Option<String> = conn
+            .query_row(
+                "SELECT livestream_ended_at FROM videos WHERE id = 'archived'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ended.as_deref(), Some("2026-04-28T10:00:00Z"));
+    }
+
+    #[test]
+    fn apply_video_details_skips_unknown_ids() {
+        // Videos.list might return entries for IDs we no longer have in the DB
+        // (channel deleted between push and detail fetch). The UPDATE simply
+        // matches zero rows for those — no error, no spurious inserts.
+        let conn = setup();
+        let details = vec![crate::youtube::videos::VideoDetails {
+            id: "ghost".to_string(),
+            duration: "PT5M".to_string(),
+            is_livestream: false,
+            livestream_ended_at: None,
+        }];
+
+        let updated = super::apply_video_details(&conn, &details);
+        assert_eq!(updated, 0);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM videos WHERE id = 'ghost'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "Unknown IDs must not be inserted by an UPDATE-only path");
     }
 }

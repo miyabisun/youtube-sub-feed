@@ -5,12 +5,12 @@ use crate::websub::{hub, signature};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-const REFRESH_INTERVAL_MS: u64 = 3 * 60 * 60 * 1000; // 3 hours
+const REFRESH_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
 
 /// Spawn the periodic refresh loop.
 ///
-/// Runs once immediately on startup, then every 3 hours:
+/// Runs once immediately on startup, then every 24 hours:
 ///   1. Sync subscription list with YouTube (add/remove channels)
 ///   2. Unsubscribe removed channels from WebSub hub
 ///   3. Subscribe new channels to WebSub hub
@@ -18,7 +18,7 @@ const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
 ///   5. Renew WebSub subscriptions nearing expiry
 pub fn start(state: AppState) {
     tokio::spawn(async move {
-        tracing::info!("[refresh] Starting periodic refresh worker (3h cycle)");
+        tracing::info!("[refresh] Starting periodic refresh worker (24h cycle)");
 
         loop {
             run_once(&state).await;
@@ -94,7 +94,7 @@ async fn run_once(state: &AppState) {
     // Backfilled channels are deliberately NOT added to the skip set below: this
     // step only sends a subscribe POST (no initial fetch), so refresh_existing_channels
     // should still run for them. If hub verification later fails for any reason,
-    // the 3-hour API scan remains a redundancy net for new videos.
+    // the 24-hour API scan remains a redundancy net for new videos.
     let backfill_ids = find_channels_missing_subscription(state);
     if !backfill_ids.is_empty() {
         tracing::info!("[refresh] Backfilling {} unsubscribed channel(s)", backfill_ids.len());
@@ -105,7 +105,7 @@ async fn run_once(state: &AppState) {
 
     // 5. Safety-net refresh for all OTHER channels (added ones were already fetched in step 4).
     // WebSub occasionally misses pushes (lease expiry, hub outages, server restarts);
-    // this 3-hour scan catches anything that slipped through.
+    // this 24-hour scan catches anything that slipped through.
     refresh_existing_channels(state, &access_token, &added_set).await;
 
     // 6. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
@@ -267,19 +267,22 @@ mod tests {
 
     // Periodic Refresh Spec
     //
-    // Runs every 3 hours. Combines:
+    // Runs every 24 hours. Combines:
     // - Subscription list sync (new/removed channels in YouTube account)
     // - WebSub subscribe/unsubscribe for diffs
     // - Full PlaylistItems.list scan (safety net for missed WebSub pushes)
     // - Videos.list batch for new videos without duration
     // - Subscription renewal for entries within 2 days of expiry
     //
-    // Design: 3h cadence is cheap enough (~1,750 units/day) to run safely under
-    // the 10,000/day quota while giving WebSub-missed videos a short catch-up window.
+    // Design: WebSub callbacks already enrich pushed videos in seconds (LIVE
+    // status, members-only, etc.), so this scan exists purely as a redundancy
+    // net for hub outages, lease expiry windows, and server downtime. A daily
+    // cadence keeps quota at ~200 units/day for the safety net while still
+    // catching anything that slipped through within 24 hours.
 
     #[test]
-    fn refresh_interval_is_3h() {
-        assert_eq!(REFRESH_INTERVAL_MS, 3 * 60 * 60 * 1000);
+    fn refresh_interval_is_24h() {
+        assert_eq!(REFRESH_INTERVAL_MS, 24 * 60 * 60 * 1000);
     }
 
     #[test]
