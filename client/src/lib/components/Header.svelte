@@ -2,9 +2,13 @@
 	import { router, link, navigate } from '$lib/router.svelte.js';
 	import { getGroups, loadGroups } from '$lib/groups.svelte.js';
 	import config from '$lib/config.js';
+	import fetcher from '$lib/fetcher.js';
+	import Toast from '$lib/components/Toast.svelte';
 
 	let groups = $derived(getGroups());
 	let menuOpen = $state(false);
+	let syncing = $state(false);
+	let toast = $state(null);
 
 	loadGroups();
 
@@ -29,6 +33,23 @@
 
 	function closeMenu() {
 		menuOpen = false;
+	}
+
+	async function syncChannels() {
+		if (syncing) return;
+		syncing = true;
+		closeMenu();
+		try {
+			const result = await fetcher(`${config.path.api}/channels/sync`, { method: 'POST' });
+			const added = result?.added ?? 0;
+			const removed = result?.removed ?? 0;
+			toast = { message: `チャンネル同期完了 (追加: ${added}, 削除: ${removed})`, type: 'success' };
+		} catch (e) {
+			console.error('[sync] channel sync failed:', e);
+			toast = { message: 'チャンネル同期に失敗しました', type: 'error' };
+		} finally {
+			syncing = false;
+		}
 	}
 </script>
 
@@ -56,11 +77,20 @@
 			<nav class="menu-dropdown">
 				<a class="menu-item" class:active={isActive('/channels')} href={link('/channels')} onclick={closeMenu}>チャンネル</a>
 				<a class="menu-item" class:active={isActive('/settings')} href={link('/settings')} onclick={closeMenu}>グループ管理</a>
+				<button class="menu-item menu-action" onclick={syncChannels} disabled={syncing}>
+					{syncing ? '同期中...' : 'チャンネル同期'}
+				</button>
 				<a class="menu-item" href={`${config.path.api}/auth/login`} onclick={closeMenu}>再ログイン</a>
 			</nav>
 		{/if}
 	</div>
 </header>
+
+{#if toast}
+	{#key Date.now()}
+		<Toast message={toast.message} type={toast.type} />
+	{/key}
+{/if}
 
 <style lang="sass">
 header
@@ -160,11 +190,17 @@ header
 
 .menu-item
 	display: block
+	width: 100%
 	padding: var(--sp-3) var(--sp-4)
 	color: var(--c-text-sub)
 	text-decoration: none
 	font-size: var(--fs-sm)
 	white-space: nowrap
+	text-align: left
+	background: none
+	border: none
+	cursor: pointer
+	font-family: inherit
 
 	&:hover
 		color: var(--c-text)
@@ -178,6 +214,12 @@ header
 
 	&:last-child
 		border-radius: 0 0 var(--radius-md) var(--radius-md)
+
+.menu-action
+	&:disabled
+		color: var(--c-text-muted)
+		cursor: wait
+		background: none
 
 @media (max-width: 799px)
 	.group-select
