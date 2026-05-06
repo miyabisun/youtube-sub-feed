@@ -17,8 +17,62 @@ pub fn open(path: &str) -> Connection {
     create_tables(&conn);
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
+    decode_video_titles_xml_entities(&conn);
 
     conn
+}
+
+/// One-shot migration: decode XML entities in legacy `videos.title` rows.
+///
+/// Pre-fix WebSub callbacks stored Atom titles verbatim (e.g. "S&amp;P500"),
+/// which caused the browser to render the literal "S&amp;P500" because the
+/// frontend re-escapes the `&`. New rows are now decoded at ingest in
+/// `websub::atom`, so this pass only exists to clean up rows from before
+/// that fix.
+///
+/// Returns the number of rows actually rewritten — primarily to let tests
+/// assert that clean rows are skipped, which is what makes the WHERE filter
+/// load-bearing rather than cosmetic.
+///
+/// Idempotent: the `WHERE` predicate skips rows that no longer carry an
+/// `&...;` substring, and `REPLACE()` on already-decoded text is a no-op.
+/// Cheap enough to run on every startup; the WHERE filter keeps the work
+/// proportional to the number of dirty rows once the backlog is drained.
+///
+/// Numeric character references (`&#39;`, `&#x27;`) are intentionally not
+/// handled here: SQLite has no built-in regex and these are rare enough in
+/// real YouTube feeds that adding a Rust-side scan is not worth the cost.
+/// New rows go through `websub::atom::decode_xml_entities`, which does
+/// handle them.
+///
+/// Keep the named-entity set in sync with `websub::atom::decode_xml_entities`.
+fn decode_video_titles_xml_entities(conn: &Connection) -> usize {
+    match conn.execute(
+        "UPDATE videos
+         SET title = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+             title,
+             '&lt;', '<'),
+             '&gt;', '>'),
+             '&quot;', '\"'),
+             '&apos;', ''''),
+             '&amp;', '&')
+         WHERE title LIKE '%&%;%'",
+        [],
+    ) {
+        Ok(updated) => {
+            if updated > 0 {
+                tracing::info!(
+                    "[migrate] Decoded XML entities in {} video title(s)",
+                    updated
+                );
+            }
+            updated
+        }
+        Err(e) => {
+            tracing::warn!("[migrate] Failed to decode video titles: {}", e);
+            0
+        }
+    }
 }
 
 /// One-shot migration: add `videos.is_members_only` to legacy databases.
@@ -192,9 +246,7 @@ fn create_tables(conn: &Connection) {
 }
 
 fn migrate(conn: &Connection) {
-    let has_auth_table = conn
-        .prepare("SELECT 1 FROM auth LIMIT 0")
-        .is_ok();
+    let has_auth_table = conn.prepare("SELECT 1 FROM auth LIMIT 0").is_ok();
     if !has_auth_table {
         return; // New database or already migrated
     }
@@ -427,11 +479,21 @@ mod tests {
             .collect();
 
         let expected = [
-            "channel_groups", "channels", "groups", "sessions",
-            "user_channels", "user_videos", "users", "videos",
+            "channel_groups",
+            "channels",
+            "groups",
+            "sessions",
+            "user_channels",
+            "user_videos",
+            "users",
+            "videos",
         ];
         for name in &expected {
-            assert!(tables.contains(&name.to_string()), "Table '{}' not found", name);
+            assert!(
+                tables.contains(&name.to_string()),
+                "Table '{}' not found",
+                name
+            );
         }
     }
 
@@ -458,7 +520,11 @@ mod tests {
             "idx_videos_published",
         ];
         for name in &expected {
-            assert!(indexes.contains(&name.to_string()), "Index '{}' not found", name);
+            assert!(
+                indexes.contains(&name.to_string()),
+                "Index '{}' not found",
+                name
+            );
         }
     }
 
@@ -498,7 +564,10 @@ mod tests {
              );",
         )
         .unwrap();
-        assert!(super::column_exists(&conn, "videos", "thumbnail_url"), "precondition");
+        assert!(
+            super::column_exists(&conn, "videos", "thumbnail_url"),
+            "precondition"
+        );
 
         super::drop_videos_thumbnail_url(&conn);
 
@@ -522,7 +591,10 @@ mod tests {
              );",
         )
         .unwrap();
-        assert!(!super::column_exists(&conn, "videos", "is_members_only"), "precondition");
+        assert!(
+            !super::column_exists(&conn, "videos", "is_members_only"),
+            "precondition"
+        );
 
         super::add_videos_is_members_only(&conn);
 
@@ -533,7 +605,10 @@ mod tests {
     fn test_add_videos_is_members_only_is_idempotent() {
         // Fresh DB already has the column from create_tables.
         let conn = open_memory();
-        assert!(super::column_exists(&conn, "videos", "is_members_only"), "precondition");
+        assert!(
+            super::column_exists(&conn, "videos", "is_members_only"),
+            "precondition"
+        );
         super::add_videos_is_members_only(&conn);
         assert!(super::column_exists(&conn, "videos", "is_members_only"));
     }
@@ -542,11 +617,105 @@ mod tests {
     fn test_drop_videos_thumbnail_url_is_idempotent() {
         // No column: should be a no-op without errors.
         let conn = open_memory();
-        assert!(!super::column_exists(&conn, "videos", "thumbnail_url"), "precondition");
+        assert!(
+            !super::column_exists(&conn, "videos", "thumbnail_url"),
+            "precondition"
+        );
 
         super::drop_videos_thumbnail_url(&conn);
 
         assert!(!super::column_exists(&conn, "videos", "thumbnail_url"));
+    }
+
+    #[test]
+    fn test_decode_video_titles_xml_entities_fixes_legacy_rows() {
+        // Pre-fix WebSub callbacks stored Atom-encoded titles verbatim, so
+        // legacy DBs carry rows like "S&amp;P500". This migration must
+        // decode them in place.
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO videos (id, channel_id, title) VALUES ('v_amp', 'UC1', 'S&amp;P500の解説');
+             INSERT INTO videos (id, channel_id, title) VALUES ('v_all', 'UC1', 'a&lt;b&gt;c&quot;d&apos;e&amp;f');
+             INSERT INTO videos (id, channel_id, title) VALUES ('v_clean', 'UC1', '普通のタイトル');",
+        )
+        .unwrap();
+
+        super::decode_video_titles_xml_entities(&conn);
+
+        let lookup = |id: &str| -> String {
+            conn.query_row("SELECT title FROM videos WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(lookup("v_amp"), "S&P500の解説");
+        assert_eq!(lookup("v_all"), "a<b>c\"d'e&f");
+        assert_eq!(lookup("v_clean"), "普通のタイトル");
+    }
+
+    #[test]
+    fn test_decode_video_titles_xml_entities_is_idempotent() {
+        // Running the migration twice must not corrupt already-decoded text.
+        // This is what makes it safe to call unconditionally on every startup.
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UC1', 'S&amp;P500')",
+            [],
+        )
+        .unwrap();
+
+        let first = super::decode_video_titles_xml_entities(&conn);
+        let second = super::decode_video_titles_xml_entities(&conn);
+
+        assert_eq!(first, 1, "First pass should rewrite the dirty row");
+        assert_eq!(
+            second, 0,
+            "Second pass must be a no-op on already-decoded text"
+        );
+
+        let title: String = conn
+            .query_row("SELECT title FROM videos WHERE id = 'v1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "S&P500");
+    }
+
+    #[test]
+    fn test_decode_video_titles_xml_entities_preserves_literal_ampersand() {
+        // "AT&T" contains a literal '&' that is not part of any XML entity.
+        // The WHERE filter and REPLACE chain must leave such rows untouched.
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Ch', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title) VALUES ('v', 'UC1', 'AT&T 決算')",
+            [],
+        )
+        .unwrap();
+
+        let updated = super::decode_video_titles_xml_entities(&conn);
+        assert_eq!(updated, 0, "Row without an entity must not be touched");
+
+        let title: String = conn
+            .query_row("SELECT title FROM videos WHERE id = 'v'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "AT&T 決算");
     }
 
     #[test]
@@ -564,7 +733,8 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM channels WHERE id = 'UC1'", []).unwrap();
+        conn.execute("DELETE FROM channels WHERE id = 'UC1'", [])
+            .unwrap();
 
         let count: i64 = conn
             .query_row(
@@ -573,7 +743,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "Subscription should be deleted when channel is deleted");
+        assert_eq!(
+            count, 0,
+            "Subscription should be deleted when channel is deleted"
+        );
     }
 
     #[test]
@@ -720,7 +893,10 @@ mod tests {
         let ch_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(ch_count, 1, "Channel master data should survive user deletion");
+        assert_eq!(
+            ch_count, 1,
+            "Channel master data should survive user deletion"
+        );
     }
 
     #[test]
@@ -742,7 +918,8 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM channels WHERE id = 'UC1'", []).unwrap();
+        conn.execute("DELETE FROM channels WHERE id = 'UC1'", [])
+            .unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM user_channels", [], |row| row.get(0))
@@ -861,7 +1038,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(val.is_none(), "last_fetched_at should be NULL before first fetch");
+        assert!(
+            val.is_none(),
+            "last_fetched_at should be NULL before first fetch"
+        );
     }
 
     #[test]
@@ -869,7 +1049,10 @@ mod tests {
         let conn = open_memory();
         let insert = "INSERT INTO channels (id, title, created_at) VALUES ('UC3', 'ch', '2025-01-01T00:00:00Z')";
         conn.execute(insert, []).unwrap();
-        assert!(conn.execute(insert, []).is_err(), "duplicate PK insert should fail");
+        assert!(
+            conn.execute(insert, []).is_err(),
+            "duplicate PK insert should fail"
+        );
     }
 
     #[test]
@@ -896,9 +1079,14 @@ mod tests {
         .unwrap();
 
         let title: String = conn
-            .query_row("SELECT title FROM videos WHERE id = 'vid1'", [], |row| row.get(0))
+            .query_row("SELECT title FROM videos WHERE id = 'vid1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        assert_eq!(title, "新しいタイトル", "UPSERT should update title to follow author edits");
+        assert_eq!(
+            title, "新しいタイトル",
+            "UPSERT should update title to follow author edits"
+        );
     }
 
     #[test]
@@ -915,9 +1103,19 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)", []).unwrap();
-        let result = conn.execute("INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)", []);
-        assert!(result.is_err(), "composite PK (channel_id, group_id) prevents duplicates");
+        conn.execute(
+            "INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)",
+            [],
+        )
+        .unwrap();
+        let result = conn.execute(
+            "INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1)",
+            [],
+        );
+        assert!(
+            result.is_err(),
+            "composite PK (channel_id, group_id) prevents duplicates"
+        );
     }
 
     #[test]
@@ -946,7 +1144,10 @@ mod tests {
             "INSERT INTO videos (id, channel_id, title) VALUES ('vid1', 'UC_nonexistent', 'v')",
             [],
         );
-        assert!(result.is_err(), "FK constraint rejects nonexistent channel_id");
+        assert!(
+            result.is_err(),
+            "FK constraint rejects nonexistent channel_id"
+        );
     }
 
     #[test]
@@ -969,9 +1170,7 @@ mod tests {
         .unwrap();
 
         let roles: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT role FROM users ORDER BY id")
-                .unwrap();
+            let mut stmt = conn.prepare("SELECT role FROM users ORDER BY id").unwrap();
             stmt.query_map([], |row| row.get(0))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
@@ -1190,7 +1389,8 @@ mod tests {
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (auth_id) REFERENCES auth(id) ON DELETE CASCADE
             );",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Insert old data
         conn.execute_batch(
@@ -1210,9 +1410,14 @@ mod tests {
         create_tables(&conn);
 
         // Verify: auth table gone, users table exists with master role
-        assert!(conn.prepare("SELECT 1 FROM auth").is_err(), "auth table should be dropped");
+        assert!(
+            conn.prepare("SELECT 1 FROM auth").is_err(),
+            "auth table should be dropped"
+        );
         let (role, email): (String, String) = conn
-            .query_row("SELECT role, email FROM users WHERE id = 1", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row("SELECT role, email FROM users WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .unwrap();
         assert_eq!(role, "master");
         assert_eq!(email, "test@example.com");
@@ -1226,30 +1431,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(is_fav, 1, "is_favorite should migrate from channels");
-        assert_eq!(show_live, 1, "show_livestreams should migrate from channels");
+        assert_eq!(
+            show_live, 1,
+            "show_livestreams should migrate from channels"
+        );
 
         // Verify: hidden video migrated to user_videos
         let hidden_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM user_videos WHERE user_id = 1 AND is_hidden = 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM user_videos WHERE user_id = 1 AND is_hidden = 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(hidden_count, 1, "Hidden video should be in user_videos");
 
         // Verify: channels table no longer has is_favorite/show_livestreams
-        assert!(conn.prepare("SELECT is_favorite FROM channels").is_err(), "channels should not have is_favorite");
-        assert!(conn.prepare("SELECT show_livestreams FROM channels").is_err(), "channels should not have show_livestreams");
+        assert!(
+            conn.prepare("SELECT is_favorite FROM channels").is_err(),
+            "channels should not have is_favorite"
+        );
+        assert!(
+            conn.prepare("SELECT show_livestreams FROM channels")
+                .is_err(),
+            "channels should not have show_livestreams"
+        );
 
         // Verify: videos table no longer has is_hidden
-        assert!(conn.prepare("SELECT is_hidden FROM videos").is_err(), "videos should not have is_hidden");
+        assert!(
+            conn.prepare("SELECT is_hidden FROM videos").is_err(),
+            "videos should not have is_hidden"
+        );
 
         // Verify: sessions migrated (user_id, not auth_id)
         let user_id: i64 = conn
-            .query_row("SELECT user_id FROM sessions WHERE id = 's1'", [], |row| row.get(0))
+            .query_row("SELECT user_id FROM sessions WHERE id = 's1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(user_id, 1);
 
         // Verify: groups have user_id
         let group_user: i64 = conn
-            .query_row("SELECT user_id FROM groups WHERE id = 1", [], |row| row.get(0))
+            .query_row("SELECT user_id FROM groups WHERE id = 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(group_user, 1);
     }
