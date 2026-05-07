@@ -37,7 +37,8 @@ async fn run_once(state: &AppState) {
     // (See routes/websub.rs: unsubscribe verification requires a 'pending_unsubscribe' row.)
     let secrets_before: HashMap<String, String> = {
         let conn = state.db.lock().unwrap();
-        let result = match conn.prepare("SELECT channel_id, hub_secret FROM channel_subscriptions") {
+        let result = match conn.prepare("SELECT channel_id, hub_secret FROM channel_subscriptions")
+        {
             Ok(mut stmt) => stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -69,10 +70,7 @@ async fn run_once(state: &AppState) {
     // than the cleanup trade-off (zombie subscription for ≤5 days).
     let callback = state.config.websub_callback_url.clone();
     for ch_id in &sync_result.removed {
-        let secret = secrets_before
-            .get(ch_id)
-            .cloned()
-            .unwrap_or_default();
+        let secret = secrets_before.get(ch_id).cloned().unwrap_or_default();
         if let Err(e) = hub::unsubscribe(&state.http, ch_id, &callback, &secret).await {
             tracing::warn!("[refresh] unsubscribe failed for {}: {}", ch_id, e);
         }
@@ -97,7 +95,10 @@ async fn run_once(state: &AppState) {
     // the 24-hour API scan remains a redundancy net for new videos.
     let backfill_ids = find_channels_missing_subscription(state);
     if !backfill_ids.is_empty() {
-        tracing::info!("[refresh] Backfilling {} unsubscribed channel(s)", backfill_ids.len());
+        tracing::info!(
+            "[refresh] Backfilling {} unsubscribed channel(s)",
+            backfill_ids.len()
+        );
     }
     for ch_id in &backfill_ids {
         register_new_subscription(state, ch_id, &callback).await;
@@ -189,16 +190,15 @@ async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &st
         &state.http,
         &state.config,
         "WebSub購読エラー",
-        &format!("チャンネル {} の購読リクエストに失敗: {}\n(1時間、以降の同種エラーはサイレント抑制)", channel_id, error),
+        &format!(
+            "チャンネル {} の購読リクエストに失敗: {}\n(1時間、以降の同種エラーはサイレント抑制)",
+            channel_id, error
+        ),
     )
     .await;
 }
 
-async fn refresh_existing_channels(
-    state: &AppState,
-    access_token: &str,
-    skip: &HashSet<&str>,
-) {
+async fn refresh_existing_channels(state: &AppState, access_token: &str, skip: &HashSet<&str>) {
     let channel_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
         let result = match conn.prepare("SELECT id FROM channels") {
@@ -220,7 +220,10 @@ async fn refresh_existing_channels(
         return;
     }
 
-    tracing::info!("[refresh] Scanning {} channels via PlaylistItems.list", targets.len());
+    tracing::info!(
+        "[refresh] Scanning {} channels via PlaylistItems.list",
+        targets.len()
+    );
 
     for channel_id in targets {
         super::wait_for_quota(state).await;
@@ -324,8 +327,14 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(secret, "original_secret", "Secret must survive re-registration");
-        assert_eq!(status, "pending", "Status resets to pending until new verification completes");
+        assert_eq!(
+            secret, "original_secret",
+            "Secret must survive re-registration"
+        );
+        assert_eq!(
+            status, "pending",
+            "Status resets to pending until new verification completes"
+        );
     }
 
     #[tokio::test]
@@ -354,7 +363,10 @@ mod tests {
             .unwrap()
         };
         assert_eq!(secret.len(), 64, "Secret must be generated before hub call");
-        assert_eq!(status, "pending", "Status stays 'pending' until Hub verification GET arrives");
+        assert_eq!(
+            status, "pending",
+            "Status stays 'pending' until Hub verification GET arrives"
+        );
     }
 
     #[test]
@@ -385,7 +397,10 @@ mod tests {
 
         let mut ids = find_channels_missing_subscription(&state);
         ids.sort();
-        assert_eq!(ids, vec!["UC_orphan_1".to_string(), "UC_orphan_2".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["UC_orphan_1".to_string(), "UC_orphan_2".to_string()]
+        );
     }
 
     #[test]
@@ -415,7 +430,10 @@ mod tests {
                 .filter_map(|r| r.ok())
                 .collect()
         };
-        let targets: Vec<&String> = channel_ids.iter().filter(|id| !skip.contains(id.as_str())).collect();
+        let targets: Vec<&String> = channel_ids
+            .iter()
+            .filter(|id| !skip.contains(id.as_str()))
+            .collect();
 
         assert_eq!(targets.len(), 2);
         assert!(targets.iter().any(|id| id.as_str() == "UC_a"));
@@ -461,6 +479,10 @@ mod tests {
                 .filter_map(|r| r.ok())
                 .collect()
         };
-        assert_eq!(selected, vec!["UC_near"], "Only UC_near should be picked for renewal");
+        assert_eq!(
+            selected,
+            vec!["UC_near"],
+            "Only UC_near should be picked for renewal"
+        );
     }
 }

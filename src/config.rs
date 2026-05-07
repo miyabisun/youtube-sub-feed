@@ -19,15 +19,16 @@ impl Config {
             .and_then(|p| p.parse().ok())
             .unwrap_or(3000);
 
-        let db_path =
-            env::var("DATABASE_PATH").unwrap_or_else(|_| "./feed.db".to_string());
+        let db_path = env::var("DATABASE_PATH").unwrap_or_else(|_| "./feed.db".to_string());
 
         let google_client_id = env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
         let google_client_secret = env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default();
         let google_redirect_uri = env::var("GOOGLE_REDIRECT_URI")
             .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback".to_string());
 
-        let discord_webhook_url = env::var("DISCORD_WEBHOOK_URL").ok().filter(|s| !s.is_empty());
+        let discord_webhook_url = env::var("DISCORD_WEBHOOK_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let websub_callback_url = env::var("WEBSUB_CALLBACK_URL")
             .unwrap_or_else(|_| "http://localhost:3000/api/websub/callback".to_string());

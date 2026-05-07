@@ -10,8 +10,7 @@ use axum::Router;
 use serde::Deserialize;
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/websub/callback", get(verification).post(notification))
+    Router::new().route("/api/websub/callback", get(verification).post(notification))
 }
 
 #[derive(Deserialize, Debug)]
@@ -52,7 +51,10 @@ pub async fn verification(
     Query(params): Query<VerificationParams>,
 ) -> impl IntoResponse {
     let Some(channel_id) = channel_id_from_topic(&params.hub_topic) else {
-        tracing::warn!("[websub] verification: malformed hub.topic: {}", params.hub_topic);
+        tracing::warn!(
+            "[websub] verification: malformed hub.topic: {}",
+            params.hub_topic
+        );
         return (StatusCode::BAD_REQUEST, "malformed hub.topic").into_response();
     };
 
@@ -84,7 +86,8 @@ pub async fn verification(
 
             tracing::info!(
                 "[websub] Subscription verified: {} (lease {}s)",
-                channel_id, lease
+                channel_id,
+                lease
             );
         }
         "unsubscribe" => {
@@ -137,7 +140,10 @@ pub async fn notification(
     body: Bytes,
 ) -> impl IntoResponse {
     let Ok(xml) = std::str::from_utf8(&body) else {
-        tracing::warn!("[websub] non-UTF-8 push body, dropping ({} bytes)", body.len());
+        tracing::warn!(
+            "[websub] non-UTF-8 push body, dropping ({} bytes)",
+            body.len()
+        );
         return StatusCode::BAD_REQUEST;
     };
 
@@ -200,7 +206,8 @@ pub async fn notification(
         // retry, or a metadata-only refresh). Logged at debug to avoid noise.
         tracing::debug!(
             "[websub] {} — {} entries, no new videos",
-            channel_id, entries.len()
+            channel_id,
+            entries.len()
         );
         return StatusCode::OK;
     }
@@ -264,7 +271,13 @@ fn partition_new_entries<'a>(
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO NOTHING
              RETURNING id",
-            rusqlite::params![entry.video_id, channel_id, entry.title, entry.published, now],
+            rusqlite::params![
+                entry.video_id,
+                channel_id,
+                entry.title,
+                entry.published,
+                now
+            ],
             |_| Ok(()),
         );
 
@@ -280,7 +293,9 @@ fn partition_new_entries<'a>(
             Err(e) => {
                 tracing::warn!(
                     "[websub] video insert failed for {} on {}: {}",
-                    entry.video_id, channel_id, e
+                    entry.video_id,
+                    channel_id,
+                    e
                 );
             }
         }
@@ -292,7 +307,10 @@ fn log_new_videos(channel_title: &str, channel_id: &str, entries: &[&AtomEntry])
     for entry in entries {
         tracing::info!(
             "[websub] new video: {} ({}) — \"{}\" https://www.youtube.com/watch?v={}",
-            channel_title, channel_id, entry.title, entry.video_id
+            channel_title,
+            channel_id,
+            entry.title,
+            entry.video_id
         );
     }
 }
@@ -312,7 +330,10 @@ mod tests {
     // POST /api/websub/callback with Atom XML + X-Hub-Signature
     //   -> Verify HMAC, parse entries, UPSERT videos (details left to refresh).
 
-    fn setup_state_with_subscription(channel_id: &str, secret: &str) -> (crate::state::AppState, String) {
+    fn setup_state_with_subscription(
+        channel_id: &str,
+        secret: &str,
+    ) -> (crate::state::AppState, String) {
         let state = crate::state::AppState::test();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         {
@@ -339,7 +360,9 @@ mod tests {
             Some("UC_abc".to_string())
         );
         assert_eq!(
-            channel_id_from_topic("https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC_abc&other=x"),
+            channel_id_from_topic(
+                "https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC_abc&other=x"
+            ),
             Some("UC_abc".to_string())
         );
         assert_eq!(channel_id_from_topic("https://example.com/"), None);
@@ -349,7 +372,9 @@ mod tests {
     fn test_channel_id_from_topic_url_decodes() {
         // Some hubs percent-encode the channel_id; we should still recover the raw ID.
         assert_eq!(
-            channel_id_from_topic("https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC%5Ftest"),
+            channel_id_from_topic(
+                "https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC%5Ftest"
+            ),
             Some("UC_test".to_string())
         );
     }
@@ -450,7 +475,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(count, 1, "Verified subscription must survive arbitrary unsubscribe GET");
+        assert_eq!(
+            count, 1,
+            "Verified subscription must survive arbitrary unsubscribe GET"
+        );
     }
 
     #[tokio::test]
@@ -485,7 +513,10 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(status, "pending_unsubscribe", "subscribe verification must not override pending_unsubscribe");
+        assert_eq!(
+            status, "pending_unsubscribe",
+            "subscribe verification must not override pending_unsubscribe"
+        );
     }
 
     #[tokio::test]
@@ -591,13 +622,23 @@ mod tests {
         assert_eq!(new_ids.len(), 2);
         assert!(new_ids.contains(&"fresh1"));
         assert!(new_ids.contains(&"fresh2"));
-        assert!(!new_ids.contains(&"existing"), "Already-known video_id must not be flagged as new");
+        assert!(
+            !new_ids.contains(&"existing"),
+            "Already-known video_id must not be flagged as new"
+        );
 
         // Existing row's title was refreshed
         let title: String = conn
-            .query_row("SELECT title FROM videos WHERE id = 'existing'", [], |row| row.get(0))
+            .query_row(
+                "SELECT title FROM videos WHERE id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(title, "New Title", "Existing row's title should be refreshed when changed");
+        assert_eq!(
+            title, "New Title",
+            "Existing row's title should be refreshed when changed"
+        );
     }
 
     #[test]
@@ -612,7 +653,10 @@ mod tests {
         }];
 
         let new = partition_new_entries(&conn, "UC_ghost", &entries, "2026-04-26T00:00:00Z");
-        assert!(new.is_empty(), "FK violation must not be reported as new video");
+        assert!(
+            new.is_empty(),
+            "FK violation must not be reported as new video"
+        );
     }
 
     #[tokio::test]
@@ -666,10 +710,17 @@ mod tests {
 
         let count: i64 = {
             let conn = state.db.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM videos WHERE id = 'same_vid'", [], |row| row.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT COUNT(*) FROM videos WHERE id = 'same_vid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
-        assert_eq!(count, 1, "Duplicate push must remain idempotent (one row total)");
+        assert_eq!(
+            count, 1,
+            "Duplicate push must remain idempotent (one row total)"
+        );
     }
 
     #[tokio::test]
@@ -706,8 +757,12 @@ mod tests {
 
         let count: i64 = {
             let conn = state.db.lock().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM videos WHERE id = 'tampered'", [], |row| row.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT COUNT(*) FROM videos WHERE id = 'tampered'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(count, 0, "Tampered video should not be inserted");
     }

@@ -94,13 +94,19 @@ mod tests {
 
     #[test]
     fn test_hub_error_display() {
-        let e = HubError { status: 500, message: "oops".to_string() };
+        let e = HubError {
+            status: 500,
+            message: "oops".to_string(),
+        };
         assert_eq!(format!("{}", e), "Hub error 500: oops");
     }
 
     #[test]
     fn test_hub_error_display_with_network_failure() {
-        let e = HubError { status: 0, message: "timeout".to_string() };
+        let e = HubError {
+            status: 0,
+            message: "timeout".to_string(),
+        };
         assert_eq!(format!("{}", e), "Hub error 0: timeout");
     }
 }

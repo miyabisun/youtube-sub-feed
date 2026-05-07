@@ -20,9 +20,7 @@ static FEED_CHANNEL_ID_RE: LazyLock<Regex> =
 /// Extract the channel_id from a WebSub push notification (Atom XML).
 /// Returns the first `<yt:channelId>` occurrence found (inside an `<entry>`).
 pub fn extract_channel_id(xml: &str) -> Option<String> {
-    FEED_CHANNEL_ID_RE
-        .captures(xml)
-        .map(|c| c[1].to_string())
+    FEED_CHANNEL_ID_RE.captures(xml).map(|c| c[1].to_string())
 }
 
 #[cfg(test)]

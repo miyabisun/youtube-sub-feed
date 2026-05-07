@@ -54,7 +54,8 @@ pub async fn run_initial_setup(state: &AppState) {
 
     tracing::info!(
         "[setup] Fetching videos and subscribing to WebSub for {} channels (concurrency {})...",
-        channels.len(), SETUP_CONCURRENCY
+        channels.len(),
+        SETUP_CONCURRENCY
     );
 
     let callback = state.config.websub_callback_url.clone();

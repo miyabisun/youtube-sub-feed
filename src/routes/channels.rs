@@ -334,7 +334,11 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(rows.len(), 2, "Channel detail shows all videos including hidden");
+        assert_eq!(
+            rows.len(),
+            2,
+            "Channel detail shows all videos including hidden"
+        );
         // v2 should show is_hidden=1
         let v2 = rows.iter().find(|(id, _)| id == "v2").unwrap();
         assert_eq!(v2.1, 1);
@@ -397,7 +401,11 @@ mod tests {
         insert_channel(&conn, "UC1", "Ch1");
 
         let val: i64 = conn
-            .query_row("SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(val, 0);
 
@@ -408,7 +416,11 @@ mod tests {
         .unwrap();
 
         let val: i64 = conn
-            .query_row("SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(val, 1);
     }
@@ -417,7 +429,11 @@ mod tests {
     fn test_channels_list_includes_is_favorite() {
         let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
-        conn.execute("UPDATE user_channels SET is_favorite = 1 WHERE user_id = 1 AND channel_id = 'UC1'", []).unwrap();
+        conn.execute(
+            "UPDATE user_channels SET is_favorite = 1 WHERE user_id = 1 AND channel_id = 'UC1'",
+            [],
+        )
+        .unwrap();
 
         let mut stmt = conn
             .prepare(
@@ -431,9 +447,7 @@ mod tests {
                 ORDER BY c.title COLLATE NOCASE",
             )
             .unwrap();
-        let is_favorite: i64 = stmt
-            .query_row([], |row| row.get::<_, i64>(6))
-            .unwrap();
+        let is_favorite: i64 = stmt.query_row([], |row| row.get::<_, i64>(6)).unwrap();
         assert_eq!(is_favorite, 1);
     }
 
@@ -489,9 +503,7 @@ mod tests {
         .unwrap();
 
         let mut stmt = conn
-            .prepare(
-                "SELECT id FROM channels ORDER BY last_fetched_at ASC",
-            )
+            .prepare("SELECT id FROM channels ORDER BY last_fetched_at ASC")
             .unwrap();
         let ids: Vec<String> = stmt
             .query_map([], |row| row.get(0))
@@ -519,7 +531,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(first, "UC_new", "NULL sorts first in ASC (initial fetch priority)");
+        assert_eq!(
+            first, "UC_new",
+            "NULL sorts first in ASC (initial fetch priority)"
+        );
     }
 
     #[test]

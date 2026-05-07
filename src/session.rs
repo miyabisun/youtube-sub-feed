@@ -109,7 +109,12 @@ mod tests {
         let session_id = "expired-session";
         conn.execute(
             "INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![session_id, 1, "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z"],
+            rusqlite::params![
+                session_id,
+                1,
+                "2020-01-01T00:00:00Z",
+                "2020-01-01T00:00:00Z"
+            ],
         )
         .unwrap();
         assert!(get_session(&conn, session_id).is_none());

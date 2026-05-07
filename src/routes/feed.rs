@@ -202,11 +202,23 @@ mod tests {
         conn
     }
 
-    fn insert_video(conn: &rusqlite::Connection, id: &str, channel_id: &str, published_at: &str, is_livestream: i64) {
+    fn insert_video(
+        conn: &rusqlite::Connection,
+        id: &str,
+        channel_id: &str,
+        published_at: &str,
+        is_livestream: i64,
+    ) {
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, channel_id, format!("Video {}", id), published_at, is_livestream],
+            params![
+                id,
+                channel_id,
+                format!("Video {}", id),
+                published_at,
+                is_livestream
+            ],
         )
         .unwrap();
     }
@@ -220,7 +232,12 @@ mod tests {
         .unwrap();
     }
 
-    fn query_feed(conn: &rusqlite::Connection, user_id: i64, limit: i64, offset: i64) -> Vec<String> {
+    fn query_feed(
+        conn: &rusqlite::Connection,
+        user_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Vec<String> {
         let mut stmt = conn
             .prepare(
                 "SELECT v.id
@@ -235,13 +252,21 @@ mod tests {
                  LIMIT ?2 OFFSET ?3",
             )
             .unwrap();
-        stmt.query_map(params![user_id, limit, offset], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+        stmt.query_map(params![user_id, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
     }
 
-    fn query_feed_by_group(conn: &rusqlite::Connection, user_id: i64, group_id: i64, limit: i64, offset: i64) -> Vec<String> {
+    fn query_feed_by_group(
+        conn: &rusqlite::Connection,
+        user_id: i64,
+        group_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> Vec<String> {
         let mut stmt = conn
             .prepare(
                 "SELECT v.id
@@ -258,10 +283,12 @@ mod tests {
                  LIMIT ?3 OFFSET ?4",
             )
             .unwrap();
-        stmt.query_map(params![user_id, group_id, limit, offset], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+        stmt.query_map(params![user_id, group_id, limit, offset], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
     }
 
     #[test]
@@ -307,8 +334,11 @@ mod tests {
         let conn = setup();
         insert_video(&conn, "v_members", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&conn, "v_normal", "UC1", "2024-01-03T00:00:00Z", 0);
-        conn.execute("UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
+            [],
+        )
+        .unwrap();
 
         let ids = query_feed(&conn, 1, 100, 0);
         assert_eq!(ids, vec!["v_normal"]);
@@ -395,7 +425,11 @@ mod tests {
         insert_video(&conn, "v2", "UC3", "2024-01-03T00:00:00Z", 0);
 
         let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids, vec!["v1"], "Unsubscribed channel videos should not appear");
+        assert_eq!(
+            ids,
+            vec!["v1"],
+            "Unsubscribed channel videos should not appear"
+        );
     }
 
     #[test]

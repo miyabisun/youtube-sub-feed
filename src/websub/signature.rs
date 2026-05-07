@@ -14,8 +14,8 @@ pub fn generate_secret() -> String {
 
 /// Compute HMAC-SHA1 of `body` using `secret` and return as lowercase hex.
 fn compute_sha1(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha1::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take any key length");
+    let mut mac =
+        HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC can take any key length");
     mac.update(body);
     hex::encode(mac.finalize().into_bytes())
 }

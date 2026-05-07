@@ -74,7 +74,10 @@ struct ApiDoc;
 
 pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
-        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
+        .route(
+            "/api/health",
+            get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        )
         .merge(auth::routes())
         .merge(rss::routes())
         .merge(websub::routes());
@@ -88,16 +91,12 @@ pub fn build_router(state: AppState) -> Router {
             auth_middleware,
         ));
 
-    let serve_static = ServeDir::new("client/build")
-        .fallback(get(spa_fallback));
+    let serve_static = ServeDir::new("client/build").fallback(get(spa_fallback));
 
     Router::new()
         .merge(public)
         .merge(protected)
-        .merge(
-            SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/openapi.json", ApiDoc::openapi()),
-        )
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .fallback_service(serve_static)
         .layer(CookieManagerLayer::new())
         .with_state(state)
@@ -134,29 +133,121 @@ mod tests {
     }
 
     const ENDPOINTS: &[Endpoint] = &[
-        Endpoint { method: "GET",    path: "/api/health",                auth_required: false },
-        Endpoint { method: "GET",    path: "/api/auth/login",            auth_required: false },
-        Endpoint { method: "GET",    path: "/api/auth/callback",         auth_required: false },
-        Endpoint { method: "POST",   path: "/api/auth/logout",           auth_required: false }, // checks session in handler (no-op if absent)
-        Endpoint { method: "GET",    path: "/api/auth/me",               auth_required: false }, // self-auth in handler -> 401
-        Endpoint { method: "GET",    path: "/api/feed",                  auth_required: true },
-        Endpoint { method: "PATCH",  path: "/api/videos/:id/hide",       auth_required: true },
-        Endpoint { method: "PATCH",  path: "/api/videos/:id/unhide",     auth_required: true },
-        Endpoint { method: "GET",    path: "/api/channels",              auth_required: true },
-        Endpoint { method: "GET",    path: "/api/channels/:id/videos",   auth_required: true },
-        Endpoint { method: "POST",   path: "/api/channels/sync",         auth_required: true },
-        Endpoint { method: "POST",   path: "/api/channels/:id/refresh",  auth_required: true },
-        Endpoint { method: "PATCH",  path: "/api/channels/:id",          auth_required: true },
-        Endpoint { method: "GET",    path: "/api/groups",                auth_required: true },
-        Endpoint { method: "GET",    path: "/api/groups/:id/channels",   auth_required: true },
-        Endpoint { method: "POST",   path: "/api/groups",                auth_required: true },
-        Endpoint { method: "PATCH",  path: "/api/groups/:id",            auth_required: true },
-        Endpoint { method: "PUT",    path: "/api/groups/reorder",        auth_required: true },
-        Endpoint { method: "DELETE", path: "/api/groups/:id",            auth_required: true },
-        Endpoint { method: "PUT",    path: "/api/groups/:id/channels",   auth_required: true },
-        Endpoint { method: "GET",    path: "/api/rss",                   auth_required: false },
-        Endpoint { method: "GET",    path: "/api/websub/callback",       auth_required: false }, // Hub verification (echo challenge)
-        Endpoint { method: "POST",   path: "/api/websub/callback",       auth_required: false }, // Hub push notification (HMAC-verified)
+        Endpoint {
+            method: "GET",
+            path: "/api/health",
+            auth_required: false,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/auth/login",
+            auth_required: false,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/auth/callback",
+            auth_required: false,
+        },
+        Endpoint {
+            method: "POST",
+            path: "/api/auth/logout",
+            auth_required: false,
+        }, // checks session in handler (no-op if absent)
+        Endpoint {
+            method: "GET",
+            path: "/api/auth/me",
+            auth_required: false,
+        }, // self-auth in handler -> 401
+        Endpoint {
+            method: "GET",
+            path: "/api/feed",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PATCH",
+            path: "/api/videos/:id/hide",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PATCH",
+            path: "/api/videos/:id/unhide",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/channels",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/channels/:id/videos",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "POST",
+            path: "/api/channels/sync",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "POST",
+            path: "/api/channels/:id/refresh",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PATCH",
+            path: "/api/channels/:id",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/groups",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/groups/:id/channels",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "POST",
+            path: "/api/groups",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PATCH",
+            path: "/api/groups/:id",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PUT",
+            path: "/api/groups/reorder",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "DELETE",
+            path: "/api/groups/:id",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "PUT",
+            path: "/api/groups/:id/channels",
+            auth_required: true,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/rss",
+            auth_required: false,
+        },
+        Endpoint {
+            method: "GET",
+            path: "/api/websub/callback",
+            auth_required: false,
+        }, // Hub verification (echo challenge)
+        Endpoint {
+            method: "POST",
+            path: "/api/websub/callback",
+            auth_required: false,
+        }, // Hub push notification (HMAC-verified)
     ];
 
     mod endpoint_inventory {
@@ -180,7 +271,12 @@ mod tests {
         #[test]
         fn all_endpoints_have_api_prefix() {
             for ep in ENDPOINTS {
-                assert!(ep.path.starts_with("/api/"), "{} {} must have /api/ prefix", ep.method, ep.path);
+                assert!(
+                    ep.path.starts_with("/api/"),
+                    "{} {} must have /api/ prefix",
+                    ep.method,
+                    ep.path
+                );
             }
         }
     }
@@ -190,7 +286,11 @@ mod tests {
 
         #[test]
         fn patch_for_partial_update() {
-            let patch: Vec<&str> = ENDPOINTS.iter().filter(|e| e.method == "PATCH").map(|e| e.path).collect();
+            let patch: Vec<&str> = ENDPOINTS
+                .iter()
+                .filter(|e| e.method == "PATCH")
+                .map(|e| e.path)
+                .collect();
             assert!(patch.contains(&"/api/videos/:id/hide"));
             assert!(patch.contains(&"/api/videos/:id/unhide"));
             assert!(patch.contains(&"/api/channels/:id"));
@@ -199,7 +299,11 @@ mod tests {
 
         #[test]
         fn put_for_full_replacement() {
-            let put: Vec<&str> = ENDPOINTS.iter().filter(|e| e.method == "PUT").map(|e| e.path).collect();
+            let put: Vec<&str> = ENDPOINTS
+                .iter()
+                .filter(|e| e.method == "PUT")
+                .map(|e| e.path)
+                .collect();
             assert!(put.contains(&"/api/groups/reorder"));
             assert!(put.contains(&"/api/groups/:id/channels"));
         }

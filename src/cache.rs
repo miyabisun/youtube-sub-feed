@@ -45,8 +45,7 @@ impl Cache {
             key.to_string(),
             CacheEntry {
                 value,
-                expires_at: ttl_seconds
-                    .map(|s| Instant::now() + std::time::Duration::from_secs(s)),
+                expires_at: ttl_seconds.map(|s| Instant::now() + std::time::Duration::from_secs(s)),
             },
         );
     }
@@ -143,7 +142,11 @@ mod tests {
         let cache = Cache::new();
         cache.set("key", json!("v"), Some(0));
         std::thread::sleep(std::time::Duration::from_millis(1));
-        assert_eq!(cache.get("key"), None, "expired entry returns None and is auto-removed");
+        assert_eq!(
+            cache.get("key"),
+            None,
+            "expired entry returns None and is auto-removed"
+        );
     }
 
     #[test]

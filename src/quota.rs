@@ -61,11 +61,8 @@ fn get_next_pacific_midnight() -> i64 {
     let pacific_now = now.with_timezone(&pacific_offset);
 
     let tomorrow = pacific_now.date_naive() + chrono::Duration::days(1);
-    let midnight =
-        tomorrow.and_hms_opt(0, 0, 0).unwrap();
-    let midnight_pacific = midnight
-        .and_local_timezone(pacific_offset)
-        .unwrap();
+    let midnight = tomorrow.and_hms_opt(0, 0, 0).unwrap();
+    let midnight_pacific = midnight.and_local_timezone(pacific_offset).unwrap();
 
     midnight_pacific.timestamp_millis()
 }

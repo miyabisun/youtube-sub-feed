@@ -11,10 +11,7 @@ use serde_json::{json, Value};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/groups", get(get_groups).post(create_group))
-        .route(
-            "/api/groups/{id}",
-            patch(update_group).delete(delete_group),
-        )
+        .route("/api/groups/{id}", patch(update_group).delete(delete_group))
         .route("/api/groups/reorder", put(reorder_groups))
         .route(
             "/api/groups/{id}/channels",
@@ -92,10 +89,11 @@ async fn create_group(
     let uid = user_id.0;
     let row = {
         let conn = state.db.lock().unwrap();
-        let max_order: i64 = conn
-            .query_row("SELECT COALESCE(MAX(sort_order), -1) FROM groups WHERE user_id = ?1", [uid], |row| {
-                row.get(0)
-            })?;
+        let max_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM groups WHERE user_id = ?1",
+            [uid],
+            |row| row.get(0),
+        )?;
         let sort_order = max_order + 1;
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
@@ -218,7 +216,10 @@ async fn delete_group(
 ) -> Result<Json<Value>, AppError> {
     {
         let conn = state.db.lock().unwrap();
-        conn.execute("DELETE FROM groups WHERE id = ?1 AND user_id = ?2", rusqlite::params![id, user_id.0])?;
+        conn.execute(
+            "DELETE FROM groups WHERE id = ?1 AND user_id = ?2",
+            rusqlite::params![id, user_id.0],
+        )?;
     }
     Ok(Json(json!({"ok": true})))
 }
@@ -244,7 +245,9 @@ async fn get_group_channels(
         let mut stmt =
             conn.prepare("SELECT cg.channel_id FROM channel_groups cg JOIN groups g ON cg.group_id = g.id WHERE cg.group_id = ?1 AND g.user_id = ?2")?;
         let ids = stmt
-            .query_map(rusqlite::params![id, user_id.0], |row| row.get::<_, String>(0))?
+            .query_map(rusqlite::params![id, user_id.0], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         ids
     };
@@ -296,10 +299,7 @@ async fn set_group_channels(
 
         conn.execute_batch("BEGIN")?;
         if let Err(e) = (|| -> Result<(), rusqlite::Error> {
-            conn.execute(
-                "DELETE FROM channel_groups WHERE group_id = ?1",
-                [id],
-            )?;
+            conn.execute("DELETE FROM channel_groups WHERE group_id = ?1", [id])?;
             for channel_id in &body.channel_ids {
                 conn.execute(
                     "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
@@ -392,7 +392,11 @@ mod tests {
         .unwrap();
 
         let name: String = conn
-            .query_row("SELECT name FROM groups WHERE id = ?1", params![id], |row| row.get(0))
+            .query_row(
+                "SELECT name FROM groups WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(name, "New Name");
     }
@@ -402,11 +406,16 @@ mod tests {
         let conn = setup();
         let id = insert_group(&conn, "To Delete", 0);
 
-        conn.execute("DELETE FROM groups WHERE id = ?1 AND user_id = 1", params![id])
-            .unwrap();
+        conn.execute(
+            "DELETE FROM groups WHERE id = ?1 AND user_id = 1",
+            params![id],
+        )
+        .unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM groups WHERE user_id = 1", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM groups WHERE user_id = 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -495,8 +504,11 @@ mod tests {
         .unwrap();
 
         // Replace with only UC2
-        conn.execute("DELETE FROM channel_groups WHERE group_id = ?1", params![group_id])
-            .unwrap();
+        conn.execute(
+            "DELETE FROM channel_groups WHERE group_id = ?1",
+            params![group_id],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
             params!["UC2", group_id],
@@ -562,7 +574,10 @@ mod tests {
         let cg_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channel_groups", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(cg_count, 0, "channel_groups should be empty after group delete");
+        assert_eq!(
+            cg_count, 0,
+            "channel_groups should be empty after group delete"
+        );
 
         let ch_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))

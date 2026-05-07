@@ -1,7 +1,9 @@
 use crate::duration::is_short_duration;
 use crate::notify::notify_warning;
 use crate::state::AppState;
-use crate::youtube::playlist_items::{fetch_playlist_items, fetch_uumo_playlist, fetch_uush_playlist};
+use crate::youtube::playlist_items::{
+    fetch_playlist_items, fetch_uumo_playlist, fetch_uush_playlist,
+};
 use crate::youtube::videos::fetch_video_details;
 use serde_json::json;
 
@@ -96,9 +98,14 @@ pub async fn fetch_channel_videos(
 
         let video_ids: Vec<String> = items.iter().map(|i| i.video_id.clone()).collect();
         let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT id FROM videos WHERE id IN ({}) AND duration IS NOT NULL", placeholders);
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            video_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let sql = format!(
+            "SELECT id FROM videos WHERE id IN ({}) AND duration IS NOT NULL",
+            placeholders
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = video_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         let fully_fetched: std::collections::HashSet<String> = match conn.prepare(&sql) {
             Ok(mut stmt) => stmt
                 .query_map(params.as_slice(), |row| row.get(0))
@@ -148,15 +155,14 @@ pub async fn fetch_channel_videos(
     }
 
     // 4. Fetch video details for new videos
-    let details = match fetch_video_details(&state.http, &state.quota, &new_video_ids, access_token)
-        .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("[video-fetcher] Error fetching details: {}", e);
-            Vec::new()
-        }
-    };
+    let details =
+        match fetch_video_details(&state.http, &state.quota, &new_video_ids, access_token).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[video-fetcher] Error fetching details: {}", e);
+                Vec::new()
+            }
+        };
 
     // 5. Fetch UUSH list if any short-duration videos exist (async, before DB lock)
     let has_short_candidate = details.iter().any(|d| is_short_duration(&d.duration));
@@ -170,9 +176,7 @@ pub async fn fetch_channel_videos(
         } else {
             let uush_ids =
                 fetch_uush_playlist(&state.http, &state.quota, channel_id, access_token).await;
-            state
-                .cache
-                .set(&cache_key, json!(uush_ids), Some(3600));
+            state.cache.set(&cache_key, json!(uush_ids), Some(3600));
             uush_ids.into_iter().collect()
         }
     } else {
@@ -183,8 +187,7 @@ pub async fn fetch_channel_videos(
     {
         let conn = state.db.lock().unwrap();
         for detail in &details {
-            let is_short = if is_short_duration(&detail.duration) && uush_set.contains(&detail.id)
-            {
+            let is_short = if is_short_duration(&detail.duration) && uush_set.contains(&detail.id) {
                 1i64
             } else {
                 0i64
@@ -309,11 +312,7 @@ fn apply_video_details(
 /// as members-only. Used by both the periodic refresh and the WebSub callback
 /// — the shared 5-minute cache absorbs callback bursts while keeping the
 /// data fresh enough for the once-a-day scan.
-pub async fn refresh_members_only_flags(
-    state: &AppState,
-    channel_id: &str,
-    access_token: &str,
-) {
+pub async fn refresh_members_only_flags(state: &AppState, channel_id: &str, access_token: &str) {
     let cache_key = format!("uumo:{}", channel_id);
     let video_ids: Vec<String> = if let Some(cached) = state.cache.get(&cache_key) {
         serde_json::from_value(cached).unwrap_or_default()
@@ -334,7 +333,8 @@ pub async fn refresh_members_only_flags(
     if updated > 0 {
         tracing::info!(
             "[video-fetcher] {} marked {} videos as members-only",
-            channel_id, updated
+            channel_id,
+            updated
         );
     }
 }
@@ -449,7 +449,11 @@ mod tests {
                 .filter_map(|r| r.ok())
                 .collect()
         };
-        assert_eq!(ids, vec!["gone"], "Empty string duration is NOT NULL, so the video is treated as fully fetched");
+        assert_eq!(
+            ids,
+            vec!["gone"],
+            "Empty string duration is NOT NULL, so the video is treated as fully fetched"
+        );
     }
 
     #[test]
@@ -469,7 +473,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(is_livestream, 1);
-        assert!(ended_at.is_none(), "livestream_ended_at IS NULL means currently live");
+        assert!(
+            ended_at.is_none(),
+            "livestream_ended_at IS NULL means currently live"
+        );
     }
 
     #[test]
@@ -494,7 +501,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(ended.is_some(), "livestream_ended_at is set when stream ends");
+        assert!(
+            ended.is_some(),
+            "livestream_ended_at is set when stream ends"
+        );
     }
 
     #[test]
@@ -511,13 +521,24 @@ mod tests {
 
         let uumo = vec!["v_member".to_string(), "v_unknown".to_string()];
         let updated = super::mark_videos_as_members_only(&conn, "UC1", &uumo);
-        assert_eq!(updated, 1, "Only v_member should match (v_unknown is not in the table)");
+        assert_eq!(
+            updated, 1,
+            "Only v_member should match (v_unknown is not in the table)"
+        );
 
         let v_member: i64 = conn
-            .query_row("SELECT is_members_only FROM videos WHERE id = 'v_member'", [], |r| r.get(0))
+            .query_row(
+                "SELECT is_members_only FROM videos WHERE id = 'v_member'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let v_normal: i64 = conn
-            .query_row("SELECT is_members_only FROM videos WHERE id = 'v_normal'", [], |r| r.get(0))
+            .query_row(
+                "SELECT is_members_only FROM videos WHERE id = 'v_normal'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(v_member, 1);
         assert_eq!(v_normal, 0);
@@ -549,10 +570,18 @@ mod tests {
         assert_eq!(updated, 1);
 
         let v1: i64 = conn
-            .query_row("SELECT is_members_only FROM videos WHERE id = 'v1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT is_members_only FROM videos WHERE id = 'v1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let v2: i64 = conn
-            .query_row("SELECT is_members_only FROM videos WHERE id = 'v2'", [], |r| r.get(0))
+            .query_row(
+                "SELECT is_members_only FROM videos WHERE id = 'v2'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(v1, 1, "UC1's video gets flagged");
         assert_eq!(v2, 0, "UC2's video must not be flagged when scanning UC1");
@@ -605,7 +634,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(live_flag, 1, "Livestream entry must be flagged immediately");
-        assert!(live_duration.is_none(), "duration must remain NULL for UUSH eligibility");
+        assert!(
+            live_duration.is_none(),
+            "duration must remain NULL for UUSH eligibility"
+        );
 
         let (normal_flag, normal_duration): (i64, Option<String>) = conn
             .query_row(
@@ -615,7 +647,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(normal_flag, 0);
-        assert!(normal_duration.is_none(), "duration must remain NULL for UUSH eligibility");
+        assert!(
+            normal_duration.is_none(),
+            "duration must remain NULL for UUSH eligibility"
+        );
     }
 
     #[test]
@@ -698,8 +733,15 @@ mod tests {
         assert_eq!(updated, 0);
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM videos WHERE id = 'ghost'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM videos WHERE id = 'ghost'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(count, 0, "Unknown IDs must not be inserted by an UPDATE-only path");
+        assert_eq!(
+            count, 0,
+            "Unknown IDs must not be inserted by an UPDATE-only path"
+        );
     }
 }

@@ -57,7 +57,9 @@ async fn get_rss_feed(
             // RSS consumers (e.g. Discord webhook via rss_checker).
             // TODO: Remove once all RSS consumers are updated to use ?token=<uuid>.
             None => conn
-                .query_row("SELECT id FROM users ORDER BY id LIMIT 1", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT id FROM users ORDER BY id LIMIT 1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .map_err(|_| AppError::NotFound("No users found".to_string()))?,
         };
 
@@ -119,7 +121,9 @@ fn build_rss_xml(items: &[RssItem]) -> String {
         let date = escape_xml(&pub_date);
         xml.push_str("    <item>\n");
         xml.push_str(&format!("      <title>{title}</title>\n"));
-        xml.push_str(&format!("      <link>https://www.youtube.com/watch?v={vid}</link>\n"));
+        xml.push_str(&format!(
+            "      <link>https://www.youtube.com/watch?v={vid}</link>\n"
+        ));
         xml.push_str(&format!("      <guid isPermaLink=\"false\">{vid}</guid>\n"));
         xml.push_str(&format!("      <pubDate>{date}</pubDate>\n"));
         xml.push_str(&format!("      <description>{desc}</description>\n"));
@@ -335,7 +339,10 @@ mod tests {
 
     #[test]
     fn test_escape_xml() {
-        assert_eq!(super::escape_xml("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&apos;f");
+        assert_eq!(
+            super::escape_xml("a<b>c&d\"e'f"),
+            "a&lt;b&gt;c&amp;d&quot;e&apos;f"
+        );
     }
 
     #[test]

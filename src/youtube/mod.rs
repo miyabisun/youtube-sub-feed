@@ -67,10 +67,7 @@ pub async fn youtube_get(
     })
 }
 
-pub async fn with_retry<F, Fut, T>(
-    quota: &Arc<QuotaState>,
-    f: F,
-) -> Result<T, YouTubeApiError>
+pub async fn with_retry<F, Fut, T>(quota: &Arc<QuotaState>, f: F) -> Result<T, YouTubeApiError>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, YouTubeApiError>>,
@@ -94,8 +91,7 @@ where
                     return Err(e);
                 }
                 if attempt < MAX_RETRIES - 1 {
-                    tokio::time::sleep(std::time::Duration::from_secs((attempt + 1) as u64))
-                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs((attempt + 1) as u64)).await;
                 } else {
                     return Err(e);
                 }

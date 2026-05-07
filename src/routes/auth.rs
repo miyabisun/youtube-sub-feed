@@ -28,10 +28,7 @@ pub fn routes() -> Router<AppState> {
     description = "Google 認証画面へリダイレクトする。",
     responses((status = 307, description = "Google 認証画面へリダイレクト")),
 )]
-async fn login(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> impl IntoResponse {
+async fn login(State(state): State<AppState>, cookies: Cookies) -> impl IntoResponse {
     let csrf_state = uuid::Uuid::new_v4().to_string();
     let mut cookie = Cookie::new("oauth_state", csrf_state.clone());
     cookie.set_http_only(true);
@@ -118,9 +115,17 @@ async fn callback(
             // Generate rss_token for users migrated from old schema (rss_token = NULL)
             let rss_token_update = {
                 let has_token: bool = conn
-                    .query_row("SELECT rss_token IS NOT NULL FROM users WHERE id = ?1", [id], |row| row.get(0))
+                    .query_row(
+                        "SELECT rss_token IS NOT NULL FROM users WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
                     .unwrap_or(false);
-                if has_token { None } else { Some(uuid::Uuid::new_v4().to_string()) }
+                if has_token {
+                    None
+                } else {
+                    Some(uuid::Uuid::new_v4().to_string())
+                }
             };
             conn.execute(
                 "UPDATE users SET email = ?1, access_token = ?2, refresh_token = COALESCE(?3, refresh_token), token_expires_at = ?4, updated_at = ?5, rss_token = COALESCE(?7, rss_token) WHERE id = ?6",
@@ -137,8 +142,8 @@ async fn callback(
             id
         } else {
             // First user becomes master, subsequent unregistered users are rejected
-            let user_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+            let user_count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
 
             if user_count > 0 {
                 return Err(AppError::Forbidden("User not registered".to_string()));
@@ -188,10 +193,7 @@ async fn callback(
     description = "セッションを破棄し Cookie を削除する。",
     responses((status = 200, description = "成功", body = OkResponse)),
 )]
-async fn logout(
-    State(state): State<AppState>,
-    cookies: Cookies,
-) -> Json<serde_json::Value> {
+async fn logout(State(state): State<AppState>, cookies: Cookies) -> Json<serde_json::Value> {
     if let Some(session_cookie) = cookies.get("session") {
         let session_id = session_cookie.value().to_string();
         {

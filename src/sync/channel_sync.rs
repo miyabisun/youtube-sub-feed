@@ -32,7 +32,8 @@ pub async fn sync_subscriptions(
             let mut stmt = conn
                 .prepare("SELECT channel_id FROM user_channels WHERE user_id = ?1")
                 .map_err(|e| AppError::Internal(format!("Failed to prepare query: {}", e)))?;
-            let ids = stmt.query_map([user_id], |row| row.get(0))
+            let ids = stmt
+                .query_map([user_id], |row| row.get(0))
                 .map_err(|e| AppError::Internal(format!("Failed to query user channels: {}", e)))?
                 .filter_map(|r| r.ok())
                 .collect::<std::collections::HashSet<String>>();
@@ -44,7 +45,8 @@ pub async fn sync_subscriptions(
         let result = (|| -> Result<(), rusqlite::Error> {
             for sub in &subs {
                 if !local_ids.contains(&sub.channel_id) {
-                    let upload_playlist_id = format!("UU{}", sub.channel_id.get(2..).unwrap_or(&sub.channel_id));
+                    let upload_playlist_id =
+                        format!("UU{}", sub.channel_id.get(2..).unwrap_or(&sub.channel_id));
                     conn.execute(
                         "INSERT OR IGNORE INTO channels (id, title, thumbnail_url, upload_playlist_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                         rusqlite::params![sub.channel_id, sub.title, sub.thumbnail_url, upload_playlist_id, now],
