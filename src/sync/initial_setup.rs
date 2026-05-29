@@ -31,6 +31,8 @@ pub async fn run_initial_setup(state: &AppState) {
 
     let channels = {
         let conn = state.db.lock().unwrap();
+        // The `result` binding is load-bearing: it forces the `Result<Statement>`
+        // temporary to drop before `conn`, avoiding an E0597 borrow-lifetime error.
         let result = match conn.prepare("SELECT id FROM channels") {
             Ok(mut stmt) => stmt
                 .query_map([], |row| row.get(0))
@@ -97,7 +99,7 @@ async fn register_initial_subscription(state: &AppState, channel_id: &str, callb
     // the INSERT branch wins. The SELECT branch is a safety net for retries after
     // partial crashes — preserving the prior secret avoids the HMAC race described
     // in periodic_refresh::register_new_subscription.
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::util::now_rfc3339();
     let secret = {
         let conn = state.db.lock().unwrap();
         let existing: Option<String> = conn

@@ -87,7 +87,7 @@ pub async fn fetch_channel_videos(
         return Vec::new();
     }
 
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::util::now_rfc3339();
 
     // 3. UPSERT and detect videos needing detail fetch
     //    Videos already in the DB WITH a duration are considered fully fetched.
@@ -97,7 +97,7 @@ pub async fn fetch_channel_videos(
         let conn = state.db.lock().unwrap();
 
         let video_ids: Vec<String> = items.iter().map(|i| i.video_id.clone()).collect();
-        let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = crate::db::sql_placeholders(video_ids.len());
         let sql = format!(
             "SELECT id FROM videos WHERE id IN ({}) AND duration IS NOT NULL",
             placeholders
@@ -351,7 +351,7 @@ fn mark_videos_as_members_only(
     if video_ids.is_empty() {
         return 0;
     }
-    let placeholders = video_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = crate::db::sql_placeholders(video_ids.len());
     let sql = format!(
         "UPDATE videos SET is_members_only = 1
          WHERE channel_id = ? AND is_members_only = 0 AND id IN ({})",

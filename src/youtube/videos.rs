@@ -1,5 +1,5 @@
 use crate::quota::QuotaState;
-use crate::youtube::{with_retry, youtube_get, YOUTUBE_API_BASE};
+use crate::youtube::{youtube_get_with_retry, YOUTUBE_API_BASE};
 use std::sync::Arc;
 
 pub struct VideoDetails {
@@ -28,15 +28,7 @@ pub async fn fetch_video_details(
             YOUTUBE_API_BASE, ids
         );
 
-        let http = http.clone();
-        let token = access_token.to_string();
-        let data = with_retry(quota, || {
-            let h = http.clone();
-            let u = url.clone();
-            let t = token.clone();
-            async move { youtube_get(&h, &u, &t).await }
-        })
-        .await?;
+        let data = youtube_get_with_retry(http, quota, &url, access_token).await?;
 
         if let Some(items) = data["items"].as_array() {
             for item in items {

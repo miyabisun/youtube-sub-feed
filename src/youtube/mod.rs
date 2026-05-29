@@ -22,6 +22,34 @@ impl std::error::Error for YouTubeApiError {}
 
 const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 
+/// A content-specific playlist that YouTube exposes for every channel, named by
+/// swapping the channel's "UC" prefix for a playlist prefix.
+pub enum PlaylistKind {
+    /// All uploads ("UU").
+    Uploads,
+    /// Shorts ("UUSH").
+    Shorts,
+    /// Members-only uploads ("UUMO"); 404s when the channel has no membership.
+    MembersOnly,
+}
+
+/// Derive a channel's playlist ID from its "UC…" channel ID.
+///
+/// Playlist ID Derivation Spec: YouTube identifies content types by playlist ID
+/// prefix, all derived by replacing the channel's "UC" prefix:
+/// - "UU"   uploads playlist
+/// - "UUSH" Shorts playlist
+/// - "UUMO" members-only uploads playlist (404 when channel has no membership)
+pub fn derive_playlist_id(channel_id: &str, kind: PlaylistKind) -> String {
+    let prefix = match kind {
+        PlaylistKind::Uploads => "UU",
+        PlaylistKind::Shorts => "UUSH",
+        PlaylistKind::MembersOnly => "UUMO",
+    };
+    let suffix = channel_id.get(2..).unwrap_or(channel_id);
+    format!("{}{}", prefix, suffix)
+}
+
 pub async fn youtube_get(
     http: &reqwest::Client,
     url: &str,
@@ -67,6 +95,27 @@ pub async fn youtube_get(
     })
 }
 
+/// Convenience wrapper around `with_retry` + `youtube_get`: clones the
+/// borrowed `http`/`url`/`token` once and threads fresh clones into each retry
+/// attempt (the closure is `Fn`, so it may run multiple times).
+pub async fn youtube_get_with_retry(
+    http: &reqwest::Client,
+    quota: &Arc<QuotaState>,
+    url: &str,
+    access_token: &str,
+) -> Result<serde_json::Value, YouTubeApiError> {
+    let http = http.clone();
+    let url = url.to_string();
+    let token = access_token.to_string();
+    with_retry(quota, || {
+        let h = http.clone();
+        let u = url.clone();
+        let t = token.clone();
+        async move { youtube_get(&h, &u, &t).await }
+    })
+    .await
+}
+
 pub async fn with_retry<F, Fut, T>(quota: &Arc<QuotaState>, f: F) -> Result<T, YouTubeApiError>
 where
     F: Fn() -> Fut,
@@ -107,6 +156,29 @@ mod tests {
 
     // Retry Spec: max 3 attempts, linear backoff (1s, 2s, 3s).
     // Quota exceeded (403 + quotaExceeded) aborts immediately without retry.
+
+    #[test]
+    fn test_derive_playlist_id_swaps_uc_prefix_per_kind() {
+        assert_eq!(
+            derive_playlist_id("UCabc123", PlaylistKind::Uploads),
+            "UUabc123"
+        );
+        assert_eq!(
+            derive_playlist_id("UCabc123", PlaylistKind::Shorts),
+            "UUSHabc123"
+        );
+        assert_eq!(
+            derive_playlist_id("UCabc123", PlaylistKind::MembersOnly),
+            "UUMOabc123"
+        );
+    }
+
+    #[test]
+    fn test_derive_playlist_id_falls_back_to_full_id_when_shorter_than_prefix() {
+        // An ID too short to strip a 2-char prefix keeps the whole string as the
+        // suffix rather than panicking on the `get(2..)` slice.
+        assert_eq!(derive_playlist_id("X", PlaylistKind::Uploads), "UUX");
+    }
 
     #[test]
     fn test_url_no_comma_encoding() {

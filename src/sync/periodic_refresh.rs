@@ -115,6 +115,8 @@ async fn run_once(state: &AppState) {
 
 fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
     let conn = state.db.lock().unwrap();
+    // The `result` binding is load-bearing: it forces the `Result<Statement>`
+    // temporary to drop before `conn`, avoiding an E0597 borrow-lifetime error.
     let result = match conn.prepare(
         "SELECT c.id FROM channels c
          LEFT JOIN channel_subscriptions s ON s.channel_id = c.id
@@ -133,7 +135,7 @@ async fn register_new_subscription(state: &AppState, channel_id: &str, callback:
     // If a subscription already exists, preserve its secret: rotating it here creates
     // a window where hub pushes (still signed with the old secret) fail HMAC verification
     // until the hub re-verifies with the new secret.
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::util::now_rfc3339();
     let secret = {
         let conn = state.db.lock().unwrap();
         let existing: Option<String> = conn

@@ -210,18 +210,15 @@ async fn update_channel(
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
-    let validate_bool = |val: i64, name: &str| -> Result<(), AppError> {
-        if val != 0 && val != 1 {
-            return Err(AppError::BadRequest(format!("{} must be 0 or 1", name)));
+    for (val, name) in [
+        (body.show_livestreams, "show_livestreams"),
+        (body.is_favorite, "is_favorite"),
+    ] {
+        if let Some(v) = val {
+            if v != 0 && v != 1 {
+                return Err(AppError::BadRequest(format!("{} must be 0 or 1", name)));
+            }
         }
-        Ok(())
-    };
-
-    if let Some(v) = body.show_livestreams {
-        validate_bool(v, "show_livestreams")?;
-    }
-    if let Some(v) = body.is_favorite {
-        validate_bool(v, "is_favorite")?;
     }
 
     {

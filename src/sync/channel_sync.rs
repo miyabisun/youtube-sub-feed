@@ -21,7 +21,7 @@ pub async fn sync_subscriptions(
     let remote_ids: std::collections::HashSet<String> =
         subs.iter().map(|s| s.channel_id.clone()).collect();
 
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::util::now_rfc3339();
     let mut added: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
 
@@ -45,8 +45,10 @@ pub async fn sync_subscriptions(
         let result = (|| -> Result<(), rusqlite::Error> {
             for sub in &subs {
                 if !local_ids.contains(&sub.channel_id) {
-                    let upload_playlist_id =
-                        format!("UU{}", sub.channel_id.get(2..).unwrap_or(&sub.channel_id));
+                    let upload_playlist_id = crate::youtube::derive_playlist_id(
+                        &sub.channel_id,
+                        crate::youtube::PlaylistKind::Uploads,
+                    );
                     conn.execute(
                         "INSERT OR IGNORE INTO channels (id, title, thumbnail_url, upload_playlist_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                         rusqlite::params![sub.channel_id, sub.title, sub.thumbnail_url, upload_playlist_id, now],

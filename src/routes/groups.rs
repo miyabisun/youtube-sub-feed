@@ -19,6 +19,22 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+/// Validate a group name from a request body: required (non-empty) and at most
+/// 50 characters. Shared by create_group and update_group.
+fn validate_group_name(name: Option<String>) -> Result<String, AppError> {
+    let name = name
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Name is required".to_string()))?;
+    // Count characters, not bytes: a 50-character Japanese name is 150 UTF-8
+    // bytes but is well within the "50文字" limit the API documents.
+    if name.chars().count() > 50 {
+        return Err(AppError::BadRequest(
+            "Name must be 50 characters or less".to_string(),
+        ));
+    }
+    Ok(name)
+}
+
 #[utoipa::path(
     get,
     path = "/api/groups",
@@ -75,16 +91,7 @@ async fn create_group(
     Extension(user_id): Extension<UserId>,
     Json(body): Json<CreateGroupBody>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), AppError> {
-    let name = body
-        .name
-        .filter(|n| !n.is_empty())
-        .ok_or_else(|| AppError::BadRequest("Name is required".to_string()))?;
-
-    if name.len() > 50 {
-        return Err(AppError::BadRequest(
-            "Name must be 50 characters or less".to_string(),
-        ));
-    }
+    let name = validate_group_name(body.name)?;
 
     let uid = user_id.0;
     let row = {
@@ -138,16 +145,7 @@ async fn update_group(
     Path(id): Path<i64>,
     Json(body): Json<UpdateGroupBody>,
 ) -> Result<Json<Value>, AppError> {
-    let name = body
-        .name
-        .filter(|n| !n.is_empty())
-        .ok_or_else(|| AppError::BadRequest("Name is required".to_string()))?;
-
-    if name.len() > 50 {
-        return Err(AppError::BadRequest(
-            "Name must be 50 characters or less".to_string(),
-        ));
-    }
+    let name = validate_group_name(body.name)?;
 
     {
         let conn = state.db.lock().unwrap();
@@ -356,6 +354,40 @@ mod tests {
             params![id],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_validate_group_name_accepts_50_multibyte_chars() {
+        // 50 Japanese characters are 150 UTF-8 bytes. The limit is 50
+        // *characters* (as the OpenAPI doc and error message state), not bytes,
+        // so this must be accepted.
+        let name = "あ".repeat(50);
+        assert_eq!(
+            super::validate_group_name(Some(name.clone())).unwrap(),
+            name
+        );
+    }
+
+    #[test]
+    fn test_validate_group_name_accepts_exactly_50_ascii() {
+        let name = "a".repeat(50);
+        assert_eq!(
+            super::validate_group_name(Some(name.clone())).unwrap(),
+            name
+        );
+    }
+
+    #[test]
+    fn test_validate_group_name_rejects_51_chars() {
+        assert!(super::validate_group_name(Some("a".repeat(51))).is_err());
+        // 51 multibyte characters must also be rejected by character count.
+        assert!(super::validate_group_name(Some("あ".repeat(51))).is_err());
+    }
+
+    #[test]
+    fn test_validate_group_name_rejects_empty_and_none() {
+        assert!(super::validate_group_name(Some(String::new())).is_err());
+        assert!(super::validate_group_name(None).is_err());
     }
 
     #[test]

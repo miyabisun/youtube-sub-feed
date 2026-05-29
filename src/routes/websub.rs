@@ -191,7 +191,7 @@ pub async fn notification(
         return StatusCode::OK;
     }
 
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::util::now_rfc3339();
 
     let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
@@ -351,6 +351,14 @@ mod tests {
             .unwrap();
         }
         (state, now)
+    }
+
+    /// Compute an `X-Hub-Signature` header value (`sha1=<hex>`) for a test body.
+    fn sign(secret: &[u8], body: &str) -> String {
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret).unwrap();
+        mac.update(body.as_bytes());
+        format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
     }
 
     #[test]
@@ -549,12 +557,7 @@ mod tests {
   </entry>
 </feed>"#;
 
-        let sig = {
-            use hmac::{Hmac, Mac};
-            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(body.as_bytes());
-            format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
-        };
+        let sig = sign(secret.as_bytes(), body);
 
         let req = Request::builder()
             .method("POST")
@@ -677,12 +680,7 @@ mod tests {
   </entry>
 </feed>"#;
 
-        let sig = {
-            use hmac::{Hmac, Mac};
-            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
-            mac.update(body.as_bytes());
-            format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
-        };
+        let sig = sign(secret.as_bytes(), body);
 
         let send = |app: axum::Router| {
             let sig = sig.clone();
@@ -738,12 +736,7 @@ mod tests {
 </feed>"#;
 
         // Signature computed with wrong secret
-        let sig = {
-            use hmac::{Hmac, Mac};
-            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(b"wrong_secret").unwrap();
-            mac.update(body.as_bytes());
-            format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
-        };
+        let sig = sign(b"wrong_secret", body);
 
         let req = Request::builder()
             .method("POST")

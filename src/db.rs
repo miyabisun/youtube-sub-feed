@@ -22,6 +22,13 @@ pub fn open(path: &str) -> Connection {
     conn
 }
 
+/// Build a comma-separated list of `n` bound-parameter placeholders (`?,?,…,?`)
+/// for an SQL `IN (...)` clause. The values themselves are always bound
+/// separately (never interpolated), so this is injection-safe.
+pub(crate) fn sql_placeholders(n: usize) -> String {
+    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(",")
+}
+
 /// One-shot migration: decode XML entities in legacy `videos.title` rows.
 ///
 /// Pre-fix WebSub callbacks stored Atom titles verbatim (e.g. "S&amp;P500"),
@@ -429,6 +436,20 @@ mod tests {
     // Tables are auto-created on startup via `CREATE TABLE IF NOT EXISTS`.
 
     use super::*;
+
+    #[test]
+    fn test_sql_placeholders_builds_comma_separated_marks() {
+        assert_eq!(sql_placeholders(1), "?");
+        assert_eq!(sql_placeholders(3), "?,?,?");
+    }
+
+    #[test]
+    fn test_sql_placeholders_zero_yields_empty_string_callers_must_guard() {
+        // n=0 produces "", which would form an invalid `IN ()` clause. Callers
+        // must guard against empty input before building the SQL — this test
+        // pins that contract so the guard is never "optimized away".
+        assert_eq!(sql_placeholders(0), "");
+    }
 
     #[test]
     fn test_open_memory() {

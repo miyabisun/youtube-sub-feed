@@ -50,11 +50,6 @@ impl Cache {
         );
     }
 
-    pub fn clear_prefix(&self, prefix: &str) {
-        let mut store = self.store.lock().unwrap();
-        store.retain(|key, _| !key.starts_with(prefix));
-    }
-
     fn sweep(&self) {
         let mut store = self.store.lock().unwrap();
         let now = Instant::now();
@@ -96,18 +91,6 @@ mod tests {
     fn test_get_missing() {
         let cache = Cache::new();
         assert_eq!(cache.get("missing"), None);
-    }
-
-    #[test]
-    fn test_clear_prefix() {
-        let cache = Cache::new();
-        cache.set("uush:ch1", json!([]), None);
-        cache.set("uush:ch2", json!([]), None);
-        cache.set("other:key", json!("v"), None);
-        cache.clear_prefix("uush:");
-        assert_eq!(cache.get("uush:ch1"), None);
-        assert_eq!(cache.get("uush:ch2"), None);
-        assert_eq!(cache.get("other:key"), Some(json!("v")));
     }
 
     #[test]
