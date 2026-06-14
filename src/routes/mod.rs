@@ -13,7 +13,6 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
-use tower_cookies::CookieManagerLayer;
 use tower_http::services::ServeDir;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -22,22 +21,20 @@ use utoipa_swagger_ui::SwaggerUi;
 #[openapi(
     info(
         title = "YouTube Sub Feed API",
-        version = "0.1.0",
-        description = "YouTubeの登録チャンネルの最新動画を公開日時の降順で一覧表示するWebアプリのAPI。\n\n## 認証\n\nGoogle OAuth2 による認証。`/api/auth/login`, `/api/auth/callback`, `/api/health` 以外の全エンドポイントは Cookie ベースのセッション認証が必要。\n\n## データベース\n\n| テーブル | 説明 |\n|---|---|\n| channels | 登録チャンネル |\n| videos | 動画 (FK: channels, CASCADE DELETE) |\n| groups | チャンネルグループ |\n| channel_groups | チャンネル×グループ (多対多) |\n| auth | Google OAuth2 認証情報 |\n| sessions | セッション (30日TTL) |",
+        version = "0.2.0",
+        description = "YouTubeの登録チャンネルの最新動画を公開日時の降順で一覧表示するWebアプリのAPI。\n\n## 認証\n\nCloudflare Access による認証。`Cf-Access-Authenticated-User-Email` ヘッダでユーザー識別。\nローカル開発では最初の DB ユーザーが自動的に使用される。\n\n## データベース\n\n| テーブル | 説明 |\n|---|---|\n| channels | 登録チャンネル |\n| videos | 動画 (FK: channels, CASCADE DELETE) |\n| groups | チャンネルグループ |\n| channel_groups | チャンネル×グループ (多対多) |\n| users | ユーザー (email 識別) |\n| channel_subscriptions | WebSub 購読情報 |",
     ),
     paths(
-        auth::login,
-        auth::callback,
-        auth::logout,
         auth::me,
         feed::get_feed,
         feed::hide_video,
         feed::unhide_video,
         channels::get_channels,
         channels::get_channel_videos,
+        channels::add_channel,
         channels::sync_channels,
-        channels::refresh_channel,
         channels::update_channel,
+        channels::remove_channel,
         groups::get_groups,
         groups::create_group,
         groups::update_group,
@@ -55,17 +52,19 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::ChannelVideoItem,
         openapi::GroupItem,
         openapi::MeResponse,
-        openapi::RefreshResponse,
         channels::UpdateChannelBody,
+        channels::AddChannelBody,
+        channels::SyncChannelsBody,
+        channels::SyncChannelMeta,
         groups::CreateGroupBody,
         groups::UpdateGroupBody,
         groups::ReorderBody,
         groups::SetChannelsBody,
     )),
     tags(
-        (name = "認証", description = "Google OAuth2 認証・セッション管理"),
+        (name = "認証", description = "Cloudflare Access 認証・ユーザー識別"),
         (name = "動画フィード", description = "動画一覧の取得・非表示/復元"),
-        (name = "チャンネル", description = "登録チャンネルの管理・同期・更新"),
+        (name = "チャンネル", description = "登録チャンネルの管理・手動追加・同期"),
         (name = "グループ", description = "チャンネルグループの管理・並び替え・割り当て"),
         (name = "RSS", description = "お気に入りチャンネルのRSSフィード配信"),
     ),
@@ -78,11 +77,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/health",
             get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
         )
-        .merge(auth::routes())
         .merge(rss::routes())
         .merge(websub::routes());
 
+    // auth::me is protected (requires Cf-Access header / dev bypass)
     let protected = Router::new()
+        .merge(auth::routes())
         .merge(feed::routes())
         .merge(channels::routes())
         .merge(groups::routes())
@@ -91,19 +91,22 @@ pub fn build_router(state: AppState) -> Router {
             auth_middleware,
         ));
 
-    let serve_static = ServeDir::new("client/build").fallback(get(spa_fallback));
+    let gis_client_id = state.config.gis_client_id.clone();
+    let serve_static = ServeDir::new("client/build").fallback(get(move || {
+        let id = gis_client_id.clone();
+        async move { spa_fallback(&id) }
+    }));
 
     Router::new()
         .merge(public)
         .merge(protected)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .fallback_service(serve_static)
-        .layer(CookieManagerLayer::new())
         .with_state(state)
 }
 
-async fn spa_fallback() -> impl IntoResponse {
-    match spa::get_index_html() {
+fn spa_fallback(gis_client_id: &str) -> impl IntoResponse {
+    match spa::get_index_html(gis_client_id) {
         Some(html) => (
             [(header::CACHE_CONTROL, "no-store")],
             Html(html),
@@ -121,10 +124,9 @@ mod tests {
     // API Endpoints Spec
     //
     // Defines all API endpoint paths, HTTP methods, and auth requirements.
-    // These meta-tests verify the API surface stays consistent:
-    // total endpoint count, public/protected split, prefix conventions,
-    // and correct HTTP method usage (PATCH for partial update, PUT for
-    // full replacement, DELETE for physical deletion).
+    // Auth is now Cloudflare Access (Cf-Access-Authenticated-User-Email header),
+    // not session cookies. /api/health, /api/rss, /api/websub/callback are public.
+    // All other endpoints require auth middleware.
 
     struct Endpoint {
         method: &'static str,
@@ -140,24 +142,9 @@ mod tests {
         },
         Endpoint {
             method: "GET",
-            path: "/api/auth/login",
-            auth_required: false,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/auth/callback",
-            auth_required: false,
-        },
-        Endpoint {
-            method: "POST",
-            path: "/api/auth/logout",
-            auth_required: false,
-        }, // checks session in handler (no-op if absent)
-        Endpoint {
-            method: "GET",
             path: "/api/auth/me",
-            auth_required: false,
-        }, // self-auth in handler -> 401
+            auth_required: true,
+        },
         Endpoint {
             method: "GET",
             path: "/api/feed",
@@ -179,6 +166,11 @@ mod tests {
             auth_required: true,
         },
         Endpoint {
+            method: "POST",
+            path: "/api/channels",
+            auth_required: true,
+        },
+        Endpoint {
             method: "GET",
             path: "/api/channels/:id/videos",
             auth_required: true,
@@ -189,12 +181,12 @@ mod tests {
             auth_required: true,
         },
         Endpoint {
-            method: "POST",
-            path: "/api/channels/:id/refresh",
+            method: "PATCH",
+            path: "/api/channels/:id",
             auth_required: true,
         },
         Endpoint {
-            method: "PATCH",
+            method: "DELETE",
             path: "/api/channels/:id",
             auth_required: true,
         },
@@ -254,18 +246,15 @@ mod tests {
         use super::*;
 
         #[test]
-        fn total_endpoint_count_is_23() {
-            assert_eq!(ENDPOINTS.len(), 23);
+        fn total_endpoint_count_is_21() {
+            assert_eq!(ENDPOINTS.len(), 21);
         }
 
         #[test]
-        fn middleware_public_endpoints_count_is_8() {
-            // health, login, callback: no middleware, no handler-level auth
-            // logout, me: no middleware, but handler-level auth
-            // rss: public feed, no auth required
-            // websub/callback (GET/POST): WebSub hub verification and push notification
+        fn public_endpoints_count_is_4() {
+            // health, rss, websub/callback GET (verification), websub/callback POST (push)
             let public_count = ENDPOINTS.iter().filter(|e| !e.auth_required).count();
-            assert_eq!(public_count, 8);
+            assert_eq!(public_count, 4);
         }
 
         #[test]
@@ -311,8 +300,21 @@ mod tests {
         #[test]
         fn delete_for_physical_deletion() {
             let delete: Vec<_> = ENDPOINTS.iter().filter(|e| e.method == "DELETE").collect();
-            assert_eq!(delete.len(), 1);
-            assert_eq!(delete[0].path, "/api/groups/:id");
+            assert_eq!(delete.len(), 2);
+            let paths: Vec<&str> = delete.iter().map(|e| e.path).collect();
+            assert!(paths.contains(&"/api/groups/:id"));
+            assert!(paths.contains(&"/api/channels/:id"));
+        }
+
+        #[test]
+        fn post_for_channel_add_and_sync() {
+            let post: Vec<&str> = ENDPOINTS
+                .iter()
+                .filter(|e| e.method == "POST")
+                .map(|e| e.path)
+                .collect();
+            assert!(post.contains(&"/api/channels"));
+            assert!(post.contains(&"/api/channels/sync"));
         }
     }
 }

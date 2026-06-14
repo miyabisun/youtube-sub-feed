@@ -35,21 +35,129 @@
 		menuOpen = false;
 	}
 
+	/**
+	 * Browser-side GIS sync flow:
+	 *   1. Use Google Identity Services token client to get a short-lived access_token
+	 *      (online-only, no refresh_token requested).
+	 *   2. Fetch YouTube Subscriptions.list (all pages) directly from the browser using
+	 *      the access_token as Bearer (CORS-enabled, confirmed).
+	 *   3. POST /api/channels/sync with the collected channel_ids and metadata.
+	 *   4. Discard the token — it is never sent to or stored on the server.
+	 */
 	async function syncChannels() {
 		if (syncing) return;
 		syncing = true;
 		closeMenu();
+
+		const clientId = config.gisClientId;
+		if (!clientId) {
+			toast = { message: 'GIS_CLIENT_ID が設定されていません', type: 'error' };
+			syncing = false;
+			return;
+		}
+
 		try {
-			const result = await fetcher(`${config.path.api}/channels/sync`, { method: 'POST' });
+			const accessToken = await getGisToken(clientId);
+			const { channelIds, meta } = await fetchAllSubscriptions(accessToken);
+
+			if (channelIds.length === 0) {
+				const ok = confirm(
+					'取得された登録チャンネルが0件です。\n' +
+					'API の一時的な異常やスコープ取得直後の空応答の可能性があります。\n' +
+					'同期を続行すると登録済みチャンネルが全て削除される可能性があります。\n\n' +
+					'続行しますか？'
+				);
+				if (!ok) {
+					toast = { message: 'チャンネル同期をキャンセルしました', type: 'error' };
+					return;
+				}
+			}
+
+			const result = await fetcher(`${config.path.api}/channels/sync`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ channel_ids: channelIds, meta }),
+			});
 			const added = result?.added ?? 0;
 			const removed = result?.removed ?? 0;
 			toast = { message: `チャンネル同期完了 (追加: ${added}, 削除: ${removed})`, type: 'success' };
 		} catch (e) {
 			console.error('[sync] channel sync failed:', e);
-			toast = { message: 'チャンネル同期に失敗しました', type: 'error' };
+			toast = { message: `チャンネル同期に失敗しました: ${e.message}`, type: 'error' };
 		} finally {
 			syncing = false;
 		}
+	}
+
+	/**
+	 * Request a short-lived online access_token via GIS token client.
+	 * Does NOT request offline access — no refresh_token is ever issued.
+	 * Returns the access_token string.
+	 */
+	function getGisToken(clientId) {
+		return new Promise((resolve, reject) => {
+			if (!window.google?.accounts?.oauth2) {
+				reject(new Error('GIS SDK がロードされていません。ページをリロードしてください。'));
+				return;
+			}
+			const client = window.google.accounts.oauth2.initTokenClient({
+				client_id: clientId,
+				scope: 'https://www.googleapis.com/auth/youtube.readonly',
+				callback: (response) => {
+					if (response.error) {
+						reject(new Error(response.error_description || response.error));
+					} else {
+						resolve(response.access_token);
+					}
+				},
+				error_callback: (err) => {
+					reject(new Error(err?.message || 'token request cancelled'));
+				},
+			});
+			client.requestToken();
+		});
+	}
+
+	/**
+	 * Fetch all pages of YouTube Subscriptions.list using the provided access_token.
+	 * YouTube Data API is CORS-enabled: Bearer token works from the browser.
+	 * Returns { channelIds: string[], meta: Record<string, { title, thumbnail_url }> }.
+	 */
+	async function fetchAllSubscriptions(accessToken) {
+		const channelIds = [];
+		const meta = {};
+		let pageToken = null;
+
+		do {
+			const url = new URL('https://www.googleapis.com/youtube/v3/subscriptions');
+			url.searchParams.set('part', 'snippet');
+			url.searchParams.set('mine', 'true');
+			url.searchParams.set('maxResults', '50');
+			if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+			const res = await fetch(url.toString(), {
+				headers: { Authorization: `Bearer ${accessToken}` },
+			});
+
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				throw new Error(body?.error?.message || `YouTube API error: ${res.status}`);
+			}
+
+			const data = await res.json();
+			for (const item of data.items ?? []) {
+				const channelId = item.snippet?.resourceId?.channelId;
+				if (!channelId) continue;
+				channelIds.push(channelId);
+				meta[channelId] = {
+					title: item.snippet?.title ?? channelId,
+					thumbnail_url: item.snippet?.thumbnails?.default?.url ?? null,
+				};
+			}
+			pageToken = data.nextPageToken ?? null;
+		} while (pageToken);
+
+		return { channelIds, meta };
 	}
 </script>
 
@@ -78,9 +186,8 @@
 				<a class="menu-item" class:active={isActive('/channels')} href={link('/channels')} onclick={closeMenu}>チャンネル</a>
 				<a class="menu-item" class:active={isActive('/settings')} href={link('/settings')} onclick={closeMenu}>グループ管理</a>
 				<button class="menu-item menu-action" onclick={syncChannels} disabled={syncing}>
-					{syncing ? '同期中...' : 'チャンネル同期'}
+					{syncing ? '同期中...' : 'チャンネル同期 (YouTube)'}
 				</button>
-				<a class="menu-item" href={`${config.path.api}/auth/login`} onclick={closeMenu}>再ログイン</a>
 			</nav>
 		{/if}
 	</div>

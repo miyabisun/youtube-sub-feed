@@ -1,6 +1,5 @@
 use crate::cache::Cache;
 use crate::config::Config;
-use crate::quota::QuotaState;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +9,6 @@ pub struct AppState {
     pub cache: Arc<Cache>,
     pub config: Config,
     pub http: reqwest::Client,
-    pub quota: Arc<QuotaState>,
 }
 
 #[cfg(test)]
@@ -22,15 +20,12 @@ impl AppState {
             config: Config {
                 port: 3000,
                 db_path: ":memory:".to_string(),
-                google_client_id: String::new(),
-                google_client_secret: String::new(),
-                google_redirect_uri: String::new(),
+                gis_client_id: String::new(),
                 discord_webhook_url: None,
                 websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),
                 is_production: false,
             },
             http: reqwest::Client::new(),
-            quota: Arc::new(QuotaState::new()),
         }
     }
 }

@@ -111,10 +111,4 @@ pub struct MeResponse {
     pub email: String,
 }
 
-/// チャンネル手動更新レスポンス
-#[derive(Serialize, ToSchema)]
-pub struct RefreshResponse {
-    /// 新着動画数
-    #[serde(rename = "newVideos")]
-    pub new_videos: usize,
-}
+// RefreshResponse removed (refresh_channel endpoint was removed with OAuth)

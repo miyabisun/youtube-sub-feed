@@ -18,15 +18,10 @@ pub fn open(path: &str) -> Connection {
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
     decode_video_titles_xml_entities(&conn);
+    drop_users_oauth_token_columns(&conn);
+    add_users_email_unique_index(&conn);
 
     conn
-}
-
-/// Build a comma-separated list of `n` bound-parameter placeholders (`?,?,…,?`)
-/// for an SQL `IN (...)` clause. The values themselves are always bound
-/// separately (never interpolated), so this is injection-safe.
-pub(crate) fn sql_placeholders(n: usize) -> String {
-    std::iter::repeat_n("?", n).collect::<Vec<_>>().join(",")
 }
 
 /// One-shot migration: decode XML entities in legacy `videos.title` rows.
@@ -116,6 +111,58 @@ fn drop_videos_thumbnail_url(conn: &Connection) {
     }
 }
 
+/// One-shot migration: drop OAuth token columns from legacy `users` tables.
+///
+/// Before the OAuth-removal refactor, users had `access_token`, `refresh_token`,
+/// and `token_expires_at` columns. These are now obsolete: the server never holds
+/// any OAuth tokens. Idempotent: a no-op if the columns are already absent.
+fn drop_users_oauth_token_columns(conn: &Connection) {
+    for col in &["access_token", "refresh_token", "token_expires_at"] {
+        if column_exists(conn, "users", col) {
+            match conn.execute(&format!("ALTER TABLE users DROP COLUMN {}", col), []) {
+                Ok(_) => tracing::info!("[migrate] Dropped obsolete users.{} column", col),
+                Err(e) => tracing::warn!("[migrate] Failed to drop users.{}: {}", col, e),
+            }
+        }
+    }
+}
+
+/// One-shot migration: add a UNIQUE index on users.email (replacing the old
+/// idx_users_google_id index). Email is now the primary user identifier since
+/// Cloudflare Access provides it via the `Cf-Access-Authenticated-User-Email`
+/// header. Idempotent: a no-op if the index already exists.
+fn add_users_email_unique_index(conn: &Connection) {
+    // Drop the old google_id unique index if it exists (it would conflict with
+    // nullable google_id values from newly created users).
+    let has_old_idx = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_google_id' LIMIT 1")
+        .ok()
+        .and_then(|mut s| s.query_row([], |_| Ok(true)).ok())
+        .unwrap_or(false);
+    if has_old_idx {
+        let _ = conn.execute("DROP INDEX IF EXISTS idx_users_google_id", []);
+        tracing::info!("[migrate] Dropped obsolete idx_users_google_id index");
+    }
+
+    // Add email unique index if missing.
+    let has_email_idx = conn
+        .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email' LIMIT 1",
+        )
+        .ok()
+        .and_then(|mut s| s.query_row([], |_| Ok(true)).ok())
+        .unwrap_or(false);
+    if !has_email_idx {
+        match conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+            [],
+        ) {
+            Ok(_) => tracing::info!("[migrate] Created idx_users_email index"),
+            Err(e) => tracing::warn!("[migrate] Failed to create idx_users_email: {}", e),
+        }
+    }
+}
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let sql = format!("PRAGMA table_info({})", table);
     let Ok(mut stmt) = conn.prepare(&sql) else {
@@ -148,13 +195,10 @@ fn create_tables(conn: &Connection) {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            google_id TEXT NOT NULL,
+            google_id TEXT,
             email TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'member',
             rss_token TEXT,
-            access_token TEXT,
-            refresh_token TEXT,
-            token_expires_at TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT
         );
@@ -220,14 +264,6 @@ fn create_tables(conn: &Connection) {
             FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            expires_at TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-
         CREATE TABLE IF NOT EXISTS channel_subscriptions (
             channel_id TEXT PRIMARY KEY,
             hub_secret TEXT NOT NULL,
@@ -238,7 +274,7 @@ fn create_tables(conn: &Connection) {
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);
         CREATE INDEX IF NOT EXISTS idx_videos_published ON videos (published_at DESC);
         CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos (channel_id);
@@ -270,23 +306,20 @@ fn migrate(conn: &Connection) {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id TEXT NOT NULL,
+                google_id TEXT,
                 email TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'member',
                 rss_token TEXT,
-                access_token TEXT,
-                refresh_token TEXT,
-                token_expires_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT
             );
 
-            INSERT OR IGNORE INTO users (id, google_id, email, role, access_token, refresh_token, token_expires_at, created_at, updated_at)
-            SELECT id, google_id, email, 'master', access_token, refresh_token, token_expires_at,
+            INSERT OR IGNORE INTO users (id, google_id, email, role, created_at, updated_at)
+            SELECT id, google_id, email, 'master',
                    COALESCE(updated_at, datetime('now')), updated_at
             FROM auth;
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);",
         )?;
 
@@ -438,20 +471,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sql_placeholders_builds_comma_separated_marks() {
-        assert_eq!(sql_placeholders(1), "?");
-        assert_eq!(sql_placeholders(3), "?,?,?");
-    }
-
-    #[test]
-    fn test_sql_placeholders_zero_yields_empty_string_callers_must_guard() {
-        // n=0 produces "", which would form an invalid `IN ()` clause. Callers
-        // must guard against empty input before building the SQL — this test
-        // pins that contract so the guard is never "optimized away".
-        assert_eq!(sql_placeholders(0), "");
-    }
-
-    #[test]
     fn test_open_memory() {
         let conn = open_memory();
         conn.execute(
@@ -499,11 +518,13 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
+        // sessions テーブルは OAuth 撤去・Cloudflare Access 移行に伴い削除された。
+        // 新規 DB には sessions テーブルは存在しない。
         let expected = [
             "channel_groups",
+            "channel_subscriptions",
             "channels",
             "groups",
-            "sessions",
             "user_channels",
             "user_videos",
             "users",
@@ -516,6 +537,13 @@ mod tests {
                 name
             );
         }
+
+        // Cloudflare Access 委譲後、Cookie セッションは廃止。
+        // 新規スキーマに sessions テーブルが混入していないことを保証する。
+        assert!(
+            !tables.contains(&"sessions".to_string()),
+            "sessions table must not exist in new schema (OAuth/cookie sessions are abolished)"
+        );
     }
 
     #[test]
@@ -536,7 +564,7 @@ mod tests {
             "idx_user_channels_user",
             "idx_user_videos_hidden",
             "idx_user_videos_user",
-            "idx_users_google_id",
+            "idx_users_email",
             "idx_videos_channel",
             "idx_videos_published",
         ];
@@ -550,18 +578,27 @@ mod tests {
     }
 
     #[test]
-    fn test_google_id_unique() {
+    fn email_unique_index_prevents_duplicate_email() {
+        // Email is now the primary user identifier (replacing google_id).
         let conn = open_memory();
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'a@example.com')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO users (email) VALUES ('a@example.com')", [])
+            .unwrap();
+        let result = conn.execute("INSERT INTO users (email) VALUES ('a@example.com')", []);
+        assert!(result.is_err(), "Duplicate email should fail");
+    }
+
+    #[test]
+    fn google_id_is_nullable_in_new_schema() {
+        // google_id is nullable since Cloudflare Access identifies by email.
+        let conn = open_memory();
         let result = conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'b@example.com')",
+            "INSERT INTO users (email) VALUES ('no_google@example.com')",
             [],
         );
-        assert!(result.is_err(), "Duplicate google_id should fail");
+        assert!(
+            result.is_ok(),
+            "Inserting user without google_id should succeed"
+        );
     }
 
     #[test]
@@ -1020,30 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sessions_cascade_on_user_delete() {
-        let conn = open_memory();
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'a@example.com')",
-            [],
-        )
-        .unwrap();
-        let user_id: i64 = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES ('s1', ?1, '2025-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
-            [user_id],
-        )
-        .unwrap();
-
-        conn.execute("DELETE FROM users WHERE id = ?1", [user_id])
-            .unwrap();
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 0, "Session should be deleted when user is deleted");
-    }
-
-    #[test]
     fn test_last_fetched_at_is_nullable() {
         let conn = open_memory();
         conn.execute(
@@ -1403,6 +1416,7 @@ mod tests {
                 FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
                 FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
             );
+            -- sessions テーブルも旧スキーマに存在したが、migrate() がリネームする
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY,
                 auth_id INTEGER NOT NULL,
@@ -1413,7 +1427,7 @@ mod tests {
         )
         .unwrap();
 
-        // Insert old data
+        // Insert old data (sessions は旧スキーマの auth_id 参照)
         conn.execute_batch(
             "INSERT INTO auth (google_id, email, access_token, refresh_token, token_expires_at, updated_at)
              VALUES ('g1', 'test@example.com', 'at', 'rt', '2026-01-01T00:00:00Z', '2025-01-01T00:00:00Z');
@@ -1484,13 +1498,10 @@ mod tests {
             "videos should not have is_hidden"
         );
 
-        // Verify: sessions migrated (user_id, not auth_id)
-        let user_id: i64 = conn
-            .query_row("SELECT user_id FROM sessions WHERE id = 's1'", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(user_id, 1);
+        // sessions テーブルは migrate() によって auth_id → user_id 列名変換されるが、
+        // create_tables では sessions テーブルは定義されない（Cloudflare Access 移行済）。
+        // legacy DB では migrate() 実行後に sessions テーブルが残存するが、
+        // 新規 DB では sessions テーブルは存在しない（デッドコードとして整理済）。
 
         // Verify: groups have user_id
         let group_user: i64 = conn
@@ -1514,5 +1525,72 @@ mod tests {
             [],
         );
         assert!(result.is_err(), "Duplicate rss_token should fail");
+    }
+
+    // --- OAuth token column drop migration tests ---
+
+    #[test]
+    fn drop_users_oauth_token_columns_removes_legacy_columns_when_present() {
+        // Simulate a legacy users table that still has the three OAuth columns.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                google_id TEXT,
+                email TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                rss_token TEXT,
+                access_token TEXT,
+                refresh_token TEXT,
+                token_expires_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT
+            );",
+        )
+        .unwrap();
+
+        assert!(
+            super::column_exists(&conn, "users", "access_token"),
+            "precondition: access_token must be present"
+        );
+        assert!(
+            super::column_exists(&conn, "users", "refresh_token"),
+            "precondition: refresh_token must be present"
+        );
+        assert!(
+            super::column_exists(&conn, "users", "token_expires_at"),
+            "precondition: token_expires_at must be present"
+        );
+
+        super::drop_users_oauth_token_columns(&conn);
+
+        assert!(
+            !super::column_exists(&conn, "users", "access_token"),
+            "access_token should have been dropped"
+        );
+        assert!(
+            !super::column_exists(&conn, "users", "refresh_token"),
+            "refresh_token should have been dropped"
+        );
+        assert!(
+            !super::column_exists(&conn, "users", "token_expires_at"),
+            "token_expires_at should have been dropped"
+        );
+    }
+
+    #[test]
+    fn drop_users_oauth_token_columns_is_idempotent_when_already_absent() {
+        // Fresh DB (from open_memory) does not have the OAuth columns.
+        // Calling drop_users_oauth_token_columns must be a no-op without error.
+        let conn = open_memory();
+        assert!(
+            !super::column_exists(&conn, "users", "access_token"),
+            "precondition: access_token must not exist in fresh schema"
+        );
+
+        // Must not panic
+        super::drop_users_oauth_token_columns(&conn);
+
+        assert!(!super::column_exists(&conn, "users", "access_token"));
     }
 }

@@ -6,7 +6,13 @@
     <title>youtube-sub-feed</title>
     <script>
       window.__BASE_PATH__ = ''
+      window.__GIS_CLIENT_ID__ = ''
     </script>
+    <!-- Google Identity Services (GIS) for browser-side channel sync.
+         NOTE: SRI (integrity=) cannot be applied to this script because Google
+         updates it in-place and does not publish a stable hash. This is a known
+         trade-off of using Google's hosted GIS SDK. -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>
   <body>

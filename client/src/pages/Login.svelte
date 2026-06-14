@@ -1,14 +1,8 @@
-<script>
-	import config from '$lib/config.js';
-</script>
-
 <div class="login-page">
 	<div class="login-card">
 		<h1>youtube-sub-feed</h1>
 		<p>登録チャンネルの最新動画を時系列で閲覧</p>
-		<a class="login-btn" href="{config.path.api}/auth/login">
-			Googleでログイン
-		</a>
+		<p class="note">Cloudflare Access で認証してアクセスしてください。</p>
 	</div>
 </div>
 
@@ -34,20 +28,11 @@
 		font-size: var(--fs-xl)
 
 	p
-		margin: 0 0 var(--sp-5)
+		margin: 0 0 var(--sp-3)
 		color: var(--c-text-sub)
 		font-size: var(--fs-sm)
 
-.login-btn
-	display: inline-block
-	padding: var(--sp-3) var(--sp-5)
-	background: var(--c-accent)
-	color: white
-	border-radius: var(--radius-md)
-	font-size: var(--fs-md)
-	text-decoration: none
-
-	&:hover
-		background: var(--c-accent-hover)
-		color: white
+.note
+	font-size: var(--fs-xs) !important
+	color: var(--c-text-muted) !important
 </style>

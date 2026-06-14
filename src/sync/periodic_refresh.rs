@@ -1,8 +1,6 @@
 use crate::notify::notify_warning;
 use crate::state::AppState;
-use crate::sync::{channel_sync, video_fetcher};
 use crate::websub::{hub, signature};
-use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 const REFRESH_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
@@ -11,11 +9,12 @@ const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
 /// Spawn the periodic refresh loop.
 ///
 /// Runs once immediately on startup, then every 24 hours:
-///   1. Sync subscription list with YouTube (add/remove channels)
-///   2. Unsubscribe removed channels from WebSub hub
-///   3. Subscribe new channels to WebSub hub
-///   4. Fetch latest videos for all channels via PlaylistItems.list
-///   5. Renew WebSub subscriptions nearing expiry
+///   1. Subscribe new channels (channels without WebSub row) to WebSub hub
+///   2. Renew WebSub subscriptions nearing expiry
+///
+/// NOTE: Since OAuth has been removed, this loop no longer fetches video data
+/// via the YouTube Data API. New videos arrive exclusively via WebSub push
+/// notifications. The periodic loop focuses on WebSub subscription health.
 pub fn start(state: AppState) {
     tokio::spawn(async move {
         tracing::info!("[refresh] Starting periodic refresh worker (24h cycle)");
@@ -28,71 +27,12 @@ pub fn start(state: AppState) {
 }
 
 async fn run_once(state: &AppState) {
-    let (user_id, access_token) = super::wait_for_token_with_user(state).await;
-    super::wait_for_quota(state).await;
-
-    // 1. Pre-fetch existing subscription secrets. We need these after sync_subscriptions
-    // CASCADE-deletes the channel_subscriptions rows for removed channels, both to send
-    // the unsubscribe request to the hub and to later accept its verification GET.
-    // (See routes/websub.rs: unsubscribe verification requires a 'pending_unsubscribe' row.)
-    let secrets_before: HashMap<String, String> = {
-        let conn = state.db.lock().unwrap();
-        let result = match conn.prepare("SELECT channel_id, hub_secret FROM channel_subscriptions")
-        {
-            Ok(mut stmt) => stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => HashMap::new(),
-        };
-        result
-    };
-
-    // 2. Sync subscription list
-    let sync_result = match channel_sync::sync_subscriptions(state, user_id, &access_token).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("[refresh] sync_subscriptions error: {}", e);
-            return;
-        }
-    };
-
-    // 3. Unsubscribe removed channels from hub (best-effort).
-    //
-    // The DB row was already CASCADE-deleted by sync_subscriptions, and the verification
-    // endpoint requires a 'pending_unsubscribe' row to accept the DELETE (to prevent
-    // third-party abuse of the public callback). Consequence: the hub's unsubscribe
-    // verification GET will 404 here, so the hub retains the subscription until its
-    // lease expires (~5 days). During that window hub pushes still arrive but hit
-    // the "unsubscribed channel" branch in notification() and return 404 harmlessly.
-    //
-    // The security trade-off (no arbitrary unsubscribe) is strictly more important
-    // than the cleanup trade-off (zombie subscription for ≤5 days).
     let callback = state.config.websub_callback_url.clone();
-    for ch_id in &sync_result.removed {
-        let secret = secrets_before.get(ch_id).cloned().unwrap_or_default();
-        if let Err(e) = hub::unsubscribe(&state.http, ch_id, &callback, &secret).await {
-            tracing::warn!("[refresh] unsubscribe failed for {}: {}", ch_id, e);
-        }
-    }
 
-    // 4. Subscribe newly added channels to hub + fetch their initial videos.
-    // The initial fetch closes the window between DB insert and the first WebSub push.
-    let added_set: HashSet<&str> = sync_result.added.iter().map(String::as_str).collect();
-    for ch_id in &sync_result.added {
-        register_new_subscription(state, ch_id, &callback).await;
-        video_fetcher::fetch_channel_videos(state, ch_id, &access_token).await;
-    }
-
-    // 4.5. Backfill: subscribe any channel that lives in `channels` but has no
-    // `channel_subscriptions` row. This recovers from migrations from the legacy
-    // RSS-pull era and from any drift caused by manual DB edits or past failures
-    // where the subscribe POST never landed in the DB.
-    //
-    // Backfilled channels are deliberately NOT added to the skip set below: this
-    // step only sends a subscribe POST (no initial fetch), so refresh_existing_channels
-    // should still run for them. If hub verification later fails for any reason,
-    // the 24-hour API scan remains a redundancy net for new videos.
+    // 1. Backfill: subscribe any channel that lives in `channels` but has no
+    //    `channel_subscriptions` row. This recovers from migrations and from any
+    //    drift caused by manual DB edits or past failures where the subscribe
+    //    POST never landed in the DB.
     let backfill_ids = find_channels_missing_subscription(state);
     if !backfill_ids.is_empty() {
         tracing::info!(
@@ -104,12 +44,7 @@ async fn run_once(state: &AppState) {
         register_new_subscription(state, ch_id, &callback).await;
     }
 
-    // 5. Safety-net refresh for all OTHER channels (added ones were already fetched in step 4).
-    // WebSub occasionally misses pushes (lease expiry, hub outages, server restarts);
-    // this 24-hour scan catches anything that slipped through.
-    refresh_existing_channels(state, &access_token, &added_set).await;
-
-    // 6. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
+    // 2. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
     renew_expiring_subscriptions(state, &callback).await;
 }
 
@@ -131,7 +66,7 @@ fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
     result
 }
 
-async fn register_new_subscription(state: &AppState, channel_id: &str, callback: &str) {
+pub(crate) async fn register_new_subscription(state: &AppState, channel_id: &str, callback: &str) {
     // If a subscription already exists, preserve its secret: rotating it here creates
     // a window where hub pushes (still signed with the old secret) fail HMAC verification
     // until the hub re-verifies with the new secret.
@@ -200,41 +135,6 @@ async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &st
     .await;
 }
 
-async fn refresh_existing_channels(state: &AppState, access_token: &str, skip: &HashSet<&str>) {
-    let channel_ids: Vec<String> = {
-        let conn = state.db.lock().unwrap();
-        let result = match conn.prepare("SELECT id FROM channels") {
-            Ok(mut stmt) => stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
-        result
-    };
-
-    let targets: Vec<&String> = channel_ids
-        .iter()
-        .filter(|id| !skip.contains(id.as_str()))
-        .collect();
-
-    if targets.is_empty() {
-        return;
-    }
-
-    tracing::info!(
-        "[refresh] Scanning {} channels via PlaylistItems.list",
-        targets.len()
-    );
-
-    for channel_id in targets {
-        super::wait_for_quota(state).await;
-        // Reuses full fetch pipeline (PlaylistItems -> Videos.list -> UUSH shorts detection)
-        // so new videos are correctly tagged with duration, is_livestream, and is_short.
-        video_fetcher::fetch_channel_videos(state, channel_id, access_token).await;
-    }
-}
-
 async fn renew_expiring_subscriptions(state: &AppState, callback: &str) {
     let threshold = (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -269,21 +169,18 @@ async fn renew_expiring_subscriptions(state: &AppState, callback: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
 
     // Periodic Refresh Spec
     //
-    // Runs every 24 hours. Combines:
-    // - Subscription list sync (new/removed channels in YouTube account)
-    // - WebSub subscribe/unsubscribe for diffs
-    // - Full PlaylistItems.list scan (safety net for missed WebSub pushes)
-    // - Videos.list batch for new videos without duration
-    // - Subscription renewal for entries within 2 days of expiry
+    // Runs every 24 hours. OAuth-free since the server no longer holds tokens.
+    // Responsibilities:
+    //   1. WebSub backfill: subscribe channels missing a channel_subscriptions row
+    //   2. WebSub renewal: re-subscribe entries within 2 days of expiry
     //
-    // Design: WebSub callbacks already enrich pushed videos in seconds (LIVE
-    // status, members-only, etc.), so this scan exists purely as a redundancy
-    // net for hub outages, lease expiry windows, and server downtime. A daily
-    // cadence keeps quota at ~200 units/day for the safety net while still
-    // catching anything that slipped through within 24 hours.
+    // New video discovery is entirely WebSub-push driven. duration, is_short,
+    // and is_members_only remain NULL/0 until the browser sync provides updates
+    // (or they are filed via WebSub Atom data).
 
     #[test]
     fn refresh_interval_is_24h() {
@@ -403,44 +300,6 @@ mod tests {
             ids,
             vec!["UC_orphan_1".to_string(), "UC_orphan_2".to_string()]
         );
-    }
-
-    #[test]
-    fn refresh_existing_channels_target_excludes_skip_set() {
-        // The safety-net refresh must not re-fetch channels that were just fetched
-        // in the `added` path (step 4 of run_once). Regression guard for the
-        // double-fetch quota waste (1 unit per added channel per cycle).
-        let state = AppState::test();
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        {
-            let conn = state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES ('UC_a', 'A', ?1), ('UC_b', 'B', ?1), ('UC_c', 'C', ?1)",
-                [&now],
-            )
-            .unwrap();
-        }
-
-        let skip_owned = ["UC_b".to_string()];
-        let skip: HashSet<&str> = skip_owned.iter().map(String::as_str).collect();
-
-        let channel_ids: Vec<String> = {
-            let conn = state.db.lock().unwrap();
-            let mut stmt = conn.prepare("SELECT id FROM channels").unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect()
-        };
-        let targets: Vec<&String> = channel_ids
-            .iter()
-            .filter(|id| !skip.contains(id.as_str()))
-            .collect();
-
-        assert_eq!(targets.len(), 2);
-        assert!(targets.iter().any(|id| id.as_str() == "UC_a"));
-        assert!(targets.iter().any(|id| id.as_str() == "UC_c"));
-        assert!(!targets.iter().any(|id| id.as_str() == "UC_b"));
     }
 
     #[tokio::test]

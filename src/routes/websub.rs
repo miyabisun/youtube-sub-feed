@@ -212,33 +212,12 @@ pub async fn notification(
         return StatusCode::OK;
     }
 
-    // Push delivered new videos. Spawn enrichment (details + members-only)
-    // so the hub gets its 200 OK without waiting on the YouTube API.
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        enrich_pushed_videos(state_clone, channel_id, new_video_ids).await;
-    });
+    // NOTE: OAuth has been removed. Video enrichment (duration, is_short,
+    // is_members_only, is_livestream) via YouTube Data API is no longer performed
+    // on push. Those fields remain NULL/0 as set by the WebSub Atom payload.
+    // duration and is_livestream are populated only if the Atom entry carries them.
 
     StatusCode::OK
-}
-
-async fn enrich_pushed_videos(state: AppState, channel_id: String, new_video_ids: Vec<String>) {
-    let Some(token) = crate::sync::token::get_valid_access_token(&state).await else {
-        tracing::debug!(
-            "[websub] no token, skipping enrichment for {} (will be re-checked at next 24h refresh)",
-            channel_id
-        );
-        return;
-    };
-
-    // Run details (Videos.list) and membership (UUMO playlist) checks in parallel:
-    // both need the same token, both are idempotent, and joining them halves the
-    // wall-clock latency before the row is fully feed-ready.
-    let details_fut =
-        crate::sync::video_fetcher::backfill_video_details(&state, &new_video_ids, &token);
-    let members_fut =
-        crate::sync::video_fetcher::refresh_members_only_flags(&state, &channel_id, &token);
-    tokio::join!(details_fut, members_fut);
 }
 
 fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {

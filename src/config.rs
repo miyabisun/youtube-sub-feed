@@ -4,9 +4,9 @@ use std::env;
 pub struct Config {
     pub port: u16,
     pub db_path: String,
-    pub google_client_id: String,
-    pub google_client_secret: String,
-    pub google_redirect_uri: String,
+    /// Google Identity Services client ID (public, used by browser-side sync).
+    /// Not secret — safe to embed in client JS.
+    pub gis_client_id: String,
     pub discord_webhook_url: Option<String>,
     pub websub_callback_url: String,
     pub is_production: bool,
@@ -21,10 +21,8 @@ impl Config {
 
         let db_path = env::var("DATABASE_PATH").unwrap_or_else(|_| "./feed.db".to_string());
 
-        let google_client_id = env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
-        let google_client_secret = env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default();
-        let google_redirect_uri = env::var("GOOGLE_REDIRECT_URI")
-            .unwrap_or_else(|_| "http://localhost:3000/api/auth/callback".to_string());
+        // GIS client ID for browser-side OAuth sync (public, not secret).
+        let gis_client_id = env::var("GIS_CLIENT_ID").unwrap_or_default();
 
         let discord_webhook_url = env::var("DISCORD_WEBHOOK_URL")
             .ok()
@@ -37,18 +35,16 @@ impl Config {
             .map(|v| v == "production")
             .unwrap_or(false);
 
-        if google_client_id.is_empty() || google_client_secret.is_empty() {
-            tracing::warn!(
-                "GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set. OAuth login will not work."
+        if gis_client_id.is_empty() {
+            tracing::info!(
+                "GIS_CLIENT_ID not set. Browser-side channel sync will not work until it is configured."
             );
         }
 
         Self {
             port,
             db_path,
-            google_client_id,
-            google_client_secret,
-            google_redirect_uri,
+            gis_client_id,
             discord_webhook_url,
             websub_callback_url,
             is_production,

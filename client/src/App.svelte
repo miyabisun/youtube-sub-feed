@@ -20,6 +20,10 @@
 		}
 		checking = false;
 
+		// /api/auth/me returns 401 when:
+		// - Production: Cloudflare Access did not authenticate (shouldn't happen if CF Access is configured)
+		// - Development: DB is empty (no users yet)
+		// In both cases, show the login page which explains the CF Access requirement.
 		if (!authenticated && router.index !== 4) {
 			navigate('/login');
 		}

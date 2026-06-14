@@ -15,42 +15,38 @@ A personal web app for browsing your YouTube subscriptions chronologically, with
 
 - [Rust](https://rustup.rs/) (stable)
 - [Node.js](https://nodejs.org/) v22+ (for frontend build)
-- A Google account with YouTube subscriptions
+- A Cloudflare account (Cloudflare Access is used for authentication)
 
 ## Setup
 
-### 1. Google Cloud Project
+### 1. Google Cloud Project (only if using the channel sync button)
 
-You need a Google Cloud project with the YouTube Data API enabled and OAuth 2.0 credentials configured.
+If you want to use the "Channel Sync (YouTube)" button in the header menu, you need a GIS client ID.
+You can skip this step if you only add channels manually by channel ID.
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a new project (or select an existing one)
-3. Navigate to **APIs & Services > Library**
-4. Search for **YouTube Data API v3** and click **Enable**
-5. Open **Google Auth platform** from the left menu and configure the OAuth consent screen
-   1. **Branding**: enter an app name (e.g. "youtube-sub-feed") and support email
-   2. **Audience**: select **External** → add your own Google email address as a test user
-   3. **Data Access**: click **Add or remove scopes** and add `https://www.googleapis.com/auth/youtube.readonly`
-6. Navigate to **APIs & Services > Credentials** from the left menu
-7. Click **Create Credentials > OAuth client ID**
+3. Navigate to **APIs & Services > Library** and enable **YouTube Data API v3**
+4. Open **Google Auth platform** from the left menu and configure the OAuth consent screen
+   - **Audience**: select **External** → add your own Google email address as a test user
+   - **Data Access**: add `https://www.googleapis.com/auth/youtube.readonly`
+5. Navigate to **APIs & Services > Credentials** from the left menu
+6. Click **Create Credentials > OAuth client ID**
    - Application type: **Web application**
-   - Name: anything (e.g. "youtube-sub-feed")
-   - Authorized JavaScript origins: (leave empty)
-   - Authorized redirect URIs: add `http://localhost:3000/api/auth/callback`
-8. Copy the **Client ID** and **Client Secret**
+   - Authorized JavaScript origins: `http://localhost:3000` (for development)
+7. Copy the **Client ID** and set it as `GIS_CLIENT_ID`
 
-> **Note:** While the app is in "Testing" status on the consent screen, only the test users you added can log in. This is fine for personal use.
+> **Note:** No client secret is required. The browser-side GIS (Google Identity Services) obtains a short-lived token and never sends or stores it on the server. Adding yourself as a test user allows usage via the "unverified app" warning screen.
 
 ### 2. Configure
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Copy `.env.example` to `.env` and fill in your settings:
 
 ```env
 PORT=3000
 DATABASE_PATH=./feed.db
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
-GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/callback
+GIS_CLIENT_ID=your-client-id.apps.googleusercontent.com
+WEBSUB_CALLBACK_URL=http://localhost:3000/api/websub/callback
 ```
 
 ### 3. Start the Server
@@ -67,7 +63,7 @@ cargo build --release
 ./target/release/youtube-sub-feed
 ```
 
-Open `http://localhost:3000`, click "Google Login", and authorize. The app will automatically sync your subscriptions and start fetching videos.
+Open `http://localhost:3000`. In development, the first DB user is automatically authenticated (devbypass). In production, Cloudflare Access handles authentication.
 
 ### 4. Discord Notifications (Optional)
 
@@ -82,7 +78,7 @@ Add to `.env`:
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx
 ```
 
-Restart the server. An embed will be sent for each new video detected during polling.
+Restart the server. An embed will be sent for each new video detected via WebSub push.
 
 ## Docker
 
@@ -97,15 +93,13 @@ docker run -d \
   youtube-sub-feed
 ```
 
-For production, update `GOOGLE_REDIRECT_URI` in `.env` to match your actual domain (e.g. `https://feed.example.com/api/auth/callback`), and add the same URI to the authorized redirect URIs in Google Cloud Console.
+For production, place Cloudflare Access in front of the app. See `docs/deploy.md` for details.
 
 ## How It Works
 
-- On first login, the app syncs all your YouTube subscriptions and fetches recent videos
-- Two polling loops run in the background:
-  - **New video detection** (15 min cycle): RSS-First strategy for all `show_livestreams=0` channels — only calls the YouTube API when RSS detects new videos
-  - **Livestream detection** (5 min cycle): API-direct polling for `show_livestreams=1` channels, with livestream end detection
-- Subscription list syncs every 10 minutes
+- Channels are registered manually (by channel ID) or bulk-imported via the "Channel Sync (YouTube)" button in the header menu
+- On registration, a WebSub (PubSubHubbub) subscription is automatically set up to receive push notifications for new videos
+- New video detection runs via WebSub push as the primary mechanism — zero Google API calls required
 - Videos can be organized into groups, hidden via swipe, and filtered by type (Shorts, livestreams)
 
 ## Environment Variables
@@ -114,9 +108,8 @@ For production, update `GOOGLE_REDIRECT_URI` in `.env` to match your actual doma
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
 | `DATABASE_PATH` | `./feed.db` | SQLite database file path |
-| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID (required) |
-| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret (required) |
-| `GOOGLE_REDIRECT_URI` | `http://localhost:3000/api/auth/callback` | OAuth callback URL |
+| `GIS_CLIENT_ID` | — | Google Identity Services client ID (for channel sync button; public value, no secret required) |
+| `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub notification endpoint (production requires a public HTTPS URL) |
 | `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL (optional) |
 
 ## Commands

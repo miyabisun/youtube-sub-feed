@@ -1,7 +1,6 @@
 use youtube_sub_feed::cache;
 use youtube_sub_feed::config::Config;
 use youtube_sub_feed::db;
-use youtube_sub_feed::quota;
 use youtube_sub_feed::routes;
 use youtube_sub_feed::state::AppState;
 use youtube_sub_feed::sync;
@@ -18,14 +17,12 @@ async fn main() {
     let conn = db::open(&config.db_path);
     let cache = Arc::new(cache::Cache::new());
     let http = reqwest::Client::new();
-    let quota = Arc::new(quota::QuotaState::new());
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         cache: cache.clone(),
         config: config.clone(),
         http,
-        quota,
     };
 
     cache::start_sweep(cache);
