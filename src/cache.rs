@@ -16,6 +16,7 @@ pub struct Cache {
 }
 
 impl Cache {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             store: Mutex::new(HashMap::new()),

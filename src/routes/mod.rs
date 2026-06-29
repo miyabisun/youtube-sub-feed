@@ -92,28 +92,37 @@ pub fn build_router(state: AppState) -> Router {
         ));
 
     let gis_client_id = state.config.gis_client_id.clone();
-    let serve_static = ServeDir::new("client/build").fallback(get(move || {
-        let id = gis_client_id.clone();
-        async move { spa_fallback(&id) }
-    }));
+    let serve_static = ServeDir::new("client/build")
+        .append_index_html_on_directories(false)
+        .fallback(get(move || {
+            let id = gis_client_id.clone();
+            async move { render_spa_index(&id) }
+        }));
 
     Router::new()
         .merge(public)
         .merge(protected)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route("/", get(spa_index))
+        .route("/index.html", get(spa_index))
         .fallback_service(serve_static)
         .with_state(state)
 }
 
-fn spa_fallback(gis_client_id: &str) -> impl IntoResponse {
+async fn spa_index(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    render_spa_index(&state.config.gis_client_id)
+}
+
+fn render_spa_index(gis_client_id: &str) -> axum::response::Response {
     match spa::get_index_html(gis_client_id) {
-        Some(html) => (
-            [(header::CACHE_CONTROL, "no-store")],
-            Html(html),
-        ).into_response(),
+        Some(html) => ([(header::CACHE_CONTROL, "no-store")], Html(html)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({"error": "Frontend not built. Run: cd client && npm install && npx vite build"})),
+            axum::Json(serde_json::json!({
+                "error": "Frontend not built. Run: cd client && npm install && npx vite build"
+            })),
         )
             .into_response(),
     }
@@ -121,6 +130,94 @@ fn spa_fallback(gis_client_id: &str) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
+    mod spa_injection {
+        use crate::routes::build_router;
+        use crate::state::AppState;
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        const TEST_GIS_ID: &str = "test-client-id.apps.googleusercontent.com";
+        const INJECTED: &str =
+            "window.__GIS_CLIENT_ID__ = 'test-client-id.apps.googleusercontent.com'";
+        const PLACEHOLDER: &str = "window.__GIS_CLIENT_ID__ = ''";
+
+        fn require_built_asset(rel: &str) {
+            assert!(
+                std::path::Path::new(rel).exists(),
+                "{rel} not found. Run: cd client && npx vite build"
+            );
+        }
+
+        async fn get_response(uri: &str) -> axum::http::Response<axum::body::Body> {
+            let mut state = AppState::test();
+            state.config.gis_client_id = TEST_GIS_ID.to_string();
+            let app = build_router(state);
+            let req = Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            app.oneshot(req).await.unwrap()
+        }
+
+        async fn body_string(resp: axum::http::Response<axum::body::Body>) -> String {
+            let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        async fn assert_html_has_injected_gis_id(uri: &str) {
+            require_built_asset("client/build/index.html");
+            let resp = get_response(uri).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains(INJECTED),
+                "GET {uri} must return HTML with injected GIS client ID"
+            );
+            assert!(
+                !body.contains(PLACEHOLDER),
+                "GET {uri} must not contain the un-injected placeholder"
+            );
+        }
+
+        #[tokio::test]
+        async fn root_path_returns_html_with_injected_gis_client_id() {
+            assert_html_has_injected_gis_id("/").await;
+        }
+
+        #[tokio::test]
+        async fn index_html_path_returns_html_with_injected_gis_client_id() {
+            assert_html_has_injected_gis_id("/index.html").await;
+        }
+
+        #[tokio::test]
+        async fn unknown_spa_route_returns_html_with_injected_gis_client_id() {
+            assert_html_has_injected_gis_id("/channels").await;
+        }
+
+        #[tokio::test]
+        async fn static_asset_is_served_without_html_injection() {
+            require_built_asset("client/build/favicon.svg");
+            let resp = get_response("/favicon.svg").await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            assert!(
+                content_type.contains("svg"),
+                "GET /favicon.svg must have SVG content-type, got: {content_type}"
+            );
+            let body = body_string(resp).await;
+            assert!(
+                !body.contains("__GIS_CLIENT_ID__"),
+                "GET /favicon.svg must not contain __GIS_CLIENT_ID__ injection"
+            );
+        }
+    }
+
     // API Endpoints Spec
     //
     // Defines all API endpoint paths, HTTP methods, and auth requirements.
