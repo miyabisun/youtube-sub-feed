@@ -4,6 +4,7 @@
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import Toast from '$lib/components/Toast.svelte';
+	import { toUserMessage } from '$lib/sync-error-message.js';
 
 	let groups = $derived(getGroups());
 	let menuOpen = $state(false);
@@ -83,7 +84,7 @@
 			toast = { message: `チャンネル同期完了 (追加: ${added}, 削除: ${removed})`, type: 'success' };
 		} catch (e) {
 			console.error('[sync] channel sync failed:', e);
-			toast = { message: `チャンネル同期に失敗しました: ${e.message}`, type: 'error' };
+			toast = { message: toUserMessage(e), type: 'error' };
 		} finally {
 			syncing = false;
 		}
@@ -114,7 +115,7 @@
 					reject(new Error(err?.message || 'token request cancelled'));
 				},
 			});
-			client.requestToken();
+			client.requestAccessToken();
 		});
 	}
 
@@ -141,7 +142,7 @@
 
 			if (!res.ok) {
 				const body = await res.json().catch(() => ({}));
-				throw new Error(body?.error?.message || `YouTube API error: ${res.status}`);
+				throw new Error(`YouTube API error: ${body?.error?.message || res.status}`);
 			}
 
 			const data = await res.json();
