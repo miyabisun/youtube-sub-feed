@@ -5,6 +5,7 @@
 	import { videoThumbnail } from '$lib/youtube-thumbnail.js';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 
 	let groups = $state([]);
 	let channels = $state([]);
@@ -18,6 +19,10 @@
 	// Drag state
 	let dragIndex = $state(null);
 	let dragOverIndex = $state(null);
+
+	// Pending group delete confirmation (two-step inline, matches Channels)
+	let pendingDeleteGroupId = $state(null);
+	let deletingGroup = $state(false);
 
 	// Accordion state
 	let expandedChannel = $state(null);
@@ -76,15 +81,28 @@
 		}
 	}
 
+	function confirmDeleteGroup(id) {
+		pendingDeleteGroupId = id;
+	}
+
+	function cancelDeleteGroup() {
+		pendingDeleteGroupId = null;
+	}
+
 	async function deleteGroup(id) {
+		if (deletingGroup) return;
+		deletingGroup = true;
 		try {
 			await fetcher(`${config.path.api}/groups/${id}`, { method: 'DELETE' });
 			groups = groups.filter((g) => g.id !== id);
 			setGroups(groups);
 			if (selectedGroup === id) selectedGroup = null;
+			pendingDeleteGroupId = null;
 			toast = { message: '削除しました', type: 'success' };
 		} catch (e) {
 			toast = { message: e.message, type: 'error' };
+		} finally {
+			deletingGroup = false;
 		}
 	}
 
@@ -201,7 +219,12 @@
 						ondrop={() => onDrop(i)}
 						ondragend={onDragEnd}
 					>
-						<span class="drag-handle">⠿</span>
+						<span class="drag-handle" aria-hidden="true">
+							<Icon>
+								<circle cx="9" cy="6" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="9" cy="18" r="1" />
+								<circle cx="15" cy="6" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="18" r="1" />
+							</Icon>
+						</span>
 						{#if editingGroup?.id === group.id}
 							<input
 								class="edit-input"
@@ -217,7 +240,14 @@
 						{/if}
 						<div class="group-actions">
 							<button class="btn-assign" class:active={selectedGroup === group.id} onclick={() => selectGroup(group.id)}>割当</button>
-							<button class="btn-delete" onclick={() => deleteGroup(group.id)}>削除</button>
+							{#if pendingDeleteGroupId === group.id}
+								<button class="delete-confirm" onclick={() => deleteGroup(group.id)} disabled={deletingGroup}>
+									{deletingGroup ? '削除中...' : '削除確認'}
+								</button>
+								<button class="delete-cancel" onclick={cancelDeleteGroup}>キャンセル</button>
+							{:else}
+								<button class="btn-delete" onclick={() => confirmDeleteGroup(group.id)}>削除</button>
+							{/if}
 						</div>
 					</div>
 				{/each}
@@ -288,10 +318,10 @@
 	padding: var(--sp-3) var(--sp-4)
 
 .section
-	margin-bottom: var(--sp-6)
+	margin-bottom: var(--sp-5)
 
 	h2
-		font-size: var(--fs-lg)
+		font-size: var(--fs-xl)
 		margin: 0 0 var(--sp-4)
 
 .create-group
@@ -306,16 +336,15 @@
 		border: 1px solid var(--c-border)
 		border-radius: var(--radius-md)
 		color: var(--c-text)
-		font-size: var(--fs-md)
+		font-size: var(--fs-lg)
 
 		&:focus
-			outline: none
 			border-color: var(--c-accent)
 
 	button
 		padding: var(--sp-3) var(--sp-4)
 		background: var(--c-accent)
-		color: white
+		color: var(--c-on-accent)
 		border: none
 		border-radius: var(--radius-md)
 		cursor: pointer
@@ -342,10 +371,11 @@
 		border-color: var(--c-accent)
 
 .drag-handle
+	display: inline-flex
+	align-items: center
 	cursor: grab
 	color: var(--c-text-muted)
 	user-select: none
-	font-size: var(--fs-lg)
 
 .group-name
 	flex: 1
@@ -358,7 +388,7 @@
 	border: 1px solid var(--c-accent)
 	border-radius: var(--radius-sm)
 	color: var(--c-text)
-	font-size: var(--fs-md)
+	font-size: var(--fs-lg)
 
 .group-actions
 	display: flex
@@ -371,6 +401,20 @@
 		cursor: pointer
 		font-size: var(--fs-xs)
 		background: transparent
+
+	.delete-confirm
+		color: var(--c-on-accent)
+		background: var(--c-danger)
+		border: none
+		white-space: nowrap
+
+		&:disabled
+			opacity: 0.5
+			cursor: wait
+
+	.delete-cancel
+		color: var(--c-text-sub)
+		white-space: nowrap
 
 .btn-assign
 	color: var(--c-text-sub)
@@ -533,7 +577,7 @@
 .save-btn
 	padding: var(--sp-3) var(--sp-5)
 	background: var(--c-accent)
-	color: white
+	color: var(--c-on-accent)
 	border: none
 	border-radius: var(--radius-md)
 	cursor: pointer

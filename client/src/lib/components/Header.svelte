@@ -4,6 +4,7 @@
 	import config from '$lib/config.js';
 	import fetcher from '$lib/fetcher.js';
 	import Toast from '$lib/components/Toast.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 	import { toUserMessage } from '$lib/sync-error-message.js';
 
 	let groups = $derived(getGroups());
@@ -177,9 +178,11 @@
 	</nav>
 	<div class="menu-wrapper">
 		<button class="menu-button" onclick={toggleMenu} aria-label="メニュー">
-			<span class="hamburger"></span>
-			<span class="hamburger"></span>
-			<span class="hamburger"></span>
+			<Icon>
+				<line x1="3" y1="6" x2="21" y2="6" />
+				<line x1="3" y1="12" x2="21" y2="12" />
+				<line x1="3" y1="18" x2="21" y2="18" />
+			</Icon>
 		</button>
 		{#if menuOpen}
 			<button class="menu-overlay" onclick={closeMenu} aria-label="メニューを閉じる"></button>
@@ -223,7 +226,6 @@ header
 	font-size: var(--fs-sm)
 
 	&:focus
-		outline: none
 		border-color: var(--c-accent)
 
 .nav-tabs
@@ -261,21 +263,13 @@ header
 
 .menu-button
 	display: flex
-	flex-direction: column
 	justify-content: center
 	align-items: center
-	gap: 4px
 	padding: var(--sp-3) var(--sp-4)
 	background: none
 	border: none
+	color: var(--c-text-sub)
 	cursor: pointer
-
-.hamburger
-	display: block
-	width: 18px
-	height: 2px
-	background: var(--c-text-sub)
-	border-radius: 1px
 
 .menu-overlay
 	position: fixed
@@ -291,8 +285,8 @@ header
 	top: 100%
 	background: var(--c-surface)
 	border: 1px solid var(--c-border)
-	border-radius: var(--radius-md)
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15)
+	border-radius: var(--radius-lg)
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25)
 	z-index: 10
 	min-width: 160px
 
@@ -318,10 +312,10 @@ header
 		color: var(--c-text)
 
 	&:first-child
-		border-radius: var(--radius-md) var(--radius-md) 0 0
+		border-radius: var(--radius-lg) var(--radius-lg) 0 0
 
 	&:last-child
-		border-radius: 0 0 var(--radius-md) var(--radius-md)
+		border-radius: 0 0 var(--radius-lg) var(--radius-lg)
 
 .menu-action
 	&:disabled
@@ -329,7 +323,7 @@ header
 		cursor: wait
 		background: none
 
-@media (max-width: 799px)
+@media (max-width: 767px)
 	.group-select
 		display: block
 

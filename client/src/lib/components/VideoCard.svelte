@@ -77,8 +77,8 @@
 	position: absolute
 	bottom: var(--sp-2)
 	right: var(--sp-2)
-	background: rgba(0, 0, 0, 0.8)
-	color: #fff
+	background: var(--c-scrim-strong)
+	color: var(--c-on-scrim)
 	padding: 1px var(--sp-2)
 	border-radius: var(--radius-sm)
 	font-size: var(--fs-xs)
@@ -122,7 +122,7 @@
 	-webkit-line-clamp: 2
 	-webkit-box-orient: vertical
 	overflow: hidden
-	font-size: var(--fs-md)
+	font-size: var(--fs-lg)
 	line-height: 1.4
 	color: inherit
 	text-decoration: none

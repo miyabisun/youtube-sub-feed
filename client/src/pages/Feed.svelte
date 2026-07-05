@@ -6,6 +6,7 @@
 	import VideoCard from '$lib/components/VideoCard.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 	import { swipeNav } from '$lib/swipe.js';
 	import { navigate } from '$lib/router.svelte.js';
 
@@ -103,12 +104,14 @@
 			<div class="play-all-bar">
 				{#if normalCount > 0}
 					<button class="play-all-btn" onclick={() => openPlayAll()}>
-						▶ 連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
+						<Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
+						連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
 					</button>
 				{/if}
 				{#if shortsCount > 0}
 					<button class="play-all-btn" onclick={() => openPlayAll(true)}>
-						▶ Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
+						<Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
+						Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
 					</button>
 				{/if}
 			</div>
@@ -164,7 +167,7 @@
 	top: var(--sp-2)
 	right: var(--sp-2)
 	padding: var(--sp-1) var(--sp-3)
-	background: rgba(0, 0, 0, 0.7)
+	background: var(--c-scrim-strong)
 	color: var(--c-text-sub)
 	border: 1px solid var(--c-border)
 	border-radius: var(--radius-sm)
@@ -193,6 +196,9 @@
 	margin-bottom: var(--sp-3)
 
 .play-all-btn
+	display: inline-flex
+	align-items: center
+	gap: var(--sp-1)
 	padding: var(--sp-2) var(--sp-4)
 	background: var(--c-surface)
 	color: var(--c-text)
@@ -206,13 +212,13 @@
 
 .empty
 	text-align: center
-	padding: var(--sp-6)
+	padding: var(--sp-5)
 	color: var(--c-text-sub)
 
 .sentinel
 	height: 1px
 
-@media (min-width: 800px)
+@media (min-width: 768px)
 	.feed
 		max-width: none
 

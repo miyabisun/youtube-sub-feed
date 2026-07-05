@@ -2,9 +2,9 @@
 
 <style lang="sass">
 .spinner
-	width: 32px
-	height: 32px
-	border: 3px solid var(--c-border)
+	width: 1.1rem
+	height: 1.1rem
+	border: 1.5px solid var(--c-border)
 	border-top-color: var(--c-accent)
 	border-radius: 50%
 	animation: spin 0.8s linear infinite

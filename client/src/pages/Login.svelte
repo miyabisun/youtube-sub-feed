@@ -16,7 +16,7 @@
 
 .login-card
 	text-align: center
-	padding: var(--sp-6)
+	padding: var(--sp-5)
 	background: var(--c-surface)
 	border: 1px solid var(--c-border)
 	border-radius: var(--radius-lg)

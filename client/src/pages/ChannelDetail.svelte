@@ -172,7 +172,7 @@
 	margin-bottom: var(--sp-3)
 
 .channel-name
-	font-size: var(--fs-lg)
+	font-size: var(--fs-xl)
 	font-weight: bold
 
 .youtube-link
@@ -258,7 +258,7 @@
 	width: 24px
 	height: 24px
 	z-index: 3
-	background: rgba(0, 0, 0, 0.7)
+	background: var(--c-scrim-strong)
 	border-radius: 50%
 	&::before, &::after
 		content: ''
@@ -288,7 +288,14 @@
 .sentinel
 	height: 1px
 
-@media (min-width: 600px)
+@media (min-width: 768px)
+	.channel-detail
+		max-width: none
+
+	.video-list
+		display: grid
+		grid-template-columns: repeat(3, 1fr)
+
 	.action-btns
 		display: block
 		position: absolute
@@ -302,7 +309,7 @@
 
 	.action-btn
 		padding: var(--sp-1) var(--sp-3)
-		background: rgba(0, 0, 0, 0.7)
+		background: var(--c-scrim-strong)
 		border: 1px solid var(--c-border)
 		border-radius: var(--radius-sm)
 		font-size: var(--fs-xs)
@@ -320,15 +327,7 @@
 			color: var(--c-accent)
 			border-color: var(--c-accent-border)
 
-@media (min-width: 800px)
-	.channel-detail
-		max-width: none
-
-	.video-list
-		display: grid
-		grid-template-columns: repeat(3, 1fr)
-
-@media (max-width: 599px)
+@media (max-width: 767px)
 	.swipe-bg
 		display: flex
 		align-items: center

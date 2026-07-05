@@ -3,6 +3,7 @@
 	import fetcher from '$lib/fetcher.js';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 	import { navigate } from '$lib/router.svelte.js';
 
 	let channels = $state([]);
@@ -172,7 +173,9 @@
 							</button>
 							<button class="delete-cancel" onclick={cancelDelete}>キャンセル</button>
 						{:else}
-							<button class="delete-button" onclick={() => confirmDelete(ch.id)} title="チャンネルを削除">✕</button>
+							<button class="delete-button" onclick={() => confirmDelete(ch.id)} aria-label="チャンネルを削除">
+								<Icon><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></Icon>
+							</button>
 						{/if}
 					</div>
 				</div>
@@ -222,13 +225,12 @@
 	font-size: var(--fs-sm)
 
 	&:focus
-		outline: none
 		border-color: var(--c-accent)
 
 .add-button
 	padding: var(--sp-2) var(--sp-4)
 	background: var(--c-accent)
-	color: #fff
+	color: var(--c-on-accent)
 	border: none
 	border-radius: var(--radius-sm)
 	font-size: var(--fs-sm)
@@ -245,7 +247,7 @@
 .add-error
 	margin: var(--sp-2) 0 0
 	font-size: var(--fs-xs)
-	color: var(--c-error, #e53e3e)
+	color: var(--c-danger)
 
 .search-bar
 	margin-bottom: var(--sp-4)
@@ -257,20 +259,22 @@
 		border: 1px solid var(--c-border)
 		border-radius: var(--radius-md)
 		color: var(--c-text)
-		font-size: var(--fs-md)
+		font-size: var(--fs-lg)
 
 		&:focus
-			outline: none
 			border-color: var(--c-accent)
 
 .channel-list
 	display: flex
 	flex-direction: column
+	gap: var(--sp-2)
 
 .channel-item
 	display: flex
 	align-items: center
-	border-bottom: 1px solid var(--c-border)
+	background: var(--c-surface)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-md)
 
 	&:hover
 		background: var(--c-overlay-1)
@@ -321,8 +325,11 @@
 		border-color: var(--c-accent-border)
 
 .delete-button
+	display: inline-flex
+	align-items: center
+	justify-content: center
 	padding: var(--sp-1) var(--sp-2)
-	font-size: var(--fs-xs)
+	font-size: var(--fs-sm)
 	color: var(--c-text-muted)
 	background: none
 	border: 1px solid transparent
@@ -331,14 +338,14 @@
 	line-height: 1
 
 	&:hover
-		color: var(--c-error, #e53e3e)
-		border-color: var(--c-error, #e53e3e)
+		color: var(--c-danger)
+		border-color: var(--c-danger)
 
 .delete-confirm
 	padding: var(--sp-1) var(--sp-2)
 	font-size: var(--fs-xs)
-	color: #fff
-	background: var(--c-error, #e53e3e)
+	color: var(--c-on-accent)
+	background: var(--c-danger)
 	border: none
 	border-radius: var(--radius-sm)
 	cursor: pointer
@@ -360,6 +367,7 @@
 
 .channel-name
 	font-size: var(--fs-md)
+	font-weight: 500
 	white-space: nowrap
 	overflow: hidden
 	text-overflow: ellipsis
