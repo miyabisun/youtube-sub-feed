@@ -44,7 +44,9 @@ pub async fn sync_subscriptions(
     let now = crate::util::now_rfc3339();
     let mut added: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
-    let mut removed_orphan_secrets: Vec<(String, String)> = Vec::new();
+    // Assigned once inside the block below (deferred init avoids an unused
+    // initial value being overwritten).
+    let removed_orphan_secrets: Vec<(String, String)>;
 
     {
         let conn = state.db.lock().unwrap();
@@ -74,32 +76,7 @@ pub async fn sync_subscriptions(
             .cloned()
             .collect();
 
-        for ch_id in &to_remove {
-            // A channel is orphaned when the only subscriber is this user.
-            let other_subscribers: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM user_channels WHERE channel_id = ?1 AND user_id != ?2",
-                    rusqlite::params![ch_id, user_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(1); // fail-safe: assume not orphaned on error
-
-            if other_subscribers == 0 {
-                // Channel will be orphaned — collect secret and mark pending.
-                if let Ok(secret) = conn.query_row(
-                    "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
-                    rusqlite::params![ch_id],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    let _ = conn.execute(
-                        "UPDATE channel_subscriptions SET verification_status = 'pending_unsubscribe'
-                         WHERE channel_id = ?1",
-                        rusqlite::params![ch_id],
-                    );
-                    removed_orphan_secrets.push((ch_id.clone(), secret));
-                }
-            }
-        }
+        removed_orphan_secrets = mark_orphaned_subscriptions_pending(&conn, user_id, &to_remove);
 
         conn.execute_batch("BEGIN")?;
 
@@ -167,6 +144,52 @@ pub async fn sync_subscriptions(
         removed,
         removed_orphan_secrets,
     })
+}
+
+/// For each channel in `to_remove` that becomes orphaned (no other subscribers),
+/// collect its WebSub `hub_secret` and mark its subscription row
+/// `verification_status = 'pending_unsubscribe'`.
+///
+/// This UPDATE MUST run BEFORE the channel (and, via CASCADE, its subscription
+/// row) is deleted, so that the hub's async verification GET can still find the
+/// row in `pending_unsubscribe` state and authorize the deletion. Returns the
+/// `(channel_id, hub_secret)` pairs the caller should send `hub::unsubscribe` for.
+///
+/// Extracted as a helper so the "mark pending before delete" side-effect is
+/// directly observable in tests (the row still exists after this call).
+fn mark_orphaned_subscriptions_pending(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    to_remove: &[String],
+) -> Vec<(String, String)> {
+    let mut removed_orphan_secrets: Vec<(String, String)> = Vec::new();
+    for ch_id in to_remove {
+        // A channel is orphaned when the only subscriber is this user.
+        let other_subscribers: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_channels WHERE channel_id = ?1 AND user_id != ?2",
+                rusqlite::params![ch_id, user_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(1); // fail-safe: assume not orphaned on error
+
+        if other_subscribers == 0 {
+            // Channel will be orphaned — collect secret and mark pending.
+            if let Ok(secret) = conn.query_row(
+                "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
+                rusqlite::params![ch_id],
+                |row| row.get::<_, String>(0),
+            ) {
+                let _ = conn.execute(
+                    "UPDATE channel_subscriptions SET verification_status = 'pending_unsubscribe'
+                     WHERE channel_id = ?1",
+                    rusqlite::params![ch_id],
+                );
+                removed_orphan_secrets.push((ch_id.clone(), secret));
+            }
+        }
+    }
+    removed_orphan_secrets
 }
 
 /// Metadata for a channel, supplied by the browser (from YouTube subscriptions response).
@@ -606,15 +629,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn pending_unsubscribe_status_set_before_cascade_delete() {
-        // The verification_status must be set to 'pending_unsubscribe' BEFORE
-        // the channel (and its subscription row) is CASCADE-deleted, so that
-        // the WebSub hub's async verification GET can still find the row.
-        // After sync, the row should already be deleted (CASCADE), but we verify
-        // that the status was written at the right time by checking the DB state
-        // within the transaction window — here we just confirm the secret was
-        // collected (which implies the UPDATE happened before the DELETE).
+    #[test]
+    fn marking_orphans_sets_pending_unsubscribe_status_and_returns_secret() {
+        // Directly exercises the "mark pending BEFORE delete" step. Because the
+        // helper does not delete anything, the subscription row is still present
+        // afterwards and its verification_status is observable — proving the
+        // UPDATE to 'pending_unsubscribe' actually ran (and would precede the
+        // CASCADE delete performed later by sync_subscriptions).
         let state = AppState::test();
         {
             let conn = state.db.lock().unwrap();
@@ -626,30 +647,79 @@ mod tests {
         }
         setup_with_subscription(&state, "UC_bye", "bye_secret");
 
-        let remote: Vec<String> = vec![];
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let secrets = {
+            let conn = state.db.lock().unwrap();
+            super::mark_orphaned_subscriptions_pending(&conn, 1, &["UC_bye".to_string()])
+        };
 
-        // Secret was collected (status was set before CASCADE delete)
-        assert!(
-            result
-                .removed_orphan_secrets
-                .iter()
-                .any(|(id, s)| id == "UC_bye" && s == "bye_secret"),
-            "pending_unsubscribe status must have been set before row was CASCADE-deleted"
+        assert_eq!(
+            secrets,
+            vec![("UC_bye".to_string(), "bye_secret".to_string())],
+            "orphaned channel's secret must be returned for hub::unsubscribe"
         );
 
-        // Channel subscription row is gone (CASCADE from channels delete)
-        let count: i64 = {
+        let status: String = {
             let conn = state.db.lock().unwrap();
             conn.query_row(
-                "SELECT COUNT(*) FROM channel_subscriptions WHERE channel_id = 'UC_bye'",
+                "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_bye'",
                 [],
                 |row| row.get(0),
             )
             .unwrap()
         };
-        assert_eq!(count, 0, "Subscription row should be CASCADE-deleted");
+        assert_eq!(
+            status, "pending_unsubscribe",
+            "status must be marked pending_unsubscribe before the row is deleted"
+        );
+    }
+
+    #[test]
+    fn marking_orphans_leaves_shared_channel_status_untouched() {
+        // A channel with another subscriber is NOT orphaned: it must not be
+        // marked pending_unsubscribe (the hub must keep pushing for the remaining
+        // subscriber).
+        let state = AppState::test();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g1', 'user1@example.com')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
+                [],
+            )
+            .unwrap();
+        }
+        setup_with_subscription(&state, "UC_shared", "shared_secret");
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (2, 'UC_shared', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let secrets = {
+            let conn = state.db.lock().unwrap();
+            super::mark_orphaned_subscriptions_pending(&conn, 1, &["UC_shared".to_string()])
+        };
+        assert!(secrets.is_empty(), "shared channel is not an orphan");
+
+        let status: String = {
+            let conn = state.db.lock().unwrap();
+            conn.query_row(
+                "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_shared'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            status, "verified",
+            "non-orphan subscription status must be left unchanged"
+        );
     }
 }

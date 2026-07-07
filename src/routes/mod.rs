@@ -220,198 +220,94 @@ mod tests {
 
     // API Endpoints Spec
     //
-    // Defines all API endpoint paths, HTTP methods, and auth requirements.
-    // Auth is now Cloudflare Access (Cf-Access-Authenticated-User-Email header),
-    // not session cookies. /api/health, /api/rss, /api/websub/callback are public.
-    // All other endpoints require auth middleware.
+    // Auth is Cloudflare Access (Cf-Access-Authenticated-User-Email header).
+    // /api/health, /api/rss, /api/websub/callback are public; every other /api/*
+    // route sits behind auth_middleware. These tests drive the *real* Router from
+    // build_router (via oneshot), so the routing/auth wiring is what's verified —
+    // not a hand-maintained inventory table.
+    mod routing {
+        use crate::routes::build_router;
+        use crate::state::AppState;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
 
-    struct Endpoint {
-        method: &'static str,
-        path: &'static str,
-        auth_required: bool,
-    }
-
-    const ENDPOINTS: &[Endpoint] = &[
-        Endpoint {
-            method: "GET",
-            path: "/api/health",
-            auth_required: false,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/auth/me",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/feed",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PATCH",
-            path: "/api/videos/:id/hide",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PATCH",
-            path: "/api/videos/:id/unhide",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/channels",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "POST",
-            path: "/api/channels",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/channels/:id/videos",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "POST",
-            path: "/api/channels/sync",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PATCH",
-            path: "/api/channels/:id",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "DELETE",
-            path: "/api/channels/:id",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/groups",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/groups/:id/channels",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "POST",
-            path: "/api/groups",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PATCH",
-            path: "/api/groups/:id",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PUT",
-            path: "/api/groups/reorder",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "DELETE",
-            path: "/api/groups/:id",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "PUT",
-            path: "/api/groups/:id/channels",
-            auth_required: true,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/rss",
-            auth_required: false,
-        },
-        Endpoint {
-            method: "GET",
-            path: "/api/websub/callback",
-            auth_required: false,
-        }, // Hub verification (echo challenge)
-        Endpoint {
-            method: "POST",
-            path: "/api/websub/callback",
-            auth_required: false,
-        }, // Hub push notification (HMAC-verified)
-    ];
-
-    mod endpoint_inventory {
-        use super::*;
-
-        #[test]
-        fn total_endpoint_count_is_21() {
-            assert_eq!(ENDPOINTS.len(), 21);
+        /// Router configured as production (Cloudflare Access enforced) with an
+        /// empty users table, so protected routes have no dev-bypass fallback.
+        fn production_router() -> axum::Router {
+            let mut state = AppState::test();
+            state.config.is_production = true;
+            build_router(state)
         }
 
-        #[test]
-        fn public_endpoints_count_is_4() {
-            // health, rss, websub/callback GET (verification), websub/callback POST (push)
-            let public_count = ENDPOINTS.iter().filter(|e| !e.auth_required).count();
-            assert_eq!(public_count, 4);
+        async fn status(method: &str, uri: &str) -> StatusCode {
+            production_router()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
         }
 
-        #[test]
-        fn all_endpoints_have_api_prefix() {
-            for ep in ENDPOINTS {
-                assert!(
-                    ep.path.starts_with("/api/"),
-                    "{} {} must have /api/ prefix",
-                    ep.method,
-                    ep.path
+        #[tokio::test]
+        async fn protected_routes_reject_unauthenticated_requests_with_401() {
+            // Without a Cf-Access header in production, auth_middleware must reject
+            // every protected route before the handler runs.
+            let protected: &[(&str, &str)] = &[
+                ("GET", "/api/auth/me"),
+                ("GET", "/api/feed"),
+                ("PATCH", "/api/videos/abc/hide"),
+                ("PATCH", "/api/videos/abc/unhide"),
+                ("GET", "/api/channels"),
+                ("POST", "/api/channels"),
+                ("GET", "/api/channels/UC1/videos"),
+                ("POST", "/api/channels/sync"),
+                ("PATCH", "/api/channels/UC1"),
+                ("DELETE", "/api/channels/UC1"),
+                ("GET", "/api/groups"),
+                ("GET", "/api/groups/1/channels"),
+                ("POST", "/api/groups"),
+                ("PATCH", "/api/groups/1"),
+                ("PUT", "/api/groups/reorder"),
+                ("DELETE", "/api/groups/1"),
+                ("PUT", "/api/groups/1/channels"),
+            ];
+            for (method, uri) in protected {
+                assert_eq!(
+                    status(method, uri).await,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {uri} must require authentication"
                 );
             }
         }
-    }
 
-    mod method_conventions {
-        use super::*;
-
-        #[test]
-        fn patch_for_partial_update() {
-            let patch: Vec<&str> = ENDPOINTS
-                .iter()
-                .filter(|e| e.method == "PATCH")
-                .map(|e| e.path)
-                .collect();
-            assert!(patch.contains(&"/api/videos/:id/hide"));
-            assert!(patch.contains(&"/api/videos/:id/unhide"));
-            assert!(patch.contains(&"/api/channels/:id"));
-            assert!(patch.contains(&"/api/groups/:id"));
+        #[tokio::test]
+        async fn public_routes_are_reachable_without_authentication() {
+            // Public routes must NOT be blocked by auth (they may still fail for
+            // their own reasons, e.g. missing query params, but never with 401).
+            let public: &[(&str, &str)] = &[
+                ("GET", "/api/health"),
+                ("GET", "/api/rss"),
+                ("GET", "/api/websub/callback"),
+                ("POST", "/api/websub/callback"),
+            ];
+            for (method, uri) in public {
+                let code = status(method, uri).await;
+                assert_ne!(
+                    code,
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {uri} must be publicly reachable (got {code})"
+                );
+            }
         }
 
-        #[test]
-        fn put_for_full_replacement() {
-            let put: Vec<&str> = ENDPOINTS
-                .iter()
-                .filter(|e| e.method == "PUT")
-                .map(|e| e.path)
-                .collect();
-            assert!(put.contains(&"/api/groups/reorder"));
-            assert!(put.contains(&"/api/groups/:id/channels"));
-        }
-
-        #[test]
-        fn delete_for_physical_deletion() {
-            let delete: Vec<_> = ENDPOINTS.iter().filter(|e| e.method == "DELETE").collect();
-            assert_eq!(delete.len(), 2);
-            let paths: Vec<&str> = delete.iter().map(|e| e.path).collect();
-            assert!(paths.contains(&"/api/groups/:id"));
-            assert!(paths.contains(&"/api/channels/:id"));
-        }
-
-        #[test]
-        fn post_for_channel_add_and_sync() {
-            let post: Vec<&str> = ENDPOINTS
-                .iter()
-                .filter(|e| e.method == "POST")
-                .map(|e| e.path)
-                .collect();
-            assert!(post.contains(&"/api/channels"));
-            assert!(post.contains(&"/api/channels/sync"));
+        #[tokio::test]
+        async fn health_endpoint_returns_ok_json() {
+            assert_eq!(status("GET", "/api/health").await, StatusCode::OK);
         }
     }
 }

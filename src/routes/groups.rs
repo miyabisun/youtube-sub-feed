@@ -391,101 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn test_group_create_and_list() {
-        let conn = setup();
-        insert_group(&conn, "Group A", 0);
-        insert_group(&conn, "Group B", 1);
-
-        let mut stmt = conn
-            .prepare("SELECT id, name, sort_order, created_at FROM groups WHERE user_id = 1 ORDER BY sort_order ASC, id ASC")
-            .unwrap();
-        let rows: Vec<(i64, String, i64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].1, "Group A");
-        assert_eq!(rows[0].2, 0);
-        assert_eq!(rows[1].1, "Group B");
-        assert_eq!(rows[1].2, 1);
-    }
-
-    #[test]
-    fn test_group_update_name() {
-        let conn = setup();
-        let id = insert_group(&conn, "Old Name", 0);
-
-        conn.execute(
-            "UPDATE groups SET name = ?1 WHERE id = ?2 AND user_id = 1",
-            params!["New Name", id],
-        )
-        .unwrap();
-
-        let name: String = conn
-            .query_row(
-                "SELECT name FROM groups WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(name, "New Name");
-    }
-
-    #[test]
-    fn test_group_delete() {
-        let conn = setup();
-        let id = insert_group(&conn, "To Delete", 0);
-
-        conn.execute(
-            "DELETE FROM groups WHERE id = ?1 AND user_id = 1",
-            params![id],
-        )
-        .unwrap();
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM groups WHERE user_id = 1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn test_group_reorder() {
-        let conn = setup();
-        let id1 = insert_group(&conn, "G1", 0);
-        let id2 = insert_group(&conn, "G2", 1);
-        let id3 = insert_group(&conn, "G3", 2);
-
-        let new_order = vec![(2_i64, id1), (0_i64, id2), (1_i64, id3)];
-        for (sort, id) in &new_order {
-            conn.execute(
-                "UPDATE groups SET sort_order = ?1 WHERE id = ?2 AND user_id = 1",
-                params![sort, id],
-            )
-            .unwrap();
-        }
-
-        let mut stmt = conn
-            .prepare("SELECT id, name, sort_order FROM groups WHERE user_id = 1 ORDER BY sort_order ASC, id ASC")
-            .unwrap();
-        let rows: Vec<(i64, String, i64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(rows[0].1, "G2");
-        assert_eq!(rows[0].2, 0);
-        assert_eq!(rows[1].1, "G3");
-        assert_eq!(rows[1].2, 1);
-        assert_eq!(rows[2].1, "G1");
-        assert_eq!(rows[2].2, 2);
-    }
-
-    #[test]
     fn test_group_channel_assignment() {
         let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
@@ -515,49 +420,6 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"UC1".to_string()));
         assert!(ids.contains(&"UC2".to_string()));
-    }
-
-    #[test]
-    fn test_group_channel_full_replace() {
-        let conn = setup();
-        insert_channel(&conn, "UC1", "Ch1");
-        insert_channel(&conn, "UC2", "Ch2");
-        let group_id = insert_group(&conn, "G1", 0);
-
-        conn.execute(
-            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
-            params!["UC1", group_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
-            params!["UC2", group_id],
-        )
-        .unwrap();
-
-        // Replace with only UC2
-        conn.execute(
-            "DELETE FROM channel_groups WHERE group_id = ?1",
-            params![group_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
-            params!["UC2", group_id],
-        )
-        .unwrap();
-
-        let mut stmt = conn
-            .prepare("SELECT channel_id FROM channel_groups WHERE group_id = ?1")
-            .unwrap();
-        let ids: Vec<String> = stmt
-            .query_map(params![group_id], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "UC2");
     }
 
     #[test]
@@ -615,5 +477,311 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
             .unwrap();
         assert_eq!(ch_count, 1, "Channel should still exist");
+    }
+
+    /// Integration tests that drive the real group handlers over HTTP (oneshot)
+    /// through auth_middleware. The acting user is the dev-bypass first DB user
+    /// (user 1). A second user (user 2) owns the "foreign" resources used to
+    /// prove per-user isolation / IDOR protection.
+    mod handler {
+        use crate::middleware::auth_middleware;
+        use crate::routes::groups::routes;
+        use crate::state::AppState;
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        /// State with user 1 (acting) and user 2 (foreign owner).
+        fn setup_state() -> AppState {
+            let state = AppState::test();
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO users (google_id, email) VALUES ('g1', 'user1@example.com')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
+                    [],
+                )
+                .unwrap();
+            }
+            state
+        }
+
+        /// Insert a group owned by `user_id` and return its id.
+        fn insert_group_for(state: &AppState, user_id: i64, name: &str, sort_order: i64) -> i64 {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (?1, ?2, ?3, '2024-01-01T00:00:00Z')",
+                rusqlite::params![user_id, name, sort_order],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        }
+
+        fn app(state: &AppState) -> axum::Router {
+            axum::Router::new()
+                .merge(routes())
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
+                ))
+                .with_state(state.clone())
+        }
+
+        async fn send(
+            state: &AppState,
+            method: &str,
+            uri: &str,
+            body: &str,
+        ) -> axum::response::Response {
+            app(state)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn create_group_auto_assigns_incrementing_sort_order_and_returns_201() {
+            let state = setup_state();
+
+            for expected_order in 0..3 {
+                let resp = send(&state, "POST", "/api/groups", r#"{"name":"G"}"#).await;
+                assert_eq!(resp.status(), StatusCode::CREATED);
+                let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    json["sort_order"].as_i64().unwrap(),
+                    expected_order,
+                    "sort_order must auto-increment via COALESCE(MAX,-1)+1"
+                );
+            }
+
+            let orders: Vec<i64> = {
+                let conn = state.db.lock().unwrap();
+                let mut stmt = conn
+                    .prepare("SELECT sort_order FROM groups WHERE user_id = 1 ORDER BY sort_order ASC")
+                    .unwrap();
+                stmt.query_map([], |row| row.get(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(orders, vec![0, 1, 2]);
+        }
+
+        #[tokio::test]
+        async fn create_group_rejects_empty_name_with_400() {
+            let state = setup_state();
+            let resp = send(&state, "POST", "/api/groups", r#"{"name":""}"#).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn update_group_does_not_touch_another_users_group() {
+            // Per-user isolation: WHERE user_id = ? means user 1's PATCH must not
+            // rename user 2's group (even though the handler returns 200 for a
+            // 0-row update).
+            let state = setup_state();
+            let foreign = insert_group_for(&state, 2, "User2 Group", 0);
+
+            let resp = send(
+                &state,
+                "PATCH",
+                &format!("/api/groups/{foreign}"),
+                r#"{"name":"Hacked"}"#,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let name: String = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT name FROM groups WHERE id = ?1",
+                    [foreign],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(name, "User2 Group", "another user's group must be unchanged");
+        }
+
+        #[tokio::test]
+        async fn delete_group_does_not_delete_another_users_group() {
+            let state = setup_state();
+            let foreign = insert_group_for(&state, 2, "User2 Group", 0);
+
+            let resp = send(&state, "DELETE", &format!("/api/groups/{foreign}"), "").await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let count: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM groups WHERE id = ?1",
+                    [foreign],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(count, 1, "another user's group must survive");
+        }
+
+        #[tokio::test]
+        async fn reorder_groups_does_not_reorder_another_users_group() {
+            let state = setup_state();
+            let foreign = insert_group_for(&state, 2, "User2 Group", 5);
+
+            // User 1 tries to reorder user 2's group id.
+            let resp = send(
+                &state,
+                "PUT",
+                "/api/groups/reorder",
+                &format!(r#"{{"order":[{foreign}]}}"#),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let sort_order: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT sort_order FROM groups WHERE id = ?1",
+                    [foreign],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                sort_order, 5,
+                "another user's group sort_order must be unchanged"
+            );
+        }
+
+        #[tokio::test]
+        async fn reorder_groups_updates_own_groups_sort_order() {
+            let state = setup_state();
+            let g1 = insert_group_for(&state, 1, "G1", 0);
+            let g2 = insert_group_for(&state, 1, "G2", 1);
+
+            // New order: g2 first (index 0), g1 second (index 1).
+            let resp = send(
+                &state,
+                "PUT",
+                "/api/groups/reorder",
+                &format!(r#"{{"order":[{g2},{g1}]}}"#),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let orders: Vec<(i64, i64)> = {
+                let conn = state.db.lock().unwrap();
+                let mut stmt = conn
+                    .prepare("SELECT id, sort_order FROM groups WHERE user_id = 1")
+                    .unwrap();
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert!(orders.contains(&(g2, 0)));
+            assert!(orders.contains(&(g1, 1)));
+        }
+
+        #[tokio::test]
+        async fn set_group_channels_full_replaces_own_group_assignments() {
+            let state = setup_state();
+            let group_id = insert_group_for(&state, 1, "G1", 0);
+            {
+                let conn = state.db.lock().unwrap();
+                for cid in ["UC1", "UC2"] {
+                    conn.execute(
+                        "INSERT INTO channels (id, title, created_at) VALUES (?1, ?1, '2024-01-01T00:00:00Z')",
+                        [cid],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO user_channels (user_id, channel_id) VALUES (1, ?1)",
+                        [cid],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', ?1)",
+                    [group_id],
+                )
+                .unwrap();
+            }
+
+            // Full-replace to only UC2.
+            let resp = send(
+                &state,
+                "PUT",
+                &format!("/api/groups/{group_id}/channels"),
+                r#"{"channelIds":["UC2"]}"#,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let ids: Vec<String> = {
+                let conn = state.db.lock().unwrap();
+                let mut stmt = conn
+                    .prepare("SELECT channel_id FROM channel_groups WHERE group_id = ?1")
+                    .unwrap();
+                stmt.query_map([group_id], |row| row.get(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(ids, vec!["UC2"]);
+        }
+
+        #[tokio::test]
+        async fn set_group_channels_rejects_foreign_group_with_404() {
+            // IDOR guard: user 1 must not be able to assign channels to a group
+            // owned by user 2. The handler checks ownership and returns NotFound.
+            let state = setup_state();
+            let foreign = insert_group_for(&state, 2, "User2 Group", 0);
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'C', '2024-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO user_channels (user_id, channel_id) VALUES (1, 'UC1')",
+                    [],
+                )
+                .unwrap();
+            }
+
+            let resp = send(
+                &state,
+                "PUT",
+                &format!("/api/groups/{foreign}/channels"),
+                r#"{"channelIds":["UC1"]}"#,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+            let count: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM channel_groups WHERE group_id = ?1",
+                    [foreign],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(count, 0, "no channels may be assigned to a foreign group");
+        }
     }
 }

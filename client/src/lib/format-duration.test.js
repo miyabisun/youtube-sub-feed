@@ -57,4 +57,19 @@ describe('formatDuration', () => {
   test('invalid format returns empty', () => {
     expect(formatDuration('invalid')).toBe('')
   })
+
+  // YouTube returns a date part for durations >= 24h (e.g. long live archives).
+  // 1 day is folded into hours (1D = 24h).
+  test('day part folds into hours (P1DT2H3M4S -> 26:03:04)', () => {
+    expect(formatDuration('P1DT2H3M4S')).toBe('26:03:04')
+  })
+
+  test('multiple days fold into hours (P2DT0H0M0S -> 48:00:00)', () => {
+    expect(formatDuration('P2DT0H0M0S')).toBe('48:00:00')
+  })
+
+  test('day part with only minutes and seconds', () => {
+    // 1 day = 24h, no explicit hours component.
+    expect(formatDuration('P1DT30M15S')).toBe('24:30:15')
+  })
 })

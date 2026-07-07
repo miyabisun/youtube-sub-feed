@@ -165,50 +165,66 @@ mod tests {
     // Feed display rules:
     // - Only show videos from channels the user subscribes to (user_channels)
     // - Exclude videos hidden by the user (user_videos.is_hidden=1)
+    // - Exclude members-only videos (is_members_only=1)
     // - Show livestreams only when user's show_livestreams=1 for that channel
     // - Sort by published_at DESC
     // - Group filter and pagination support
+    //
+    // All tests drive the real `get_feed` / `hide_video` / `unhide_video`
+    // handlers over HTTP (oneshot). Requests pass through `auth_middleware`,
+    // so the acting user comes from the dev-bypass (first DB user = user 1)
+    // unless a `Cf-Access-Authenticated-User-Email` header selects another.
 
+    use super::routes;
+    use crate::middleware::auth_middleware;
+    use crate::state::AppState;
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
     use rusqlite::params;
+    use tower::ServiceExt;
 
-    fn setup() -> rusqlite::Connection {
-        let conn = crate::db::open_memory();
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Ch1', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC2', 'Ch2', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        // User subscribes to both channels; UC1 without livestreams, UC2 with
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, show_livestreams) VALUES (1, 'UC1', 0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, show_livestreams) VALUES (1, 'UC2', 1)",
-            [],
-        )
-        .unwrap();
-        conn
+    fn setup_state() -> AppState {
+        let state = AppState::test();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Ch1', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC2', 'Ch2', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            // User subscribes to both channels; UC1 without livestreams, UC2 with
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, show_livestreams) VALUES (1, 'UC1', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, show_livestreams) VALUES (1, 'UC2', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        state
     }
 
     fn insert_video(
-        conn: &rusqlite::Connection,
+        state: &AppState,
         id: &str,
         channel_id: &str,
         published_at: &str,
         is_livestream: i64,
     ) {
+        let conn = state.db.lock().unwrap();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -223,241 +239,246 @@ mod tests {
         .unwrap();
     }
 
-    fn hide_video(conn: &rusqlite::Connection, user_id: i64, video_id: &str) {
+    fn app(state: &AppState) -> axum::Router {
+        axum::Router::new()
+            .merge(routes())
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state.clone())
+    }
+
+    /// GET /api/feed{query} as the acting user (dev bypass → first DB user),
+    /// returning the ordered list of video IDs.
+    async fn feed_ids(state: &AppState, query: &str) -> Vec<String> {
+        feed_ids_as(state, query, None).await
+    }
+
+    /// GET /api/feed as a specific user, identified via the Cf-Access header.
+    async fn feed_ids_as(state: &AppState, query: &str, email: Option<&str>) -> Vec<String> {
+        let mut builder = Request::builder().uri(format!("/api/feed{query}"));
+        if let Some(email) = email {
+            builder = builder.header("Cf-Access-Authenticated-User-Email", email);
+        }
+        let resp = app(state)
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        json.as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Create a group owned by user 1 containing `channel_id`, returning its id.
+    fn insert_group_with_channel(state: &AppState, name: &str, channel_id: &str) -> i64 {
+        let conn = state.db.lock().unwrap();
         conn.execute(
-            "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (?1, ?2, 1)
-             ON CONFLICT(user_id, video_id) DO UPDATE SET is_hidden = 1",
-            params![user_id, video_id],
+            "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (1, ?1, 0, '2024-01-01T00:00:00Z')",
+            params![name],
         )
         .unwrap();
+        let gid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
+            params![channel_id, gid],
+        )
+        .unwrap();
+        gid
     }
 
-    fn query_feed(
-        conn: &rusqlite::Connection,
-        user_id: i64,
-        limit: i64,
-        offset: i64,
-    ) -> Vec<String> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT v.id
-                 FROM videos v
-                 JOIN channels c ON v.channel_id = c.id
-                 JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-                 LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-                 WHERE COALESCE(uv.is_hidden, 0) = 0
-                   AND v.is_members_only = 0
-                   AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-                 ORDER BY v.published_at DESC
-                 LIMIT ?2 OFFSET ?3",
+    async fn hide(state: &AppState, video_id: &str) {
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/videos/{video_id}/hide"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
             )
+            .await
             .unwrap();
-        stmt.query_map(params![user_id, limit, offset], |row| {
-            row.get::<_, String>(0)
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    fn query_feed_by_group(
-        conn: &rusqlite::Connection,
-        user_id: i64,
-        group_id: i64,
-        limit: i64,
-        offset: i64,
-    ) -> Vec<String> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT v.id
-                 FROM videos v
-                 JOIN channels c ON v.channel_id = c.id
-                 JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-                 JOIN channel_groups cg ON v.channel_id = cg.channel_id
-                 LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-                 WHERE COALESCE(uv.is_hidden, 0) = 0
-                   AND v.is_members_only = 0
-                   AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-                   AND cg.group_id = ?2
-                 ORDER BY v.published_at DESC
-                 LIMIT ?3 OFFSET ?4",
+    async fn unhide(state: &AppState, video_id: &str) {
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/videos/{video_id}/unhide"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
             )
+            .await
             .unwrap();
-        stmt.query_map(params![user_id, group_id, limit, offset], |row| {
-            row.get::<_, String>(0)
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn test_feed_excludes_hidden_videos() {
-        let conn = setup();
-        insert_video(&conn, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC1", "2024-01-03T00:00:00Z", 0);
-        hide_video(&conn, 1, "v2");
+    #[tokio::test]
+    async fn feed_excludes_hidden_videos() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC1", "2024-01-03T00:00:00Z", 0);
+        hide(&state, "v2").await;
 
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "v1");
+        assert_eq!(feed_ids(&state, "").await, vec!["v1"]);
     }
 
-    #[test]
-    fn test_feed_excludes_livestreams_from_non_show_channels() {
-        let conn = setup();
+    #[tokio::test]
+    async fn feed_excludes_livestreams_from_non_show_channels() {
+        let state = setup_state();
         // UC1 has show_livestreams=0 for user 1
-        insert_video(&conn, "v1", "UC1", "2024-01-02T00:00:00Z", 1); // livestream
-        insert_video(&conn, "v2", "UC1", "2024-01-03T00:00:00Z", 0); // normal
+        insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 1); // livestream
+        insert_video(&state, "v2", "UC1", "2024-01-03T00:00:00Z", 0); // normal
 
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "v2");
+        assert_eq!(feed_ids(&state, "").await, vec!["v2"]);
     }
 
-    #[test]
-    fn test_feed_includes_livestreams_from_show_channels() {
-        let conn = setup();
+    #[tokio::test]
+    async fn feed_includes_livestreams_from_show_channels() {
+        let state = setup_state();
         // UC2 has show_livestreams=1 for user 1
-        insert_video(&conn, "v1", "UC2", "2024-01-02T00:00:00Z", 1);
+        insert_video(&state, "v1", "UC2", "2024-01-02T00:00:00Z", 1);
 
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "v1");
+        assert_eq!(feed_ids(&state, "").await, vec!["v1"]);
     }
 
-    #[test]
-    fn test_feed_excludes_members_only_videos() {
+    #[tokio::test]
+    async fn feed_excludes_members_only_videos() {
         // Members-only videos arrive via WebSub push (we can't tell from the Atom
         // payload), then get tagged when the periodic refresh cross-references
         // the channel's UUMO playlist. The feed must filter them out.
-        let conn = setup();
-        insert_video(&conn, "v_members", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v_normal", "UC1", "2024-01-03T00:00:00Z", 0);
-        conn.execute(
-            "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
-            [],
-        )
-        .unwrap();
+        let state = setup_state();
+        insert_video(&state, "v_members", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v_normal", "UC1", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
+                [],
+            )
+            .unwrap();
+        }
 
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids, vec!["v_normal"]);
+        assert_eq!(feed_ids(&state, "").await, vec!["v_normal"]);
     }
 
-    #[test]
-    fn test_feed_sorted_by_published_at_desc() {
-        let conn = setup();
-        insert_video(&conn, "old", "UC1", "2024-01-01T00:00:00Z", 0);
-        insert_video(&conn, "mid", "UC1", "2024-01-15T00:00:00Z", 0);
-        insert_video(&conn, "new", "UC1", "2024-01-30T00:00:00Z", 0);
+    #[tokio::test]
+    async fn feed_sorted_by_published_at_desc() {
+        let state = setup_state();
+        insert_video(&state, "old", "UC1", "2024-01-01T00:00:00Z", 0);
+        insert_video(&state, "mid", "UC1", "2024-01-15T00:00:00Z", 0);
+        insert_video(&state, "new", "UC1", "2024-01-30T00:00:00Z", 0);
 
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids, vec!["new", "mid", "old"]);
+        assert_eq!(feed_ids(&state, "").await, vec!["new", "mid", "old"]);
     }
 
-    #[test]
-    fn test_feed_filters_by_group() {
-        let conn = setup();
-        conn.execute(
-            "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (1, 'G1', 0, '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        let group_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', ?1)",
-            params![group_id],
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn feed_filters_by_group() {
+        // Exercises the handler's dynamic SQL: with ?group=, the query gains a
+        // channel_groups JOIN and the bind indices shift (limit=?3, offset=?4).
+        let state = setup_state();
+        let group_id = insert_group_with_channel(&state, "G1", "UC1");
 
-        insert_video(&conn, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC2", "2024-01-03T00:00:00Z", 0);
+        insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC2", "2024-01-03T00:00:00Z", 0);
 
-        let ids = query_feed_by_group(&conn, 1, group_id, 100, 0);
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], "v1");
+        // Without the group filter, both appear (dynamic SQL: no JOIN).
+        assert_eq!(feed_ids(&state, "").await, vec!["v2", "v1"]);
+        // With the group filter, only UC1's video appears.
+        assert_eq!(feed_ids(&state, &format!("?group={group_id}")).await, vec!["v1"]);
     }
 
-    #[test]
-    fn test_feed_pagination() {
-        let conn = setup();
-        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
+    #[tokio::test]
+    async fn feed_pagination_shifts_bind_indices_with_group() {
+        // limit/offset binding must remain correct in both SQL variants.
+        let state = setup_state();
+        let group_id = insert_group_with_channel(&state, "G1", "UC1");
+        insert_video(&state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
 
-        let page1 = query_feed(&conn, 1, 2, 0);
-        assert_eq!(page1.len(), 2);
-
-        let page2 = query_feed(&conn, 1, 2, 2);
-        assert_eq!(page2.len(), 1);
-    }
-
-    #[test]
-    fn test_hide_and_unhide_video() {
-        let conn = setup();
-        insert_video(&conn, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
-
-        // Hide
-        hide_video(&conn, 1, "v1");
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids.len(), 0);
-
-        // Unhide (delete the user_videos record)
-        conn.execute(
-            "DELETE FROM user_videos WHERE user_id = 1 AND video_id = 'v1'",
-            [],
-        )
-        .unwrap();
-        let ids = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids.len(), 1);
-    }
-
-    #[test]
-    fn test_feed_only_shows_subscribed_channels() {
-        let conn = setup();
-        // UC3 exists but user is not subscribed
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC3', 'Ch3', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        insert_video(&conn, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC3", "2024-01-03T00:00:00Z", 0);
-
-        let ids = query_feed(&conn, 1, 100, 0);
+        // No-group variant: limit=?2 offset=?3
+        assert_eq!(feed_ids(&state, "?limit=2&offset=0").await, vec!["v3", "v2"]);
+        assert_eq!(feed_ids(&state, "?limit=2&offset=2").await, vec!["v1"]);
+        // Group variant: limit=?3 offset=?4
         assert_eq!(
-            ids,
+            feed_ids(&state, &format!("?group={group_id}&limit=2&offset=0")).await,
+            vec!["v3", "v2"]
+        );
+        assert_eq!(
+            feed_ids(&state, &format!("?group={group_id}&limit=2&offset=2")).await,
+            vec!["v1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn hide_then_unhide_toggles_feed_visibility() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
+
+        hide(&state, "v1").await;
+        assert!(feed_ids(&state, "").await.is_empty());
+
+        unhide(&state, "v1").await;
+        assert_eq!(feed_ids(&state, "").await, vec!["v1"]);
+    }
+
+    #[tokio::test]
+    async fn feed_only_shows_subscribed_channels() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            // UC3 exists but user is not subscribed
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC3', 'Ch3', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC3", "2024-01-03T00:00:00Z", 0);
+
+        assert_eq!(
+            feed_ids(&state, "").await,
             vec!["v1"],
             "Unsubscribed channel videos should not appear"
         );
     }
 
-    #[test]
-    fn test_per_user_hidden_isolation() {
-        let conn = setup();
-        // Add user 2
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id) VALUES (2, 'UC1')",
-            [],
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn hiding_a_video_is_isolated_per_user() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id) VALUES (2, 'UC1')",
+                [],
+            )
+            .unwrap();
+        }
+        insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
 
-        insert_video(&conn, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
+        // User 1 (dev bypass) hides v1.
+        hide(&state, "v1").await;
 
-        // User 1 hides v1
-        hide_video(&conn, 1, "v1");
-
-        // User 1: hidden
-        let ids1 = query_feed(&conn, 1, 100, 0);
-        assert_eq!(ids1.len(), 0);
-
-        // User 2: still visible
-        let ids2 = query_feed(&conn, 2, 100, 0);
-        assert_eq!(ids2, vec!["v1"]);
+        // User 1: hidden.
+        assert!(feed_ids(&state, "").await.is_empty());
+        // User 2 (via Cf-Access header): still visible.
+        assert_eq!(
+            feed_ids_as(&state, "", Some("user2@example.com")).await,
+            vec!["v1"]
+        );
     }
 }

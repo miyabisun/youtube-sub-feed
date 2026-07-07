@@ -260,6 +260,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn production_rejects_request_without_cf_access_header() {
+        // Security-critical: in production (is_production=true) the dev bypass is
+        // disabled, so a request without the Cloudflare Access header must be
+        // rejected with 401 even when a user exists in the DB. (Access should have
+        // blocked it upstream; this is defence in depth.)
+        let mut state = setup_state();
+        state.config.is_production = true;
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let app = build_test_router(state);
+        let req = Request::builder()
+            .uri("/whoami")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "production must reject requests lacking the Cf-Access header"
+        );
+    }
+
+    #[tokio::test]
+    async fn production_resolves_user_from_cf_access_header() {
+        // Counterpart to the rejection test: with a valid Cf-Access header in
+        // production, the matching user is resolved and the request proceeds.
+        let mut state = setup_state();
+        state.config.is_production = true;
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let app = build_test_router(state);
+        let req = Request::builder()
+            .uri("/whoami")
+            .header("Cf-Access-Authenticated-User-Email", "alice@example.com")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"1", "resolved user id should be injected");
+    }
+
     #[test]
     fn master_user_rss_token_is_generated_on_first_registration() {
         let state = setup_state();

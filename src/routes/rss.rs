@@ -185,51 +185,69 @@ mod tests {
     // GET /api/rss delivers RSS 2.0 XML for favorite channels.
     // - Only videos from channels with user's is_favorite=1
     // - Excludes user's hidden videos
+    // - Excludes members-only videos (is_members_only=1)
     // - Respects user's livestream filter
     // - Sorted by published_at DESC, limited to 100
     // - No authentication required (public endpoint with rss_token param)
+    // - token resolves to the owning user; missing token falls back to first user;
+    //   an unknown token is a 404.
+    //
+    // These tests drive the real `get_rss_feed` handler over HTTP (oneshot) so the
+    // handler's own SQL — including `AND v.is_members_only = 0` and the token→user
+    // resolution branches — is what is under test, not a re-implementation.
 
-    use super::{build_rss_xml, RssItem};
+    use super::{build_rss_xml, get_rss_feed, RssItem};
+    use crate::state::AppState;
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
     use rusqlite::params;
+    use tower::ServiceExt;
 
-    fn setup() -> rusqlite::Connection {
-        let conn = crate::db::open_memory();
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC_fav', 'Fav Ch', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC_nofav', 'Normal Ch', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        // User subscribes: UC_fav is favorite, UC_nofav is not
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_fav', 1, 0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_nofav', 0, 0)",
-            [],
-        )
-        .unwrap();
-        conn
+    /// Build an AppState pre-seeded with one favorite channel (UC_fav) and one
+    /// non-favorite channel (UC_nofav) for user 1, whose rss_token is `tok-1`.
+    fn setup_state() -> AppState {
+        let state = AppState::test();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email, rss_token) VALUES ('g1', 'test@example.com', 'tok-1')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC_fav', 'Fav Ch', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC_nofav', 'Normal Ch', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_fav', 1, 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_nofav', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        state
     }
 
     fn insert_video(
-        conn: &rusqlite::Connection,
+        state: &AppState,
         id: &str,
         channel_id: &str,
         published_at: &str,
         is_livestream: i64,
     ) {
+        let conn = state.db.lock().unwrap();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -244,97 +262,203 @@ mod tests {
         .unwrap();
     }
 
-    fn query_rss_videos(conn: &rusqlite::Connection, user_id: i64) -> Vec<String> {
-        let mut stmt = conn
-            .prepare(
-                "SELECT v.id
-                 FROM videos v
-                 JOIN channels c ON v.channel_id = c.id
-                 JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-                 LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-                 WHERE uc.is_favorite = 1
-                   AND COALESCE(uv.is_hidden, 0) = 0
-                   AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-                 ORDER BY v.published_at DESC
-                 LIMIT 100",
+    fn app(state: &AppState) -> Router {
+        Router::new()
+            .route("/api/rss", get(get_rss_feed))
+            .with_state(state.clone())
+    }
+
+    /// Extract the video IDs (guids) from RSS XML, in document order
+    /// (which is the handler's `published_at DESC` order).
+    fn rss_video_ids(xml: &str) -> Vec<String> {
+        xml.lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("<guid isPermaLink=\"false\">")
+                    .and_then(|r| r.strip_suffix("</guid>"))
+                    .map(|s| s.to_string())
+            })
+            .collect()
+    }
+
+    /// Drive GET /api/rss (optionally with ?token=) and return (status, body).
+    async fn get_rss(state: &AppState, token: Option<&str>) -> (StatusCode, String) {
+        let uri = match token {
+            Some(t) => format!("/api/rss?token={t}"),
+            None => "/api/rss".to_string(),
+        };
+        let resp = app(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn rss_includes_only_favorite_channels() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC_nofav", "2024-01-03T00:00:00Z", 0);
+
+        let (status, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rss_video_ids(&body), vec!["v1"]);
+    }
+
+    #[tokio::test]
+    async fn rss_excludes_hidden_videos() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
+                [],
             )
             .unwrap();
-        stmt.query_map(params![user_id], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+        }
+
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body), vec!["v1"]);
     }
 
-    #[test]
-    fn test_rss_only_favorite_channels() {
-        let conn = setup();
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC_nofav", "2024-01-03T00:00:00Z", 0);
+    #[tokio::test]
+    async fn rss_excludes_members_only_videos() {
+        // Regression guard: the handler must apply `AND v.is_members_only = 0`.
+        // Members-only videos arrive via WebSub push and are tagged later by the
+        // periodic refresh; they must never appear in the public RSS feed.
+        let state = setup_state();
+        insert_video(&state, "v_members", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v_public", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
+                [],
+            )
+            .unwrap();
+        }
 
-        let ids = query_rss_videos(&conn, 1);
-        assert_eq!(ids, vec!["v1"]);
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(
+            rss_video_ids(&body),
+            vec!["v_public"],
+            "members-only videos must be excluded from RSS"
+        );
     }
 
-    #[test]
-    fn test_rss_excludes_hidden() {
-        let conn = setup();
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
-        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
-        // Hide v2 for user 1
-        conn.execute(
-            "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
-            [],
-        )
-        .unwrap();
-
-        let ids = query_rss_videos(&conn, 1);
-        assert_eq!(ids, vec!["v1"]);
-    }
-
-    #[test]
-    fn test_rss_excludes_livestreams_unless_enabled() {
-        let conn = setup();
+    #[tokio::test]
+    async fn rss_excludes_livestreams_unless_channel_enabled() {
+        let state = setup_state();
         // UC_fav has show_livestreams=0 for user 1
-        insert_video(&conn, "v1", "UC_fav", "2024-01-02T00:00:00Z", 1);
-        insert_video(&conn, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        insert_video(&state, "v_live", "UC_fav", "2024-01-02T00:00:00Z", 1);
+        insert_video(&state, "v_normal", "UC_fav", "2024-01-03T00:00:00Z", 0);
 
-        let ids = query_rss_videos(&conn, 1);
-        assert_eq!(ids, vec!["v2"]);
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body), vec!["v_normal"]);
     }
 
-    #[test]
-    fn test_rss_includes_livestreams_when_enabled() {
-        let conn = crate::db::open_memory();
-        conn.execute(
-            "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UC_live', 'Live Ch', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_live', 1, 1)",
-            [],
-        )
-        .unwrap();
-        insert_video(&conn, "v1", "UC_live", "2024-01-02T00:00:00Z", 1);
+    #[tokio::test]
+    async fn rss_includes_livestreams_when_channel_enabled() {
+        let state = AppState::test();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email, rss_token) VALUES ('g1', 'test@example.com', 'tok-1')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC_live', 'Live Ch', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, is_favorite, show_livestreams) VALUES (1, 'UC_live', 1, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        insert_video(&state, "v1", "UC_live", "2024-01-02T00:00:00Z", 1);
 
-        let ids = query_rss_videos(&conn, 1);
-        assert_eq!(ids, vec!["v1"]);
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body), vec!["v1"]);
     }
 
-    #[test]
-    fn test_rss_sorted_by_published_at_desc() {
-        let conn = setup();
-        insert_video(&conn, "old", "UC_fav", "2024-01-01T00:00:00Z", 0);
-        insert_video(&conn, "mid", "UC_fav", "2024-01-15T00:00:00Z", 0);
-        insert_video(&conn, "new", "UC_fav", "2024-01-30T00:00:00Z", 0);
+    #[tokio::test]
+    async fn rss_sorted_by_published_at_desc() {
+        let state = setup_state();
+        insert_video(&state, "old", "UC_fav", "2024-01-01T00:00:00Z", 0);
+        insert_video(&state, "mid", "UC_fav", "2024-01-15T00:00:00Z", 0);
+        insert_video(&state, "new", "UC_fav", "2024-01-30T00:00:00Z", 0);
 
-        let ids = query_rss_videos(&conn, 1);
-        assert_eq!(ids, vec!["new", "mid", "old"]);
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body), vec!["new", "mid", "old"]);
+    }
+
+    #[tokio::test]
+    async fn rss_token_scopes_feed_to_its_owner() {
+        // Two users each favorite a different channel; the token must select the
+        // matching user's feed only.
+        let state = setup_state();
+        insert_video(&state, "v_user1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email, rss_token) VALUES ('g2', 'user2@example.com', 'tok-2')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC_u2', 'U2 Ch', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, is_favorite) VALUES (2, 'UC_u2', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO videos (id, channel_id, title, published_at) VALUES ('v_user2', 'UC_u2', 'V2', '2024-01-05T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (_, body1) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body1), vec!["v_user1"]);
+
+        let (_, body2) = get_rss(&state, Some("tok-2")).await;
+        assert_eq!(rss_video_ids(&body2), vec!["v_user2"]);
+    }
+
+    #[tokio::test]
+    async fn rss_unknown_token_returns_404() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+
+        let (status, _) = get_rss(&state, Some("does-not-exist")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rss_without_token_falls_back_to_first_user() {
+        // Backward-compat path: no token → first user (ORDER BY id LIMIT 1).
+        let state = setup_state();
+        insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
+
+        let (status, body) = get_rss(&state, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rss_video_ids(&body), vec!["v1"]);
     }
 
     #[test]

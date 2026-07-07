@@ -640,58 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_channel_show_livestreams() {
-        let conn = setup();
-        insert_channel(&conn, "UC1", "Ch1");
-
-        let val: i64 = conn
-            .query_row("SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(val, 0);
-
-        conn.execute(
-            "UPDATE user_channels SET show_livestreams = ?1 WHERE user_id = 1 AND channel_id = ?2",
-            params![1_i64, "UC1"],
-        )
-        .unwrap();
-
-        let val: i64 = conn
-            .query_row("SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(val, 1);
-    }
-
-    #[test]
-    fn test_update_channel_is_favorite() {
-        let conn = setup();
-        insert_channel(&conn, "UC1", "Ch1");
-
-        let val: i64 = conn
-            .query_row(
-                "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(val, 0);
-
-        conn.execute(
-            "UPDATE user_channels SET is_favorite = ?1 WHERE user_id = 1 AND channel_id = ?2",
-            params![1_i64, "UC1"],
-        )
-        .unwrap();
-
-        let val: i64 = conn
-            .query_row(
-                "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(val, 1);
-    }
-
-    #[test]
     fn test_channels_list_includes_is_favorite() {
         let conn = setup();
         insert_channel(&conn, "UC1", "Ch1");
@@ -914,112 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn add_channel_inserts_channel_and_user_channel_row() {
-        let conn = setup();
-        let channel_id = "UC_manual";
-        let now = "2024-01-01T00:00:00Z";
-
-        conn.execute(
-            "INSERT OR IGNORE INTO channels (id, title, created_at) VALUES (?1, ?2, ?3)",
-            params![channel_id, "Manual Channel", now],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO user_channels (user_id, channel_id, created_at) VALUES (1, ?1, ?2)",
-            params![channel_id, now],
-        )
-        .unwrap();
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM user_channels WHERE user_id = 1 AND channel_id = ?1",
-                params![channel_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn remove_channel_deletes_user_subscription_and_orphaned_channel() {
-        let conn = setup();
-        insert_channel(&conn, "UC_bye", "去るチャンネル");
-        conn.execute(
-            "INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UC_bye', 'V')",
-            [],
-        )
-        .unwrap();
-
-        // Remove from user_channels
-        conn.execute(
-            "DELETE FROM user_channels WHERE user_id = 1 AND channel_id = 'UC_bye'",
-            [],
-        )
-        .unwrap();
-        // Delete orphaned channels
-        conn.execute(
-            "DELETE FROM channels WHERE id = 'UC_bye' AND id NOT IN (SELECT DISTINCT channel_id FROM user_channels)",
-            [],
-        )
-        .unwrap();
-
-        let ch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM channels WHERE id = 'UC_bye'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(ch_count, 0, "Orphaned channel should be deleted");
-
-        let vid_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM videos WHERE channel_id = 'UC_bye'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(vid_count, 0, "Videos cascade with channel deletion");
-    }
-
-    #[test]
-    fn remove_channel_keeps_channel_when_another_user_subscribes() {
-        let conn = setup();
-        conn.execute("INSERT INTO users (email) VALUES ('user2@example.com')", [])
-            .unwrap();
-        insert_channel(&conn, "UC_shared", "共有チャンネル");
-        conn.execute(
-            "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (2, 'UC_shared', '2024-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-
-        // User 1 unsubscribes
-        conn.execute(
-            "DELETE FROM user_channels WHERE user_id = 1 AND channel_id = 'UC_shared'",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM channels WHERE id = 'UC_shared' AND id NOT IN (SELECT DISTINCT channel_id FROM user_channels)",
-            [],
-        )
-        .unwrap();
-
-        let ch_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM channels WHERE id = 'UC_shared'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            ch_count, 1,
-            "Channel should not be deleted — user 2 still subscribes"
-        );
-    }
-
-    #[test]
     fn orphan_check_true_when_caller_is_only_subscriber() {
         // Caller subscribes and no one else does → removing them orphans the channel.
         // insert_channel already subscribes user 1.
@@ -1081,5 +923,433 @@ mod tests {
             matches!(result, Err(crate::error::AppError::NotFound(_))),
             "Non-subscriber must be rejected with NotFound, not allowed to orphan another user's channel"
         );
+    }
+
+    /// Integration tests that drive the real add_channel / update_channel /
+    /// remove_channel handlers over HTTP (oneshot), through auth_middleware.
+    /// The acting user is the dev-bypass first DB user (user 1).
+    mod handler {
+        use crate::middleware::auth_middleware;
+        use crate::routes::channels::routes;
+        use crate::state::AppState;
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn setup_state() -> AppState {
+            let state = AppState::test();
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute("INSERT INTO users (email) VALUES ('test@example.com')", [])
+                    .unwrap();
+            }
+            state
+        }
+
+        /// Subscribe user 1 to `channel_id` and create its (verified) WebSub
+        /// subscription row with the given secret.
+        fn subscribe_user1(state: &AppState, channel_id: &str, secret: &str) {
+            let conn = state.db.lock().unwrap();
+            let now = "2024-01-01T00:00:00Z";
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES (?1, ?1, ?2)",
+                rusqlite::params![channel_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (1, ?1, ?2)",
+                rusqlite::params![channel_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO channel_subscriptions
+                 (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
+                 VALUES (?1, ?2, 432000, ?3, ?3, 'verified')",
+                rusqlite::params![channel_id, secret, now],
+            )
+            .unwrap();
+        }
+
+        fn app(state: &AppState) -> axum::Router {
+            axum::Router::new()
+                .merge(routes())
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
+                ))
+                .with_state(state.clone())
+        }
+
+        async fn post_channel(state: &AppState, json_body: &str) -> StatusCode {
+            let resp = app(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/channels")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(json_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            resp.status()
+        }
+
+        async fn patch_channel(state: &AppState, id: &str, json_body: &str) -> StatusCode {
+            let resp = app(state)
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/api/channels/{id}"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(json_body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            resp.status()
+        }
+
+        async fn delete_channel(state: &AppState, id: &str) -> StatusCode {
+            let resp = app(state)
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/channels/{id}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            resp.status()
+        }
+
+        async fn error_message(resp: axum::response::Response) -> String {
+            let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+
+        // --- add_channel ---
+
+        #[tokio::test]
+        async fn add_channel_inserts_channel_and_subscription_row() {
+            let state = setup_state();
+            let cid = "UCxxxxxxxxxxxxxxxxxxxxxx"; // valid 24-char UC id
+
+            let status =
+                post_channel(&state, &format!(r#"{{"channel_id":"{cid}","title":"My Ch"}}"#)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (title, sub_count): (String, i64) = {
+                let conn = state.db.lock().unwrap();
+                let title = conn
+                    .query_row(
+                        "SELECT c.title FROM channels c
+                         JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = 1
+                         WHERE c.id = ?1",
+                        [cid],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let sub_count = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM user_channels WHERE user_id = 1 AND channel_id = ?1",
+                        [cid],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (title, sub_count)
+            };
+            assert_eq!(title, "My Ch");
+            assert_eq!(sub_count, 1);
+        }
+
+        #[tokio::test]
+        async fn add_channel_falls_back_to_channel_id_as_title_when_missing() {
+            let state = setup_state();
+            let cid = "UC_-ABCDEFGHIJKLMNOPQRab";
+
+            let status = post_channel(&state, &format!(r#"{{"channel_id":"{cid}"}}"#)).await;
+            assert_eq!(status, StatusCode::OK);
+
+            let title: String = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row("SELECT title FROM channels WHERE id = ?1", [cid], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+            };
+            assert_eq!(title, cid, "title defaults to channel_id when omitted");
+        }
+
+        #[tokio::test]
+        async fn add_channel_rejects_invalid_channel_id_with_400() {
+            let state = setup_state();
+            let status = post_channel(&state, r#"{"channel_id":"@handle"}"#).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let count: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
+                    .unwrap()
+            };
+            assert_eq!(count, 0, "invalid channel_id must not be inserted");
+        }
+
+        #[tokio::test]
+        async fn add_channel_is_idempotent_for_duplicate_channel() {
+            // INSERT OR IGNORE: adding the same channel twice must not error or
+            // create duplicate user_channels rows.
+            let state = setup_state();
+            let cid = "UCduplicatexxxxxxxxxxxxx"; // 24 chars
+
+            assert_eq!(
+                post_channel(&state, &format!(r#"{{"channel_id":"{cid}"}}"#)).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                post_channel(&state, &format!(r#"{{"channel_id":"{cid}"}}"#)).await,
+                StatusCode::OK
+            );
+
+            let count: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM user_channels WHERE user_id = 1 AND channel_id = ?1",
+                    [cid],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(count, 1, "duplicate add must remain a single subscription");
+        }
+
+        // --- update_channel ---
+
+        #[tokio::test]
+        async fn update_channel_sets_show_livestreams() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCsettingsxxxxxxxxxxxxxx", "s");
+
+            assert_eq!(
+                patch_channel(&state, "UCsettingsxxxxxxxxxxxxxx", r#"{"show_livestreams":1}"#).await,
+                StatusCode::OK
+            );
+
+            let val: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UCsettingsxxxxxxxxxxxxxx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(val, 1);
+        }
+
+        #[tokio::test]
+        async fn update_channel_sets_is_favorite() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCfavoritexxxxxxxxxxxxxx", "s");
+
+            assert_eq!(
+                patch_channel(&state, "UCfavoritexxxxxxxxxxxxxx", r#"{"is_favorite":1}"#).await,
+                StatusCode::OK
+            );
+
+            let val: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UCfavoritexxxxxxxxxxxxxx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(val, 1);
+        }
+
+        #[tokio::test]
+        async fn update_channel_rejects_value_other_than_0_or_1() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCbadvaluexxxxxxxxxxxxxx", "s");
+
+            let resp = app(&state)
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/channels/UCbadvaluexxxxxxxxxxxxxx")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(r#"{"show_livestreams":2}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(error_message(resp).await.contains("must be 0 or 1"));
+        }
+
+        #[tokio::test]
+        async fn update_channel_rejects_empty_body_with_no_fields() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCnofieldsxxxxxxxxxxxxxx", "s");
+
+            let resp = app(&state)
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/channels/UCnofieldsxxxxxxxxxxxxxx")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(error_message(resp).await.contains("No fields to update"));
+        }
+
+        // --- remove_channel ---
+
+        #[tokio::test]
+        async fn remove_channel_orphan_deletes_channel_and_cascades_subscription() {
+            // Sole subscriber leaves → channel is orphaned. The channel row, its
+            // videos and its channel_subscriptions row (CASCADE) must all be gone.
+            let state = setup_state();
+            subscribe_user1(&state, "UCbyexxxxxxxxxxxxxxxxxxx", "bye_secret");
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UCbyexxxxxxxxxxxxxxxxxxx', 'V')",
+                    [],
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                delete_channel(&state, "UCbyexxxxxxxxxxxxxxxxxxx").await,
+                StatusCode::OK
+            );
+
+            let (ch, vid, sub): (i64, i64, i64) = {
+                let conn = state.db.lock().unwrap();
+                let ch = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM channels WHERE id = 'UCbyexxxxxxxxxxxxxxxxxxx'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let vid = conn
+                    .query_row("SELECT COUNT(*) FROM videos", [], |row| row.get(0))
+                    .unwrap();
+                let sub = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM channel_subscriptions WHERE channel_id = 'UCbyexxxxxxxxxxxxxxxxxxx'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (ch, vid, sub)
+            };
+            assert_eq!(ch, 0, "orphaned channel deleted");
+            assert_eq!(vid, 0, "videos cascade with channel deletion");
+            assert_eq!(sub, 0, "subscription row cascade-deleted");
+        }
+
+        #[tokio::test]
+        async fn remove_channel_shared_keeps_channel_and_leaves_subscription_verified() {
+            // Another user still subscribes → channel is NOT orphaned. The channel
+            // and its subscription survive, and the status is untouched (the
+            // pending_unsubscribe path must only fire for genuine orphans).
+            let state = setup_state();
+            subscribe_user1(&state, "UCsharedxxxxxxxxxxxxxxxx", "shared_secret");
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute("INSERT INTO users (email) VALUES ('user2@example.com')", [])
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (2, 'UCsharedxxxxxxxxxxxxxxxx', '2024-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                delete_channel(&state, "UCsharedxxxxxxxxxxxxxxxx").await,
+                StatusCode::OK
+            );
+
+            let (ch, status, caller_sub): (i64, String, i64) = {
+                let conn = state.db.lock().unwrap();
+                let ch = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM channels WHERE id = 'UCsharedxxxxxxxxxxxxxxxx'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let status = conn
+                    .query_row(
+                        "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UCsharedxxxxxxxxxxxxxxxx'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let caller_sub = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM user_channels WHERE user_id = 1 AND channel_id = 'UCsharedxxxxxxxxxxxxxxxx'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (ch, status, caller_sub)
+            };
+            assert_eq!(ch, 1, "shared channel must survive");
+            assert_eq!(
+                status, "verified",
+                "non-orphan subscription must not be marked pending_unsubscribe"
+            );
+            assert_eq!(caller_sub, 0, "caller's own subscription is removed");
+        }
+
+        #[tokio::test]
+        async fn remove_channel_rejects_non_subscriber_with_404() {
+            // IDOR guard: a user who does not subscribe cannot drive removal /
+            // WebSub teardown of a channel owned by someone else.
+            let state = setup_state();
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute("INSERT INTO users (email) VALUES ('owner@example.com')", [])
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO channels (id, title, created_at) VALUES ('UCownedxxxxxxxxxxxxxxxxx', 'Owned', '2024-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO user_channels (user_id, channel_id) VALUES (2, 'UCownedxxxxxxxxxxxxxxxxx')",
+                    [],
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                delete_channel(&state, "UCownedxxxxxxxxxxxxxxxxx").await,
+                StatusCode::NOT_FOUND
+            );
+
+            let ch: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM channels WHERE id = 'UCownedxxxxxxxxxxxxxxxxx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(ch, 1, "another user's channel must be untouched");
+        }
     }
 }

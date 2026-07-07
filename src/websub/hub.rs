@@ -43,16 +43,34 @@ pub async fn send_subscription_request(
         })?;
 
     let status = res.status().as_u16();
-    // WebSub: Hub MUST return 202 Accepted when the request is queued for async verification.
-    if status == 202 || status == 204 {
+    // Read the body lazily only when needed for the error path.
+    if is_success_status(status) {
         return Ok(());
     }
 
     let body_text = res.text().await.unwrap_or_default();
-    Err(HubError {
-        status,
-        message: body_text,
-    })
+    classify_response(status, body_text)
+}
+
+/// Whether a hub response status indicates the subscribe/unsubscribe request was
+/// accepted. WebSub: the hub MUST return 202 Accepted when the request is queued
+/// for async verification; 204 No Content is also treated as success.
+fn is_success_status(status: u16) -> bool {
+    status == 202 || status == 204
+}
+
+/// Map a hub response (status + body) to the `Result` returned by
+/// `send_subscription_request`. Kept as a pure function so the success/error
+/// mapping can be tested without a live HTTP round-trip.
+fn classify_response(status: u16, body_text: String) -> Result<(), HubError> {
+    if is_success_status(status) {
+        Ok(())
+    } else {
+        Err(HubError {
+            status,
+            message: body_text,
+        })
+    }
 }
 
 pub async fn subscribe(
@@ -108,5 +126,35 @@ mod tests {
             message: "timeout".to_string(),
         };
         assert_eq!(format!("{}", e), "Hub error 0: timeout");
+    }
+
+    #[test]
+    fn accepted_status_202_maps_to_ok() {
+        assert!(is_success_status(202));
+        assert!(classify_response(202, "ignored body".to_string()).is_ok());
+    }
+
+    #[test]
+    fn no_content_status_204_maps_to_ok() {
+        assert!(is_success_status(204));
+        assert!(classify_response(204, String::new()).is_ok());
+    }
+
+    #[test]
+    fn error_status_maps_to_hub_error_carrying_status_and_body() {
+        assert!(!is_success_status(500));
+        let err = classify_response(500, "internal boom".to_string()).unwrap_err();
+        assert_eq!(err.status, 500);
+        assert_eq!(err.message, "internal boom");
+    }
+
+    #[test]
+    fn client_error_status_is_not_treated_as_success() {
+        // A 200 OK is NOT the WebSub-accepted status (202/204); the hub is
+        // expected to queue async verification, so 200 must map to an error.
+        assert!(!is_success_status(200));
+        let err = classify_response(404, "not found".to_string()).unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.message, "not found");
     }
 }

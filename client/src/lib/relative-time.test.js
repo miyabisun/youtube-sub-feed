@@ -51,6 +51,30 @@ describe('relativeTime', () => {
     expect(relativeTime('2025-05-17T12:00:00Z')).toBe('29日前')
   })
 
+  // Lower boundaries of each unit: exactly at the threshold the next-larger unit
+  // takes over.
+  test('boundary: exactly 60 minutes shows 1 hour', () => {
+    expect(relativeTime('2025-06-15T11:00:00Z')).toBe('1時間前')
+  })
+
+  test('boundary: exactly 24 hours shows 1 day', () => {
+    expect(relativeTime('2025-06-14T12:00:00Z')).toBe('1日前')
+  })
+
+  test('boundary: exactly 30 days shows 1 month', () => {
+    expect(relativeTime('2025-05-16T12:00:00Z')).toBe('1ヶ月前')
+  })
+
+  test('boundary: exactly 365 days shows 1 year', () => {
+    expect(relativeTime('2024-06-15T12:00:00Z')).toBe('1年前')
+  })
+
+  // A timestamp in the future yields a negative diff; every unit floors below
+  // zero, so it collapses to the "たった今" fallback rather than a "-N前".
+  test('future timestamp shows たった今', () => {
+    expect(relativeTime('2025-06-15T13:00:00Z')).toBe('たった今')
+  })
+
   test('null returns empty', () => {
     expect(relativeTime(null)).toBe('')
   })

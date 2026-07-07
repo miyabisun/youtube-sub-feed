@@ -195,4 +195,28 @@ mod tests {
         // set; we deliberately leave them as-is rather than guessing.
         assert_eq!(decode_xml_entities("a&nbsp;b"), "a&nbsp;b");
     }
+
+    #[test]
+    fn test_decode_xml_entities_preserves_out_of_range_hex_reference() {
+        // 0xFFFFFFFF fits in u32 but is not a valid Unicode scalar value, so
+        // char::from_u32 returns None and the reference must be left verbatim
+        // (the fallback branch), never silently dropped.
+        assert_eq!(decode_xml_entities("x&#xFFFFFFFF;y"), "x&#xFFFFFFFF;y");
+    }
+
+    #[test]
+    fn test_decode_xml_entities_preserves_surrogate_code_point_reference() {
+        // U+D800 is a UTF-16 surrogate — not a valid scalar value. It must be
+        // preserved as-is rather than decoded.
+        assert_eq!(decode_xml_entities("&#xD800;"), "&#xD800;");
+    }
+
+    #[test]
+    fn test_decode_xml_entities_preserves_overflowing_decimal_reference() {
+        // A decimal reference that overflows u32 fails to parse and is preserved.
+        assert_eq!(
+            decode_xml_entities("&#99999999999;"),
+            "&#99999999999;"
+        );
+    }
 }

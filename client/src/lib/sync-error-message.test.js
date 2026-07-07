@@ -48,4 +48,18 @@ describe('toUserMessage', () => {
       'チャンネル同期をキャンセルしました',
     );
   });
+
+  // Defensive: a null/undefined argument must not throw (error?.message ?? '')
+  // and should fall through to the generic message.
+  test('falls back to the generic message when error is null', () => {
+    expect(toUserMessage(null)).toBe(
+      '予期しないエラーが発生しました。コンソールを確認してください。',
+    );
+  });
+
+  test('falls back to the generic message when error is undefined', () => {
+    expect(toUserMessage(undefined)).toBe(
+      '予期しないエラーが発生しました。コンソールを確認してください。',
+    );
+  });
 });

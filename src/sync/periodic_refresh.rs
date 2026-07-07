@@ -135,23 +135,33 @@ async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &st
     .await;
 }
 
-async fn renew_expiring_subscriptions(state: &AppState, callback: &str) {
+/// Select subscriptions whose lease expires within `RENEW_THRESHOLD_SECONDS` of
+/// now, returning `(channel_id, hub_secret)` pairs to re-subscribe.
+///
+/// Extracted as a pure DB read so the renewal *selection window* — the
+/// combination of `RENEW_THRESHOLD_SECONDS` and the `expires_at < ?` predicate —
+/// can be tested directly, without going through `hub::subscribe`'s network call.
+fn select_subscriptions_due_for_renewal(state: &AppState) -> Vec<(String, String)> {
     let threshold = (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
-    let to_renew: Vec<(String, String)> = {
-        let conn = state.db.lock().unwrap();
-        let result = match conn.prepare(
-            "SELECT channel_id, hub_secret FROM channel_subscriptions WHERE expires_at < ?1",
-        ) {
-            Ok(mut stmt) => stmt
-                .query_map([&threshold], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
-        result
+    let conn = state.db.lock().unwrap();
+    // The `result` binding is load-bearing: it drops the `Statement` temporary
+    // before `conn`, avoiding an E0597 borrow-lifetime error.
+    let result = match conn
+        .prepare("SELECT channel_id, hub_secret FROM channel_subscriptions WHERE expires_at < ?1")
+    {
+        Ok(mut stmt) => stmt
+            .query_map([&threshold], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
     };
+    result
+}
+
+async fn renew_expiring_subscriptions(state: &AppState, callback: &str) {
+    let to_renew = select_subscriptions_due_for_renewal(state);
 
     if to_renew.is_empty() {
         return;
@@ -181,16 +191,6 @@ mod tests {
     // New video discovery is entirely WebSub-push driven. duration, is_short,
     // and is_members_only remain NULL/0 until the browser sync provides updates
     // (or they are filed via WebSub Atom data).
-
-    #[test]
-    fn refresh_interval_is_24h() {
-        assert_eq!(REFRESH_INTERVAL_MS, 24 * 60 * 60 * 1000);
-    }
-
-    #[test]
-    fn renew_threshold_is_2_days() {
-        assert_eq!(RENEW_THRESHOLD_SECONDS, 2 * 24 * 60 * 60);
-    }
 
     #[tokio::test]
     async fn register_new_subscription_preserves_secret_on_reregister() {
@@ -302,8 +302,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn renew_picks_only_expiring_subscriptions() {
+    #[test]
+    fn renewal_selection_picks_only_subscriptions_within_the_threshold() {
+        // Drives the *actual* selection function used by renew_expiring_subscriptions,
+        // so RENEW_THRESHOLD_SECONDS and the `expires_at < ?` predicate are what is
+        // under test (not a re-implemented copy of the query).
+        //   UC_near expires in 12h  (< 2-day threshold) → selected
+        //   UC_far  expires in 10d  (> 2-day threshold) → skipped
         let state = AppState::test();
         let far_future = (chrono::Utc::now() + chrono::Duration::days(10))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -326,24 +331,12 @@ mod tests {
             .unwrap();
         }
 
-        // This will attempt to call hub::subscribe but the network failure doesn't matter —
-        // we only verify the selection query picks the right rows.
-        let threshold = (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let selected: Vec<String> = {
-            let conn = state.db.lock().unwrap();
-            let mut stmt = conn
-                .prepare("SELECT channel_id FROM channel_subscriptions WHERE expires_at < ?1")
-                .unwrap();
-            stmt.query_map([&threshold], |row| row.get::<_, String>(0))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect()
-        };
+        let selected = select_subscriptions_due_for_renewal(&state);
+
         assert_eq!(
             selected,
-            vec!["UC_near"],
-            "Only UC_near should be picked for renewal"
+            vec![("UC_near".to_string(), "s2".to_string())],
+            "Only UC_near (within threshold) should be picked, carrying its hub_secret"
         );
     }
 }

@@ -44,11 +44,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hub_url_is_google_pubsubhubbub() {
-        assert_eq!(HUB_URL, "https://pubsubhubbub.appspot.com/subscribe");
-    }
-
-    #[test]
     fn test_extract_channel_id_from_push() {
         let xml = r#"<?xml version="1.0"?>
 <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">

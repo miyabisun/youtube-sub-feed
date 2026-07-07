@@ -71,12 +71,15 @@ mod tests {
 
     #[test]
     fn test_verify_matching_signature() {
+        // Independently-computed HMAC-SHA1 (via `openssl dgst -sha1 -hmac`) rather
+        // than re-running compute_sha1, so this asserts against an external oracle
+        // instead of the implementation comparing to itself.
+        //   secret = "my_secret_key", body = "some atom feed body"
         let secret = "my_secret_key";
         let body = b"some atom feed body";
-        let sig = compute_sha1(secret, body);
-        let header = format!("sha1={}", sig);
+        let known_sig = "8b41df86e801ef185f7c457d8f8e7f3301f44639";
 
-        assert!(verify(&header, secret, body));
+        assert!(verify(&format!("sha1={}", known_sig), secret, body));
     }
 
     #[test]

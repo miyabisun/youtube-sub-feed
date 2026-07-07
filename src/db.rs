@@ -558,23 +558,23 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        let expected = [
+        // Full match (not a subset): every index create_tables declares must be
+        // present, and no extra ones. This catches both a dropped index and a
+        // stale expectation list. idx_users_rss_token and
+        // idx_channel_subscriptions_expires were previously missing here.
+        let expected = vec![
+            "idx_channel_subscriptions_expires",
             "idx_groups_user",
             "idx_user_channels_favorite",
             "idx_user_channels_user",
             "idx_user_videos_hidden",
             "idx_user_videos_user",
             "idx_users_email",
+            "idx_users_rss_token",
             "idx_videos_channel",
             "idx_videos_published",
         ];
-        for name in &expected {
-            assert!(
-                indexes.contains(&name.to_string()),
-                "Index '{}' not found",
-                name
-            );
-        }
+        assert_eq!(indexes, expected, "index set must match create_tables exactly");
     }
 
     #[test]
@@ -602,9 +602,30 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotent_ddl() {
-        let _conn1 = open_memory();
-        let _conn2 = open_memory();
+    fn create_tables_is_idempotent_and_preserves_existing_data() {
+        // open_memory already ran create_tables once. Insert a row, then run the
+        // DDL again on the *same* connection: `CREATE TABLE IF NOT EXISTS` and
+        // `CREATE ... INDEX IF NOT EXISTS` must be no-ops that leave data intact.
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'Keep', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        super::create_tables(&conn);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channels WHERE id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "re-applying create_tables must not drop existing data"
+        );
     }
 
     #[test]
@@ -846,15 +867,19 @@ mod tests {
         )
         .unwrap();
 
-        let (is_short, is_livestream): (i64, i64) = conn
+        let (is_short, is_livestream, is_members_only): (i64, i64, i64) = conn
             .query_row(
-                "SELECT is_short, is_livestream FROM videos WHERE id = 'v1'",
+                "SELECT is_short, is_livestream, is_members_only FROM videos WHERE id = 'v1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(is_short, 0);
         assert_eq!(is_livestream, 0);
+        assert_eq!(
+            is_members_only, 0,
+            "is_members_only must default to 0 (not members-only) on insert"
+        );
     }
 
     #[test]
@@ -888,7 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn test_user_videos_hidden_state() {
+    fn test_user_videos_defaults_is_hidden_to_zero() {
+        // When a user_videos row is created without an explicit is_hidden, the
+        // column must default to 0 (visible). Per-user hide/unhide behaviour is
+        // covered by test_per_user_hidden_videos.
         let conn = open_memory();
         conn.execute(
             "INSERT INTO users (google_id, email) VALUES ('g1', 'a@example.com')",
@@ -905,8 +933,9 @@ mod tests {
             [],
         )
         .unwrap();
+        // Note: is_hidden intentionally omitted.
         conn.execute(
-            "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v1', 1)",
+            "INSERT INTO user_videos (user_id, video_id) VALUES (1, 'v1')",
             [],
         )
         .unwrap();
@@ -918,7 +947,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(is_hidden, 1);
+        assert_eq!(is_hidden, 0, "is_hidden must default to 0 when omitted");
     }
 
     #[test]
@@ -1150,25 +1179,6 @@ mod tests {
             result.is_err(),
             "composite PK (channel_id, group_id) prevents duplicates"
         );
-    }
-
-    #[test]
-    fn test_insert_and_select_utf8_channel() {
-        let conn = open_memory();
-        conn.execute(
-            "INSERT INTO channels (id, title, created_at) VALUES ('UCxxxxxxxx', 'テストチャンネル', '2025-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-
-        let title: String = conn
-            .query_row(
-                "SELECT title FROM channels WHERE id = 'UCxxxxxxxx'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(title, "テストチャンネル");
     }
 
     #[test]
