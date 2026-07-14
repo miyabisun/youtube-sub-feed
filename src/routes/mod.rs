@@ -2,6 +2,7 @@ pub mod auth;
 pub mod channels;
 pub mod feed;
 pub mod groups;
+pub mod news;
 pub mod rss;
 pub mod websub;
 
@@ -43,6 +44,7 @@ use utoipa_swagger_ui::SwaggerUi;
         groups::get_group_channels,
         groups::set_group_channels,
         rss::get_rss_feed,
+        news::get_news,
     ),
     components(schemas(
         openapi::ErrorResponse,
@@ -86,6 +88,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(feed::routes())
         .merge(channels::routes())
         .merge(groups::routes())
+        .merge(news::routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -260,6 +263,7 @@ mod tests {
             let protected: &[(&str, &str)] = &[
                 ("GET", "/api/auth/me"),
                 ("GET", "/api/feed"),
+                ("GET", "/api/news"),
                 ("PATCH", "/api/videos/abc/hide"),
                 ("PATCH", "/api/videos/abc/unhide"),
                 ("GET", "/api/channels"),
