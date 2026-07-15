@@ -4,12 +4,17 @@
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Toast from '$lib/components/Toast.svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import ChannelContextMenu from '$lib/components/ChannelContextMenu.svelte';
+	import { createLongPress } from '$lib/long-press.js';
 	import { navigate } from '$lib/router.svelte.js';
 
 	let channels = $state([]);
 	let loading = $state(true);
 	let search = $state('');
 	let toast = $state(null);
+	let contextChannel = $state(null);
+	let contextTrigger = null;
+	let togglingFavorite = $state(false);
 
 	// Manual channel add
 	let addChannelId = $state('');
@@ -20,6 +25,7 @@
 	// Pending delete confirmation
 	let pendingDeleteId = $state(null);
 	let deleting = $state(false);
+	const longPress = createLongPress(({ channel, trigger }) => openContextMenu(channel, trigger));
 
 	let filtered = $derived(
 		search
@@ -86,6 +92,53 @@
 		pendingDeleteId = null;
 	}
 
+	function openContextMenu(channel, trigger) {
+		contextChannel = channel;
+		contextTrigger = trigger;
+	}
+
+	function dismissContextMenu() {
+		const trigger = contextTrigger;
+		contextChannel = null;
+		contextTrigger = null;
+		queueMicrotask(() => trigger?.focus());
+	}
+
+	function closeContextMenu() {
+		if (!togglingFavorite) dismissContextMenu();
+	}
+
+	function openChannel(channel) {
+		if (longPress.consumeClick()) return;
+		navigate(`/channel/${channel.id}`);
+	}
+
+	async function toggleFavorite() {
+		if (!contextChannel || togglingFavorite) return;
+		const channel = contextChannel;
+		const nextValue = channel.is_favorite ? 0 : 1;
+		togglingFavorite = true;
+		try {
+			await fetcher(`${config.path.api}/channels/${channel.id}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ is_favorite: nextValue }),
+			});
+			channels = channels.map((item) =>
+				item.id === channel.id ? { ...item, is_favorite: nextValue } : item
+			);
+			toast = {
+				message: nextValue ? `${channel.title}をお気に入りに追加しました` : `${channel.title}をお気に入りから外しました`,
+				type: 'success',
+			};
+			dismissContextMenu();
+		} catch (e) {
+			toast = { message: `お気に入りの更新に失敗しました: ${e.message}`, type: 'error' };
+		} finally {
+			togglingFavorite = false;
+		}
+	}
+
 	async function removeChannel() {
 		if (!pendingDeleteId || deleting) return;
 		const id = pendingDeleteId;
@@ -145,26 +198,45 @@
 	{:else}
 		<div class="channel-list">
 			{#each filtered as ch (ch.id)}
-				<div class="channel-item">
-					<div
+				<div class="channel-item" data-channel-id={ch.id}>
+					<button
+						type="button"
 						class="channel-clickable"
-						onclick={() => navigate(`/channel/${ch.id}`)}
-						onkeydown={(e) => e.key === 'Enter' && navigate(`/channel/${ch.id}`)}
-						role="button"
-						tabindex="0"
+						onclick={() => openChannel(ch)}
+						oncontextmenu={(e) => {
+							e.preventDefault();
+							openContextMenu(ch, e.currentTarget);
+						}}
+						onpointerdown={(e) => longPress.pointerDown(e, { channel: ch, trigger: e.currentTarget })}
+						onpointermove={longPress.pointerMove}
+						onpointerup={longPress.pointerUp}
+						onpointerleave={longPress.abort}
+						onpointercancel={longPress.abort}
+						onkeydown={(e) => {
+							if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+								e.preventDefault();
+								openContextMenu(ch, e.currentTarget);
+							}
+						}}
 					>
-						{#if ch.thumbnail_url}
-							<img class="avatar" src={ch.thumbnail_url} alt="" loading="lazy" />
-						{:else}
-							<div class="avatar placeholder"></div>
-						{/if}
+						<div class="avatar-wrap" class:favorite={ch.is_favorite}>
+							{#if ch.thumbnail_url}
+								<img class="avatar" src={ch.thumbnail_url} alt="" loading="lazy" />
+							{:else}
+								<div class="avatar placeholder"></div>
+							{/if}
+							{#if ch.is_favorite}
+								<span class="favorite-mark" aria-hidden="true">★</span>
+								<span class="visually-hidden">お気に入り</span>
+							{/if}
+						</div>
 						<div class="channel-info">
 							<div class="channel-name">{ch.title}</div>
 							{#if ch.group_names}
 								<div class="channel-groups">{ch.group_names}</div>
 							{/if}
 						</div>
-					</div>
+					</button>
 					<div class="channel-actions">
 						<a class="yt-link" href="https://www.youtube.com/channel/{ch.id}" target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>YT</a>
 						{#if pendingDeleteId === ch.id}
@@ -188,6 +260,15 @@
 	{#key Date.now()}
 		<Toast message={toast.message} type={toast.type} />
 	{/key}
+{/if}
+
+{#if contextChannel}
+	<ChannelContextMenu
+		channel={contextChannel}
+		onclose={closeContextMenu}
+		ontoggle={toggleFavorite}
+		toggling={togglingFavorite}
+	/>
 {/if}
 
 <style lang="sass">
@@ -288,16 +369,58 @@
 	min-width: 0
 	cursor: pointer
 	color: inherit
+	background: none
+	border: 0
+	font: inherit
+	text-align: left
+	-webkit-touch-callout: none
 
-.avatar
+.avatar-wrap
+	position: relative
 	width: 40px
 	height: 40px
 	border-radius: 50%
 	flex-shrink: 0
+	border: 2px solid transparent
+
+	&.favorite
+		border-color: var(--c-favorite)
+
+.avatar
+	display: block
+	width: 100%
+	height: 100%
+	border-radius: 50%
 	object-fit: cover
 
 	&.placeholder
 		background: var(--c-surface)
+
+.favorite-mark
+	position: absolute
+	right: -4px
+	bottom: -4px
+	display: grid
+	place-items: center
+	width: 16px
+	height: 16px
+	color: var(--c-favorite)
+	background: var(--c-surface)
+	border: 1px solid var(--c-favorite)
+	border-radius: var(--radius-full)
+	font-size: 10px
+	line-height: 1
+
+.visually-hidden
+	position: absolute
+	width: 1px
+	height: 1px
+	padding: 0
+	margin: -1px
+	overflow: hidden
+	clip: rect(0, 0, 0, 0)
+	white-space: nowrap
+	border: 0
 
 .channel-info
 	min-width: 0

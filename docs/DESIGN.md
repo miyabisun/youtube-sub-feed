@@ -31,6 +31,11 @@ colors:
   shorts-subtle: "rgba(143, 28, 90, 0.08)"
   shorts-dark: "#ff6090"
   shorts-subtle-dark: "rgba(255, 96, 144, 0.15)"
+  # favorite = a channel saved by the current user.
+  favorite: "#8a6000"
+  favorite-subtle: "rgba(138, 96, 0, 0.10)"
+  favorite-dark: "#d6a632"
+  favorite-subtle-dark: "rgba(214, 166, 50, 0.12)"
 ---
 
 # youtube-sub-feed — Sumi Project Overrides
@@ -125,14 +130,18 @@ Domain components on top of the Sumi recipes:
   left/right cycles through the same group order, quiet per the template's
   gesture rule.
 - **Menu (hamburger):** quiet icon button at the header's right opening a
-  floating menu (Sumi menu recipe): channel list, group management, and
-  the YouTube sync action, which shows busy state by disabling itself and
-  swapping its label (同期中...).
+  floating menu (Sumi menu recipe): video list, channel list, group
+  management, and the YouTube sync action, which shows busy state by
+  disabling itself and swapping its label (同期中...).
 - **Channel row:** 40px **circular** avatar — the deliberate domain
   exception to the template's no-circles rule, because a channel icon is
   YouTube identity, not chrome — with title and group names (caption,
   muted), then a trailing action rail: an outlined YT external-link chip
-  and delete. Deletion is a **two-step inline confirm**: a quiet ✕ swaps
+  and delete. A favorite channel has a 2px gold avatar ring plus a small
+  star marker (favorite data color, with shape as a non-color cue).
+  Right-click or a 500ms touch long-press opens a modal action menu where
+  favorite state can be toggled without leaving the list. Deletion is a
+  **two-step inline confirm**: a quiet ✕ swaps
   in place to a danger-filled 削除確認 plus a キャンセル escape; no modal.
 - **Channel detail:** header with the channel title, a YT external-link
   chip, and **toggle switches** (36×20 pill track, thumb slides right and

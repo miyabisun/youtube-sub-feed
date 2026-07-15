@@ -187,6 +187,7 @@
 		{#if menuOpen}
 			<button class="menu-overlay" onclick={closeMenu} aria-label="メニューを閉じる"></button>
 			<nav class="menu-dropdown">
+				<a class="menu-item" class:active={isActive('/')} href={link('/')} onclick={closeMenu}>動画一覧</a>
 				<a class="menu-item" class:active={isActive('/channels')} href={link('/channels')} onclick={closeMenu}>チャンネル</a>
 				<a class="menu-item" class:active={isActive('/settings')} href={link('/settings')} onclick={closeMenu}>グループ管理</a>
 				<button class="menu-item menu-action" onclick={syncChannels} disabled={syncing}>
