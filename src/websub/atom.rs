@@ -214,9 +214,6 @@ mod tests {
     #[test]
     fn test_decode_xml_entities_preserves_overflowing_decimal_reference() {
         // A decimal reference that overflows u32 fails to parse and is preserved.
-        assert_eq!(
-            decode_xml_entities("&#99999999999;"),
-            "&#99999999999;"
-        );
+        assert_eq!(decode_xml_entities("&#99999999999;"), "&#99999999999;");
     }
 }

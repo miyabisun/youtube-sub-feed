@@ -569,7 +569,9 @@ mod tests {
             let orders: Vec<i64> = {
                 let conn = state.db.lock().unwrap();
                 let mut stmt = conn
-                    .prepare("SELECT sort_order FROM groups WHERE user_id = 1 ORDER BY sort_order ASC")
+                    .prepare(
+                        "SELECT sort_order FROM groups WHERE user_id = 1 ORDER BY sort_order ASC",
+                    )
                     .unwrap();
                 stmt.query_map([], |row| row.get(0))
                     .unwrap()
@@ -605,14 +607,15 @@ mod tests {
 
             let name: String = {
                 let conn = state.db.lock().unwrap();
-                conn.query_row(
-                    "SELECT name FROM groups WHERE id = ?1",
-                    [foreign],
-                    |row| row.get(0),
-                )
+                conn.query_row("SELECT name FROM groups WHERE id = ?1", [foreign], |row| {
+                    row.get(0)
+                })
                 .unwrap()
             };
-            assert_eq!(name, "User2 Group", "another user's group must be unchanged");
+            assert_eq!(
+                name, "User2 Group",
+                "another user's group must be unchanged"
+            );
         }
 
         #[tokio::test]

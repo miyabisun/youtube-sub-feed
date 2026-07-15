@@ -392,7 +392,10 @@ mod tests {
         // Without the group filter, both appear (dynamic SQL: no JOIN).
         assert_eq!(feed_ids(&state, "").await, vec!["v2", "v1"]);
         // With the group filter, only UC1's video appears.
-        assert_eq!(feed_ids(&state, &format!("?group={group_id}")).await, vec!["v1"]);
+        assert_eq!(
+            feed_ids(&state, &format!("?group={group_id}")).await,
+            vec!["v1"]
+        );
     }
 
     #[tokio::test]
@@ -405,7 +408,10 @@ mod tests {
         insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
 
         // No-group variant: limit=?2 offset=?3
-        assert_eq!(feed_ids(&state, "?limit=2&offset=0").await, vec!["v3", "v2"]);
+        assert_eq!(
+            feed_ids(&state, "?limit=2&offset=0").await,
+            vec!["v3", "v2"]
+        );
         assert_eq!(feed_ids(&state, "?limit=2&offset=2").await, vec!["v1"]);
         // Group variant: limit=?3 offset=?4
         assert_eq!(

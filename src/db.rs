@@ -574,7 +574,10 @@ mod tests {
             "idx_videos_channel",
             "idx_videos_published",
         ];
-        assert_eq!(indexes, expected, "index set must match create_tables exactly");
+        assert_eq!(
+            indexes, expected,
+            "index set must match create_tables exactly"
+        );
     }
 
     #[test]

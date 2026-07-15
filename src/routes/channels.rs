@@ -1036,8 +1036,11 @@ mod tests {
             let state = setup_state();
             let cid = "UCxxxxxxxxxxxxxxxxxxxxxx"; // valid 24-char UC id
 
-            let status =
-                post_channel(&state, &format!(r#"{{"channel_id":"{cid}","title":"My Ch"}}"#)).await;
+            let status = post_channel(
+                &state,
+                &format!(r#"{{"channel_id":"{cid}","title":"My Ch"}}"#),
+            )
+            .await;
             assert_eq!(status, StatusCode::OK);
 
             let (title, sub_count): (String, i64) = {
@@ -1132,7 +1135,12 @@ mod tests {
             subscribe_user1(&state, "UCsettingsxxxxxxxxxxxxxx", "s");
 
             assert_eq!(
-                patch_channel(&state, "UCsettingsxxxxxxxxxxxxxx", r#"{"show_livestreams":1}"#).await,
+                patch_channel(
+                    &state,
+                    "UCsettingsxxxxxxxxxxxxxx",
+                    r#"{"show_livestreams":1}"#
+                )
+                .await,
                 StatusCode::OK
             );
 
