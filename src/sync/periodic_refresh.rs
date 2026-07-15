@@ -70,7 +70,7 @@ pub(crate) async fn register_new_subscription(state: &AppState, channel_id: &str
     // If a subscription already exists, preserve its secret: rotating it here creates
     // a window where hub pushes (still signed with the old secret) fail HMAC verification
     // until the hub re-verifies with the new secret.
-    let now = crate::util::now_rfc3339();
+    let now = crate::util::now_unix();
     let secret = {
         let conn = state.db.lock().unwrap();
         let existing: Option<String> = conn
@@ -142,15 +142,17 @@ async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &st
 /// combination of `RENEW_THRESHOLD_SECONDS` and the `expires_at < ?` predicate —
 /// can be tested directly, without going through `hub::subscribe`'s network call.
 fn select_subscriptions_due_for_renewal(state: &AppState) -> Vec<(String, String)> {
-    let threshold = (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let threshold =
+        (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS)).timestamp();
 
     let conn = state.db.lock().unwrap();
     // The `result` binding is load-bearing: it drops the `Statement` temporary
     // before `conn`, avoiding an E0597 borrow-lifetime error.
-    let result = match conn
-        .prepare("SELECT channel_id, hub_secret FROM channel_subscriptions WHERE expires_at < ?1")
-    {
+    let result = match conn.prepare(
+        "SELECT channel_id, hub_secret FROM channel_subscriptions
+             WHERE expires_at IS NULL OR expires_at < ?1
+             ORDER BY channel_id",
+    ) {
         Ok(mut stmt) => stmt
             .query_map([&threshold], |row| Ok((row.get(0)?, row.get(1)?)))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -309,23 +311,25 @@ mod tests {
         // under test (not a re-implemented copy of the query).
         //   UC_near expires in 12h  (< 2-day threshold) → selected
         //   UC_far  expires in 10d  (> 2-day threshold) → skipped
+        //   UC_null has an unrepairable legacy timestamp → selected
         let state = AppState::test();
-        let far_future = (chrono::Utc::now() + chrono::Duration::days(10))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let near_future = (chrono::Utc::now() + chrono::Duration::hours(12))
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let far_future = (chrono::Utc::now() + chrono::Duration::days(10)).timestamp();
+        let near_future = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp();
+        let now = chrono::Utc::now().timestamp();
 
         {
             let conn = state.db.lock().unwrap();
             conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES ('UC_far', 'F', ?1), ('UC_near', 'N', ?1)",
-                [&now],
+                "INSERT INTO channels (id, title, created_at) VALUES
+                 ('UC_far', 'F', ?1), ('UC_near', 'N', ?1), ('UC_null', 'N', ?1)",
+                [now],
             )
             .unwrap();
             conn.execute(
                 "INSERT INTO channel_subscriptions (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at)
-                 VALUES ('UC_far', 's1', 864000, ?1, ?2), ('UC_near', 's2', 86400, ?1, ?3)",
+                 VALUES ('UC_far', 's1', 864000, ?1, ?2),
+                        ('UC_near', 's2', 86400, ?1, ?3),
+                        ('UC_null', 's3', 0, ?1, NULL)",
                 rusqlite::params![now, far_future, near_future],
             )
             .unwrap();
@@ -335,8 +339,11 @@ mod tests {
 
         assert_eq!(
             selected,
-            vec![("UC_near".to_string(), "s2".to_string())],
-            "Only UC_near (within threshold) should be picked, carrying its hub_secret"
+            vec![
+                ("UC_near".to_string(), "s2".to_string()),
+                ("UC_null".to_string(), "s3".to_string()),
+            ],
+            "Near-expiry and unknown-expiry subscriptions must be renewed"
         );
     }
 }

@@ -93,7 +93,7 @@ async fn get_channels(
                     "title": row.get::<_, String>(1)?,
                     "thumbnail_url": row.get::<_, Option<String>>(2)?,
                     "show_livestreams": row.get::<_, i64>(3)?,
-                    "last_fetched_at": row.get::<_, Option<String>>(4)?,
+                    "last_fetched_at": crate::util::row_timestamp_to_rfc3339(row, 4)?,
                     "group_names": row.get::<_, Option<String>>(5)?,
                     "is_favorite": row.get::<_, i64>(6)?,
                 }))
@@ -154,11 +154,11 @@ async fn get_channel_videos(
                 Ok(json!({
                     "id": row.get::<_, String>(0)?,
                     "title": row.get::<_, String>(1)?,
-                    "published_at": row.get::<_, Option<String>>(2)?,
+                    "published_at": crate::util::row_timestamp_to_rfc3339(row, 2)?,
                     "duration": row.get::<_, Option<String>>(3)?,
                     "is_short": row.get::<_, i64>(4)?,
                     "is_livestream": row.get::<_, i64>(5)?,
-                    "livestream_ended_at": row.get::<_, Option<String>>(6)?,
+                    "livestream_ended_at": crate::util::row_timestamp_to_rfc3339(row, 6)?,
                     "is_members_only": row.get::<_, i64>(7)?,
                     "is_hidden": row.get::<_, i64>(8)?,
                 }))
@@ -293,7 +293,7 @@ async fn add_channel(
         return Err(AppError::BadRequest(msg));
     }
 
-    let now = crate::util::now_rfc3339();
+    let now = crate::util::now_unix();
     let upload_playlist_id =
         crate::youtube::derive_playlist_id(&channel_id, crate::youtube::PlaylistKind::Uploads);
     let title = body.title.as_deref().unwrap_or(&channel_id).to_string();

@@ -61,9 +61,7 @@ pub async fn verification(
     match params.hub_mode.as_str() {
         "subscribe" => {
             let lease = params.hub_lease_seconds.unwrap_or(0);
-            let now = chrono::Utc::now();
-            let expires_at = (now + chrono::Duration::seconds(lease))
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(lease)).timestamp();
 
             let conn = state.db.lock().unwrap();
             let updated = conn
@@ -191,12 +189,12 @@ pub async fn notification(
         return StatusCode::OK;
     }
 
-    let now = crate::util::now_rfc3339();
+    let now = crate::util::now_unix();
 
     let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
         let channel_title = lookup_channel_title(&conn, &channel_id);
-        let newly_inserted = partition_new_entries(&conn, &channel_id, &entries, &now);
+        let newly_inserted = partition_new_entries(&conn, &channel_id, &entries, now);
         log_new_videos(&channel_title, &channel_id, &newly_inserted);
         newly_inserted.iter().map(|e| e.video_id.clone()).collect()
     };
@@ -239,7 +237,7 @@ fn partition_new_entries<'a>(
     conn: &rusqlite::Connection,
     channel_id: &str,
     entries: &'a [AtomEntry],
-    now: &str,
+    now: i64,
 ) -> Vec<&'a AtomEntry> {
     let mut newly_inserted = Vec::new();
     for entry in entries {
@@ -263,10 +261,17 @@ fn partition_new_entries<'a>(
         match result {
             Ok(()) => newly_inserted.push(entry),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // Row already existed: refresh the title if it changed.
+                // Repair an unknown or legacy publication timestamp when a
+                // valid Atom timestamp is redelivered.
                 let _ = conn.execute(
-                    "UPDATE videos SET title = ?1 WHERE id = ?2 AND title != ?1",
-                    rusqlite::params![entry.title, entry.video_id],
+                    "UPDATE videos
+                     SET title = ?1,
+                         published_at = CASE
+                             WHEN ?3 IS NOT NULL AND (published_at IS NULL OR typeof(published_at) != 'integer')
+                             THEN ?3 ELSE published_at END,
+                         fetched_at = ?4
+                     WHERE id = ?2",
+                    rusqlite::params![entry.title, entry.video_id, entry.published, now],
                 );
             }
             Err(e) => {
@@ -584,21 +589,21 @@ mod tests {
             AtomEntry {
                 video_id: "existing".to_string(),
                 title: "New Title".to_string(),
-                published: "2026-04-26T00:00:00Z".to_string(),
+                published: Some(1777161600),
             },
             AtomEntry {
                 video_id: "fresh1".to_string(),
                 title: "First".to_string(),
-                published: "2026-04-26T00:00:00Z".to_string(),
+                published: Some(1777161600),
             },
             AtomEntry {
                 video_id: "fresh2".to_string(),
                 title: "Second".to_string(),
-                published: "2026-04-26T00:00:00Z".to_string(),
+                published: Some(1777161600),
             },
         ];
 
-        let new = partition_new_entries(&conn, "UC_x", &entries, "2026-04-26T00:00:00Z");
+        let new = partition_new_entries(&conn, "UC_x", &entries, 1777161600);
 
         let new_ids: Vec<&str> = new.iter().map(|e| e.video_id.as_str()).collect();
         assert_eq!(new_ids.len(), 2);
@@ -621,6 +626,17 @@ mod tests {
             title, "New Title",
             "Existing row's title should be refreshed when changed"
         );
+        let published_at: i64 = conn
+            .query_row(
+                "SELECT published_at FROM videos WHERE id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            published_at, 1777161600,
+            "legacy timestamps must be repaired"
+        );
     }
 
     #[test]
@@ -631,10 +647,10 @@ mod tests {
         let entries = vec![AtomEntry {
             video_id: "v1".to_string(),
             title: "T".to_string(),
-            published: "2026-04-26T00:00:00Z".to_string(),
+            published: Some(1777161600),
         }];
 
-        let new = partition_new_entries(&conn, "UC_ghost", &entries, "2026-04-26T00:00:00Z");
+        let new = partition_new_entries(&conn, "UC_ghost", &entries, 1777161600);
         assert!(
             new.is_empty(),
             "FK violation must not be reported as new video"

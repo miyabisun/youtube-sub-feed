@@ -16,7 +16,7 @@ static NUMERIC_ENTITY_RE: LazyLock<Regex> =
 pub struct AtomEntry {
     pub video_id: String,
     pub title: String,
-    pub published: String,
+    pub published: Option<i64>,
 }
 
 /// Decode the five XML predefined entities and numeric character references
@@ -68,8 +68,7 @@ pub fn parse_atom_feed(xml: &str) -> Vec<AtomEntry> {
             .unwrap_or_default();
         let published = PUBLISHED_RE
             .captures(block)
-            .map(|c| c[1].to_string())
-            .unwrap_or_default();
+            .and_then(|c| crate::util::rfc3339_to_unix(&c[1]));
 
         if let Some(video_id) = video_id {
             entries.push(AtomEntry {
@@ -142,7 +141,20 @@ mod tests {
     #[test]
     fn test_parse_published_date() {
         let entries = parse_atom_feed(SAMPLE_FEED);
-        assert_eq!(entries[0].published, "2024-01-15T10:00:00+00:00");
+        assert_eq!(entries[0].published, Some(1705312800));
+    }
+
+    #[test]
+    fn missing_invalid_and_naive_publication_times_are_unknown() {
+        for published in [
+            "",
+            "<published>invalid</published>",
+            "<published>2024-01-15 10:00:00</published>",
+        ] {
+            let xml =
+                format!("<feed><entry><yt:videoId>vid1</yt:videoId>{published}</entry></feed>");
+            assert_eq!(parse_atom_feed(&xml)[0].published, None);
+        }
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub fn open(path: &str) -> Connection {
     create_tables(&conn);
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
+    migrate_timestamps_to_unix(&conn);
     decode_video_titles_xml_entities(&conn);
     drop_users_oauth_token_columns(&conn);
     add_users_email_unique_index(&conn);
@@ -199,8 +200,8 @@ fn create_tables(conn: &Connection) {
             email TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'member',
             rss_token TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT
+            created_at INTEGER DEFAULT (unixepoch()),
+            updated_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS channels (
@@ -208,21 +209,21 @@ fn create_tables(conn: &Connection) {
             title TEXT NOT NULL,
             thumbnail_url TEXT,
             upload_playlist_id TEXT,
-            last_fetched_at TEXT,
-            created_at TEXT NOT NULL
+            last_fetched_at INTEGER,
+            created_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS videos (
             id TEXT PRIMARY KEY,
             channel_id TEXT NOT NULL,
             title TEXT NOT NULL,
-            published_at TEXT,
+            published_at INTEGER,
             duration TEXT,
             is_short INTEGER NOT NULL DEFAULT 0,
             is_livestream INTEGER NOT NULL DEFAULT 0,
             is_members_only INTEGER NOT NULL DEFAULT 0,
-            livestream_ended_at TEXT,
-            fetched_at TEXT,
+            livestream_ended_at INTEGER,
+            fetched_at INTEGER,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
 
@@ -231,7 +232,7 @@ fn create_tables(conn: &Connection) {
             channel_id TEXT NOT NULL,
             is_favorite INTEGER NOT NULL DEFAULT 0,
             show_livestreams INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at INTEGER DEFAULT (unixepoch()),
             PRIMARY KEY (user_id, channel_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
@@ -241,7 +242,7 @@ fn create_tables(conn: &Connection) {
             user_id INTEGER NOT NULL,
             video_id TEXT NOT NULL,
             is_hidden INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            created_at INTEGER DEFAULT (unixepoch()),
             PRIMARY KEY (user_id, video_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
@@ -252,7 +253,7 @@ fn create_tables(conn: &Connection) {
             user_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             sort_order INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
+            created_at INTEGER,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         );
 
@@ -268,8 +269,8 @@ fn create_tables(conn: &Connection) {
             channel_id TEXT PRIMARY KEY,
             hub_secret TEXT NOT NULL,
             lease_seconds INTEGER NOT NULL DEFAULT 0,
-            subscribed_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
+            subscribed_at INTEGER,
+            expires_at INTEGER,
             verification_status TEXT NOT NULL DEFAULT 'pending',
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
@@ -286,6 +287,220 @@ fn create_tables(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_channel_subscriptions_expires ON channel_subscriptions(expires_at);",
     )
     .expect("Failed to create tables");
+}
+
+/// Convert legacy RFC 3339 TEXT timestamps to Unix seconds and rebuild the
+/// timestamp-bearing tables with INTEGER affinity. Values without an explicit
+/// offset are ambiguous and become NULL rather than being guessed as UTC/JST.
+fn migrate_timestamps_to_unix(conn: &Connection) {
+    const CORE_TIMESTAMPS: &[(&str, &[&str])] = &[
+        ("users", &["created_at", "updated_at"]),
+        ("channels", &["last_fetched_at", "created_at"]),
+        (
+            "videos",
+            &["published_at", "livestream_ended_at", "fetched_at"],
+        ),
+        ("user_channels", &["created_at"]),
+        ("user_videos", &["created_at"]),
+        ("groups", &["created_at"]),
+        ("channel_subscriptions", &["subscribed_at", "expires_at"]),
+    ];
+    let needs_rebuild = CORE_TIMESTAMPS.iter().any(|(table, columns)| {
+        columns.iter().any(|column| {
+            column_declaration(conn, table, column)
+                .map(|(kind, not_null)| kind != "INTEGER" || not_null)
+                .unwrap_or(true)
+        })
+    });
+    if !needs_rebuild {
+        normalize_timestamp_storage(conn, CORE_TIMESTAMPS);
+        migrate_sessions_to_unix(conn);
+        return;
+    }
+
+    tracing::info!("[migrate] Converting SQLite timestamps to Unix seconds");
+    conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")
+        .expect("Failed to start timestamp migration");
+
+    let result = conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_users_email;
+         DROP INDEX IF EXISTS idx_users_rss_token;
+         DROP INDEX IF EXISTS idx_videos_published;
+         DROP INDEX IF EXISTS idx_videos_channel;
+         DROP INDEX IF EXISTS idx_user_channels_user;
+         DROP INDEX IF EXISTS idx_user_channels_favorite;
+         DROP INDEX IF EXISTS idx_user_videos_user;
+         DROP INDEX IF EXISTS idx_user_videos_hidden;
+         DROP INDEX IF EXISTS idx_groups_user;
+         DROP INDEX IF EXISTS idx_channel_subscriptions_expires;
+
+         CREATE TABLE users_unix (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, google_id TEXT, email TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member', rss_token TEXT,
+            created_at INTEGER DEFAULT (unixepoch()), updated_at INTEGER);
+         INSERT INTO users_unix
+         SELECT id, google_id, email, role, rss_token,
+            CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END,
+            CASE WHEN typeof(updated_at)='integer' THEN updated_at WHEN instr(updated_at,'T')>0 AND (substr(trim(updated_at),-1)='Z' OR substr(trim(updated_at),-6,1) IN ('+','-')) THEN unixepoch(updated_at) END
+         FROM users;
+
+         CREATE TABLE channels_unix (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL, thumbnail_url TEXT,
+            upload_playlist_id TEXT, last_fetched_at INTEGER, created_at INTEGER);
+         INSERT INTO channels_unix
+         SELECT id,title,thumbnail_url,upload_playlist_id,
+            CASE WHEN typeof(last_fetched_at)='integer' THEN last_fetched_at WHEN instr(last_fetched_at,'T')>0 AND (substr(trim(last_fetched_at),-1)='Z' OR substr(trim(last_fetched_at),-6,1) IN ('+','-')) THEN unixepoch(last_fetched_at) END,
+            CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END
+         FROM channels;
+
+         CREATE TABLE videos_unix (
+            id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, title TEXT NOT NULL,
+            published_at INTEGER, duration TEXT, is_short INTEGER NOT NULL DEFAULT 0,
+            is_livestream INTEGER NOT NULL DEFAULT 0, is_members_only INTEGER NOT NULL DEFAULT 0,
+            livestream_ended_at INTEGER, fetched_at INTEGER,
+            FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE);
+         INSERT INTO videos_unix
+         SELECT id,channel_id,title,
+            CASE WHEN typeof(published_at)='integer' THEN published_at WHEN instr(published_at,'T')>0 AND (substr(trim(published_at),-1)='Z' OR substr(trim(published_at),-6,1) IN ('+','-')) THEN unixepoch(published_at) END,
+            duration,is_short,is_livestream,is_members_only,
+            CASE WHEN typeof(livestream_ended_at)='integer' THEN livestream_ended_at WHEN instr(livestream_ended_at,'T')>0 AND (substr(trim(livestream_ended_at),-1)='Z' OR substr(trim(livestream_ended_at),-6,1) IN ('+','-')) THEN unixepoch(livestream_ended_at) END,
+            CASE WHEN typeof(fetched_at)='integer' THEN fetched_at WHEN instr(fetched_at,'T')>0 AND (substr(trim(fetched_at),-1)='Z' OR substr(trim(fetched_at),-6,1) IN ('+','-')) THEN unixepoch(fetched_at) END
+         FROM videos;
+
+         CREATE TABLE user_channels_unix (
+            user_id INTEGER NOT NULL, channel_id TEXT NOT NULL, is_favorite INTEGER NOT NULL DEFAULT 0,
+            show_livestreams INTEGER NOT NULL DEFAULT 0, created_at INTEGER DEFAULT (unixepoch()),
+            PRIMARY KEY(user_id,channel_id), FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE);
+         INSERT INTO user_channels_unix
+         SELECT user_id,channel_id,is_favorite,show_livestreams,
+            CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END
+         FROM user_channels;
+
+         CREATE TABLE user_videos_unix (
+            user_id INTEGER NOT NULL, video_id TEXT NOT NULL, is_hidden INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER DEFAULT (unixepoch()), PRIMARY KEY(user_id,video_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE);
+         INSERT INTO user_videos_unix
+         SELECT user_id,video_id,is_hidden,
+            CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END
+         FROM user_videos;
+
+         CREATE TABLE groups_unix (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+         INSERT INTO groups_unix
+         SELECT id,user_id,name,sort_order,
+            CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END
+         FROM groups;
+
+         CREATE TABLE channel_subscriptions_unix (
+            channel_id TEXT PRIMARY KEY, hub_secret TEXT NOT NULL, lease_seconds INTEGER NOT NULL DEFAULT 0,
+            subscribed_at INTEGER, expires_at INTEGER, verification_status TEXT NOT NULL DEFAULT 'pending',
+            FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE);
+         INSERT INTO channel_subscriptions_unix
+         SELECT channel_id,hub_secret,lease_seconds,
+            CASE WHEN typeof(subscribed_at)='integer' THEN subscribed_at WHEN instr(subscribed_at,'T')>0 AND (substr(trim(subscribed_at),-1)='Z' OR substr(trim(subscribed_at),-6,1) IN ('+','-')) THEN unixepoch(subscribed_at) END,
+            CASE WHEN typeof(expires_at)='integer' THEN expires_at WHEN instr(expires_at,'T')>0 AND (substr(trim(expires_at),-1)='Z' OR substr(trim(expires_at),-6,1) IN ('+','-')) THEN unixepoch(expires_at) END,
+            verification_status FROM channel_subscriptions;
+
+         DROP TABLE channel_subscriptions; DROP TABLE groups; DROP TABLE user_videos;
+         DROP TABLE user_channels; DROP TABLE videos; DROP TABLE channels; DROP TABLE users;
+         ALTER TABLE users_unix RENAME TO users;
+         ALTER TABLE channels_unix RENAME TO channels;
+         ALTER TABLE videos_unix RENAME TO videos;
+         ALTER TABLE user_channels_unix RENAME TO user_channels;
+         ALTER TABLE user_videos_unix RENAME TO user_videos;
+         ALTER TABLE groups_unix RENAME TO groups;
+         ALTER TABLE channel_subscriptions_unix RENAME TO channel_subscriptions;
+         COMMIT;",
+    );
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        panic!("Timestamp migration failed: {error}");
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("Failed to restore foreign keys");
+    create_tables(conn);
+    normalize_timestamp_storage(conn, CORE_TIMESTAMPS);
+    migrate_sessions_to_unix(conn);
+}
+
+fn column_declaration(conn: &Connection, table: &str, column: &str) -> Option<(String, bool)> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).ok()?;
+    let found = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+            ))
+        })
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|(name, kind, not_null)| (name == column).then_some((kind, not_null)));
+    found
+}
+
+fn timestamp_conversion(column: &str) -> String {
+    format!(
+        "CASE WHEN typeof({column})='integer' THEN {column} \
+         WHEN instr({column},'T')>0 AND (substr(trim({column}),-1)='Z' OR substr(trim({column}),-6,1) IN ('+','-')) \
+         THEN unixepoch({column}) END"
+    )
+}
+
+fn normalize_timestamp_storage(conn: &Connection, tables: &[(&str, &[&str])]) {
+    for (table, columns) in tables {
+        let assignments = columns
+            .iter()
+            .map(|column| format!("{column}={}", timestamp_conversion(column)))
+            .collect::<Vec<_>>()
+            .join(",");
+        conn.execute_batch(&format!("UPDATE {table} SET {assignments};"))
+            .unwrap_or_else(|error| panic!("Failed to normalize {table} timestamps: {error}"));
+    }
+}
+
+fn migrate_sessions_to_unix(conn: &Connection) {
+    if conn.prepare("SELECT 1 FROM sessions LIMIT 0").is_err() {
+        return;
+    }
+    let needs_rebuild = ["expires_at", "created_at"].iter().any(|column| {
+        column_declaration(conn, "sessions", column)
+            .map(|(kind, not_null)| kind != "INTEGER" || not_null)
+            .unwrap_or(true)
+    });
+    if !needs_rebuild {
+        conn.execute_batch(&format!(
+            "UPDATE sessions SET expires_at={}, created_at={};",
+            timestamp_conversion("expires_at"),
+            timestamp_conversion("created_at")
+        ))
+        .expect("Failed to normalize session timestamps");
+        return;
+    }
+    conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")
+        .expect("Failed to start session timestamp migration");
+    let result = conn.execute_batch(&format!(
+        "CREATE TABLE sessions_unix (
+            id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER, created_at INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+         INSERT INTO sessions_unix SELECT id,user_id,{},{} FROM sessions;
+         DROP TABLE sessions;
+         ALTER TABLE sessions_unix RENAME TO sessions;
+         COMMIT;",
+        timestamp_conversion("expires_at"),
+        timestamp_conversion("created_at")
+    ));
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        panic!("Session timestamp migration failed: {error}");
+    }
+    conn.execute_batch("PRAGMA foreign_keys=ON;")
+        .expect("Failed to restore foreign keys");
 }
 
 fn migrate(conn: &Connection) {
@@ -310,13 +525,13 @@ fn migrate(conn: &Connection) {
                 email TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'member',
                 rss_token TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER
             );
 
             INSERT OR IGNORE INTO users (id, google_id, email, role, created_at, updated_at)
             SELECT id, google_id, email, 'master',
-                   COALESCE(updated_at, datetime('now')), updated_at
+                   COALESCE(updated_at, unixepoch()), updated_at
             FROM auth;
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -328,8 +543,8 @@ fn migrate(conn: &Connection) {
             "CREATE TABLE sessions_new (
                 id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
+                expires_at INTEGER,
+                created_at INTEGER,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
@@ -347,7 +562,7 @@ fn migrate(conn: &Connection) {
                 channel_id TEXT NOT NULL,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
                 show_livestreams INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (user_id, channel_id),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
@@ -364,14 +579,14 @@ fn migrate(conn: &Connection) {
                 user_id INTEGER NOT NULL,
                 video_id TEXT NOT NULL,
                 is_hidden INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (user_id, video_id),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
             );
 
             INSERT OR IGNORE INTO user_videos (user_id, video_id, is_hidden, created_at)
-            SELECT u.id, v.id, 1, COALESCE(v.fetched_at, datetime('now'))
+            SELECT u.id, v.id, 1, COALESCE(v.fetched_at, unixepoch())
             FROM videos v, users u
             WHERE v.is_hidden = 1;",
         )?;
@@ -383,8 +598,8 @@ fn migrate(conn: &Connection) {
                 title TEXT NOT NULL,
                 thumbnail_url TEXT,
                 upload_playlist_id TEXT,
-                last_fetched_at TEXT,
-                created_at TEXT NOT NULL
+                last_fetched_at INTEGER,
+                created_at INTEGER
             );
 
             INSERT INTO channels_new (id, title, thumbnail_url, upload_playlist_id, last_fetched_at, created_at)
@@ -406,8 +621,8 @@ fn migrate(conn: &Connection) {
                 duration TEXT,
                 is_short INTEGER NOT NULL DEFAULT 0,
                 is_livestream INTEGER NOT NULL DEFAULT 0,
-                livestream_ended_at TEXT,
-                fetched_at TEXT,
+                livestream_ended_at INTEGER,
+                fetched_at INTEGER,
                 FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
             );
 
@@ -426,7 +641,7 @@ fn migrate(conn: &Connection) {
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 sort_order INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
+                created_at INTEGER,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
@@ -1453,9 +1668,12 @@ mod tests {
              INSERT INTO sessions (id, auth_id, expires_at, created_at) VALUES ('s1', 1, '2026-01-01T00:00:00Z', '2025-01-01T00:00:00Z');",
         ).unwrap();
 
-        // Run migration + create_tables
+        // Run the same migration chain as open().
         migrate(&conn);
         create_tables(&conn);
+        drop_videos_thumbnail_url(&conn);
+        add_videos_is_members_only(&conn);
+        migrate_timestamps_to_unix(&conn);
 
         // Verify: auth table gone, users table exists with master role
         assert!(
@@ -1523,6 +1741,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(group_user, 1);
+
+        for (table, column) in [
+            ("users", "created_at"),
+            ("channels", "created_at"),
+            ("videos", "published_at"),
+            ("groups", "created_at"),
+            ("sessions", "expires_at"),
+        ] {
+            assert_eq!(
+                super::column_declaration(&conn, table, column).map(|(kind, _)| kind),
+                Some("INTEGER".to_string()),
+                "{table}.{column} must use INTEGER affinity"
+            );
+        }
+        let session_expiry: i64 = conn
+            .query_row("SELECT expires_at FROM sessions WHERE id='s1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(session_expiry, 1767225600);
     }
 
     #[test]
@@ -1605,5 +1843,99 @@ mod tests {
         super::drop_users_oauth_token_columns(&conn);
 
         assert!(!super::column_exists(&conn, "users", "access_token"));
+    }
+
+    #[test]
+    fn timestamp_migration_converts_absolute_text_and_nulls_ambiguous_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::create_tables(&conn);
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP INDEX idx_videos_published;
+             DROP INDEX idx_videos_channel;
+             DROP TABLE videos;
+             CREATE TABLE videos (
+                id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, title TEXT NOT NULL,
+                published_at TEXT, duration TEXT, is_short INTEGER NOT NULL DEFAULT 0,
+                is_livestream INTEGER NOT NULL DEFAULT 0, is_members_only INTEGER NOT NULL DEFAULT 0,
+                livestream_ended_at TEXT, fetched_at TEXT);
+             INSERT INTO channels (id,title,created_at) VALUES ('UC1','Ch','2024-01-01T00:00:00Z');
+             INSERT INTO videos (id,channel_id,title,published_at)
+             VALUES ('absolute','UC1','A','2024-01-15T19:00:00+09:00'),
+                    ('naive','UC1','N','2024-01-15 19:00:00'),
+                    ('invalid','UC1','I','not-a-date');
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+
+        super::migrate_timestamps_to_unix(&conn);
+
+        let kind: String = conn
+            .query_row(
+                "SELECT type FROM pragma_table_info('videos') WHERE name='published_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "INTEGER");
+        let absolute: Option<i64> = conn
+            .query_row(
+                "SELECT published_at FROM videos WHERE id='absolute'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(absolute, Some(1705312800));
+        for id in ["naive", "invalid"] {
+            let value: Option<i64> = conn
+                .query_row("SELECT published_at FROM videos WHERE id=?1", [id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(value, None, "{id} must not be guessed");
+        }
+    }
+
+    #[test]
+    fn integer_schema_normalizes_text_storage_across_every_timestamp_table() {
+        let conn = open_memory();
+        conn.execute_batch(
+            "INSERT INTO users (email,created_at,updated_at) VALUES ('a@example.com','2024-01-01T00:00:00Z','bad');
+             INSERT INTO channels (id,title,last_fetched_at,created_at) VALUES ('UC1','Ch','2024-01-01T09:00:00+09:00','2024-01-01 00:00:00');
+             INSERT INTO videos (id,channel_id,title,published_at,livestream_ended_at,fetched_at)
+             VALUES ('v1','UC1','V','2024-01-01T00:00:00Z','bad','2024-01-01T00:00:00+00:00');
+             INSERT INTO user_channels (user_id,channel_id,created_at) VALUES (1,'UC1','2024-01-01T00:00:00Z');
+             INSERT INTO user_videos (user_id,video_id,created_at) VALUES (1,'v1','bad');
+             INSERT INTO groups (user_id,name,created_at) VALUES (1,'G','2024-01-01T00:00:00Z');
+             INSERT INTO channel_subscriptions (channel_id,hub_secret,subscribed_at,expires_at)
+             VALUES ('UC1','s','2024-01-01T00:00:00Z','bad');",
+        )
+        .unwrap();
+
+        migrate_timestamps_to_unix(&conn);
+
+        for (table, column, expected_type) in [
+            ("users", "created_at", "integer"),
+            ("users", "updated_at", "null"),
+            ("channels", "last_fetched_at", "integer"),
+            ("channels", "created_at", "null"),
+            ("videos", "published_at", "integer"),
+            ("videos", "livestream_ended_at", "null"),
+            ("videos", "fetched_at", "integer"),
+            ("user_channels", "created_at", "integer"),
+            ("user_videos", "created_at", "null"),
+            ("groups", "created_at", "integer"),
+            ("channel_subscriptions", "subscribed_at", "integer"),
+            ("channel_subscriptions", "expires_at", "null"),
+        ] {
+            let actual: String = conn
+                .query_row(
+                    &format!("SELECT typeof({column}) FROM {table} LIMIT 1"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actual, expected_type, "{table}.{column}");
+        }
     }
 }

@@ -57,7 +57,7 @@ async fn get_news(
                 Ok(NewsItem {
                     video_id: row.get(0)?,
                     title: row.get(1)?,
-                    published_at: row.get(2)?,
+                    published_at: crate::util::row_timestamp_to_rfc3339(row, 2)?,
                     channel_title: row.get(3)?,
                 })
             })?

@@ -88,7 +88,7 @@ fn resolve_or_register_user(state: &AppState, email: &str) -> Option<i64> {
     }
 
     let rss_token = uuid::Uuid::new_v4().to_string();
-    let now = crate::util::now_rfc3339();
+    let now = crate::util::now_unix();
     let result = conn.execute(
         "INSERT INTO users (email, role, rss_token, created_at, updated_at) VALUES (?1, 'master', ?2, ?3, ?3)",
         rusqlite::params![email, rss_token, now],

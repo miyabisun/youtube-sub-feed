@@ -59,7 +59,7 @@ async fn get_groups(
                     "id": row.get::<_, i64>(0)?,
                     "name": row.get::<_, String>(1)?,
                     "sort_order": row.get::<_, i64>(2)?,
-                    "created_at": row.get::<_, String>(3)?,
+                    "created_at": row.get::<_, Option<i64>>(3)?.and_then(crate::util::unix_to_rfc3339),
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -102,7 +102,7 @@ async fn create_group(
             |row| row.get(0),
         )?;
         let sort_order = max_order + 1;
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now = crate::util::now_unix();
 
         conn.execute(
             "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -114,7 +114,7 @@ async fn create_group(
             "id": id,
             "name": name,
             "sort_order": sort_order,
-            "created_at": now,
+            "created_at": crate::util::unix_to_rfc3339(now),
         })
     };
     Ok((axum::http::StatusCode::CREATED, Json(row)))

@@ -1,13 +1,51 @@
-/// Current UTC time as an RFC 3339 string with millisecond precision and a
-/// trailing `Z` (e.g. `2026-05-29T12:34:56.789Z`).
-///
-/// This is the canonical timestamp format for every `created_at` / `updated_at`
-/// / `last_fetched_at` column in the database. Centralizing it keeps the
-/// precision policy in one place instead of repeating
-/// `to_rfc3339_opts(SecondsFormat::Millis, true)` at every call site.
-///
-/// Sites that need the `DateTime` itself (e.g. to compute an expiry via
-/// `now + Duration`) keep using `chrono::Utc::now()` directly.
-pub fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+/// Current UTC time as Unix seconds, the canonical representation for every
+/// instant stored in SQLite.
+pub fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Parse a timestamp carrying an explicit offset and return Unix seconds.
+/// Naive timestamps are deliberately rejected rather than guessed.
+pub fn rfc3339_to_unix(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|value| value.timestamp())
+}
+
+/// Render a stored Unix timestamp at an HTTP/API boundary.
+pub fn unix_to_rfc3339(value: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(value, 0)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+pub fn row_timestamp_to_rfc3339(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Integer(value) => Ok(unix_to_rfc3339(value)),
+        ValueRef::Text(value) => Ok(std::str::from_utf8(value)
+            .ok()
+            .and_then(rfc3339_to_unix)
+            .and_then(unix_to_rfc3339)),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_only_absolute_rfc3339_timestamps() {
+        assert_eq!(
+            rfc3339_to_unix("2024-01-15T19:00:00+09:00"),
+            Some(1705312800)
+        );
+        assert_eq!(rfc3339_to_unix("2024-01-15T10:00:00Z"), Some(1705312800));
+        assert_eq!(rfc3339_to_unix("2024-01-15 10:00:00"), None);
+        assert_eq!(rfc3339_to_unix("not-a-date"), None);
+    }
 }

@@ -81,7 +81,7 @@ async fn get_rss_feed(
                 Ok(RssItem {
                     video_id: row.get(0)?,
                     title: row.get(1)?,
-                    published_at: row.get(2)?,
+                    published_at: crate::util::row_timestamp_to_rfc3339(row, 2)?,
                     channel_title: row.get(3)?,
                 })
             })?
@@ -113,7 +113,7 @@ fn build_rss_xml(items: &[RssItem]) -> String {
         let pub_date = item
             .published_at
             .as_deref()
-            .and_then(iso8601_to_rfc2822)
+            .and_then(rfc3339_to_rfc2822)
             .unwrap_or_default();
         let title = escape_xml(&item.title);
         let vid = escape_xml(&item.video_id);
@@ -142,40 +142,10 @@ fn escape_xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn iso8601_to_rfc2822(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.len() < 19 {
-        return None;
-    }
-    let year: i32 = s[0..4].parse().ok()?;
-    let month: u32 = s[5..7].parse().ok()?;
-    let day: u32 = s[8..10].parse().ok()?;
-    let hour: u32 = s[11..13].parse().ok()?;
-    let min: u32 = s[14..16].parse().ok()?;
-    let sec: u32 = s[17..19].parse().ok()?;
-
-    let month_name = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ]
-    .get(month.checked_sub(1)? as usize)?;
-
-    let dow = day_of_week(year, month, day)?;
-    let day_name = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow as usize];
-
-    Some(format!(
-        "{}, {:02} {} {} {:02}:{:02}:{:02} +0000",
-        day_name, day, month_name, year, hour, min, sec
-    ))
-}
-
-fn day_of_week(year: i32, month: u32, day: u32) -> Option<u32> {
-    let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-    let y = if month < 3 { year - 1 } else { year };
-    let idx = month.checked_sub(1)? as usize;
-    if idx >= 12 {
-        return None;
-    }
-    Some(((y + y / 4 - y / 100 + y / 400 + t[idx] + day as i32) % 7) as u32)
+fn rfc3339_to_rfc2822(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.format("%a, %d %b %Y %H:%M:%S %z").to_string())
 }
 
 #[cfg(test)]
@@ -471,28 +441,27 @@ mod tests {
 
     #[test]
     fn test_iso8601_to_rfc2822() {
-        let result = super::iso8601_to_rfc2822("2024-01-15T10:30:00Z");
+        let result = super::rfc3339_to_rfc2822("2024-01-15T10:30:00Z");
         assert_eq!(result, Some("Mon, 15 Jan 2024 10:30:00 +0000".to_string()));
     }
 
     #[test]
     fn test_iso8601_to_rfc2822_invalid() {
-        assert_eq!(super::iso8601_to_rfc2822("invalid"), None);
-        assert_eq!(super::iso8601_to_rfc2822(""), None);
+        assert_eq!(super::rfc3339_to_rfc2822("invalid"), None);
     }
 
     #[test]
     fn test_iso8601_to_rfc2822_boundary_dates() {
         assert_eq!(
-            super::iso8601_to_rfc2822("2024-02-29T00:00:00Z"),
+            super::rfc3339_to_rfc2822("2024-02-29T00:00:00Z"),
             Some("Thu, 29 Feb 2024 00:00:00 +0000".to_string())
         );
         assert_eq!(
-            super::iso8601_to_rfc2822("2024-12-31T23:59:59Z"),
+            super::rfc3339_to_rfc2822("2024-12-31T23:59:59Z"),
             Some("Tue, 31 Dec 2024 23:59:59 +0000".to_string())
         );
         assert_eq!(
-            super::iso8601_to_rfc2822("2025-01-01T00:00:00Z"),
+            super::rfc3339_to_rfc2822("2025-01-01T00:00:00Z"),
             Some("Wed, 01 Jan 2025 00:00:00 +0000".to_string())
         );
     }

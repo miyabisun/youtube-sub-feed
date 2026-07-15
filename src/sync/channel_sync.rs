@@ -41,7 +41,7 @@ pub async fn sync_subscriptions(
     // trigger redundant WebSub subscriptions.
     let remote_set: std::collections::HashSet<String> = remote_ids.iter().cloned().collect();
 
-    let now = crate::util::now_rfc3339();
+    let now = crate::util::now_unix();
     let mut added: Vec<String> = Vec::new();
     let mut removed: Vec<String> = Vec::new();
     // Assigned once inside the block below (deferred init avoids an unused
