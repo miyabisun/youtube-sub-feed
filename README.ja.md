@@ -47,6 +47,7 @@ PORT=3000
 DATABASE_PATH=./feed.db
 GIS_CLIENT_ID=your-client-id.apps.googleusercontent.com
 WEBSUB_CALLBACK_URL=http://localhost:3000/api/websub/callback
+PUBLIC_BASE_URL=https://youtube.example.com
 ```
 
 ### 3. サーバーの起動
@@ -110,6 +111,7 @@ docker run -d \
 | `DATABASE_PATH` | `./feed.db` | SQLite データベースファイルのパス |
 | `GIS_CLIENT_ID` | — | Google Identity Services クライアント ID（チャンネル同期ボタン用。公開値、シークレット不要） |
 | `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub 通知受信エンドポイント（本番は公開 HTTPS URL 必須） |
+| `PUBLIC_BASE_URL` | リクエスト元 | フィード内リンクに使う公開オリジン（例: `https://youtube.example.com`） |
 | `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL（オプション） |
 
 ## コマンド

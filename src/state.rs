@@ -20,6 +20,7 @@ impl AppState {
             config: Config {
                 port: 3000,
                 db_path: ":memory:".to_string(),
+                public_base_url: None,
                 gis_client_id: String::new(),
                 discord_webhook_url: None,
                 websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),

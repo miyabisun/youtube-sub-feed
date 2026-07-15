@@ -4,6 +4,8 @@ use std::env;
 pub struct Config {
     pub port: u16,
     pub db_path: String,
+    /// Canonical public origin for feed links.
+    pub public_base_url: Option<String>,
     /// Google Identity Services client ID (public, used by browser-side sync).
     /// Not secret — safe to embed in client JS.
     pub gis_client_id: String,
@@ -20,6 +22,11 @@ impl Config {
             .unwrap_or(3000);
 
         let db_path = env::var("DATABASE_PATH").unwrap_or_else(|_| "./feed.db".to_string());
+
+        let public_base_url = env::var("PUBLIC_BASE_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty());
 
         // GIS client ID for browser-side OAuth sync (public, not secret).
         let gis_client_id = env::var("GIS_CLIENT_ID").unwrap_or_default();
@@ -44,6 +51,7 @@ impl Config {
         Self {
             port,
             db_path,
+            public_base_url,
             gis_client_id,
             discord_webhook_url,
             websub_callback_url,

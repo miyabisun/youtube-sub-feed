@@ -1,9 +1,10 @@
+use crate::config::Config;
 use crate::error::AppError;
 use crate::middleware::UserId;
 use crate::openapi::ErrorResponse;
 use crate::state::AppState;
 use axum::extract::State;
-use axum::http::header;
+use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Extension, Router};
@@ -34,6 +35,7 @@ struct NewsItem {
 async fn get_news(
     State(state): State<AppState>,
     Extension(UserId(user_id)): Extension<UserId>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let items = {
         let conn = state.db.lock().unwrap();
@@ -63,7 +65,8 @@ async fn get_news(
         items
     };
 
-    let feed = build_json_feed(&items);
+    let base_url = resolve_base_url(&headers, &state.config);
+    let feed = build_json_feed(&items, &base_url);
 
     Ok((
         [(header::CONTENT_TYPE, "application/feed+json; charset=utf-8")],
@@ -71,11 +74,30 @@ async fn get_news(
     ))
 }
 
-fn build_json_feed(items: &[NewsItem]) -> serde_json::Value {
+fn resolve_base_url(headers: &HeaderMap, config: &Config) -> String {
+    if let Some(url) = &config.public_base_url {
+        return url.clone();
+    }
+
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let default_host = format!("localhost:{}", config.port);
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(&default_host);
+
+    format!("{proto}://{host}")
+}
+
+fn build_json_feed(items: &[NewsItem], base_url: &str) -> serde_json::Value {
     json!({
         "version": "https://jsonfeed.org/version/1.1",
         "title": "YouTube Sub Feed",
-        "home_page_url": "https://youtube.sis.jp",
+        "home_page_url": base_url,
         "items": items
             .iter()
             .map(|item| {
@@ -116,11 +138,12 @@ mod tests {
     // These tests drive the real `get_news` handler over HTTP (oneshot) with an
     // injected UserId extension, so the handler's own SQL is under test.
 
-    use super::get_news;
+    use super::{get_news, resolve_base_url};
+    use crate::config::Config;
     use crate::middleware::UserId;
     use crate::state::AppState;
     use axum::body::to_bytes;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{header, HeaderMap, Request, StatusCode};
     use axum::routing::get;
     use axum::{Extension, Router};
     use rusqlite::params;
@@ -355,7 +378,7 @@ mod tests {
         let (_, feed) = get_news_feed(&state, 1).await;
         assert_eq!(feed["version"], "https://jsonfeed.org/version/1.1");
         assert_eq!(feed["title"], "YouTube Sub Feed");
-        assert_eq!(feed["home_page_url"], "https://youtube.sis.jp");
+        assert_eq!(feed["home_page_url"], "http://localhost:3000");
 
         let item = &feed["items"][0];
         assert_eq!(item["id"], "vid1");
@@ -371,6 +394,32 @@ mod tests {
         assert_eq!(
             item["_news"]["thumbnail"],
             "https://i.ytimg.com/vi/vid1/mqdefault.jpg"
+        );
+    }
+
+    #[tokio::test]
+    async fn news_uses_configured_public_url() {
+        let mut state = setup_state();
+        state.config.public_base_url = Some("https://youtube.example.com".to_string());
+        insert_video(&state, "vid1", "UC_fav", "2024-01-15T10:30:00Z", 0);
+
+        let (_, feed) = get_news_feed(&state, 1).await;
+
+        assert_eq!(feed["home_page_url"], "https://youtube.example.com");
+    }
+
+    #[test]
+    fn configured_public_url_overrides_internal_request_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "youtube:3000".parse().unwrap());
+        let config = Config {
+            public_base_url: Some("https://youtube.example.com".to_string()),
+            ..AppState::test().config
+        };
+
+        assert_eq!(
+            resolve_base_url(&headers, &config),
+            "https://youtube.example.com"
         );
     }
 

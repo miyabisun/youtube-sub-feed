@@ -47,6 +47,7 @@ PORT=3000
 DATABASE_PATH=./feed.db
 GIS_CLIENT_ID=your-client-id.apps.googleusercontent.com
 WEBSUB_CALLBACK_URL=http://localhost:3000/api/websub/callback
+PUBLIC_BASE_URL=https://youtube.example.com
 ```
 
 ### 3. Start the Server
@@ -110,6 +111,7 @@ For production, place Cloudflare Access in front of the app. See `docs/deploy.md
 | `DATABASE_PATH` | `./feed.db` | SQLite database file path |
 | `GIS_CLIENT_ID` | — | Google Identity Services client ID (for channel sync button; public value, no secret required) |
 | `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub notification endpoint (production requires a public HTTPS URL) |
+| `PUBLIC_BASE_URL` | Request origin | Canonical public origin used by feed links (for example, `https://youtube.example.com`) |
 | `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL (optional) |
 
 ## Commands
