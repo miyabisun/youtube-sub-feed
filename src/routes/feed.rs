@@ -27,7 +27,7 @@ struct FeedQuery {
     path = "/api/feed",
     tag = "動画フィード",
     summary = "動画一覧取得",
-    description = "ユーザーが購読しているチャンネルの動画を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- グループIDで絞り込み可能",
+    description = "ユーザーが購読しているチャンネルの動画を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
@@ -70,6 +70,7 @@ async fn get_feed(
              WHERE COALESCE(uv.is_hidden, 0) = 0
                AND v.is_members_only = 0
                AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
+               AND (v.is_short = 0 OR uc.hide_shorts = 0)
                {group_where}
              ORDER BY v.published_at DESC
              LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
@@ -367,6 +368,57 @@ mod tests {
         }
 
         assert_eq!(feed_ids(&state, "").await, vec!["v_normal"]);
+    }
+
+    #[tokio::test]
+    async fn feed_excludes_shorts_when_channel_has_shorts_ng_enabled() {
+        let state = setup_state();
+        insert_video(&state, "v_short", "UC1", "2024-01-03T00:00:00Z", 0);
+        insert_video(&state, "v_normal", "UC1", "2024-01-02T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE user_channels SET hide_shorts = 1 WHERE user_id = 1 AND channel_id = 'UC1'",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(feed_ids(&state, "").await, vec!["v_normal"]);
+    }
+
+    #[tokio::test]
+    async fn shorts_ng_is_scoped_to_the_user() {
+        let state = setup_state();
+        insert_video(&state, "v_short", "UC1", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE user_channels SET hide_shorts = 1 WHERE user_id = 1 AND channel_id = 'UC1'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO user_channels (user_id, channel_id) VALUES (2, 'UC1')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(feed_ids(&state, "").await.is_empty());
+        assert_eq!(
+            feed_ids_as(&state, "", Some("user2@example.com")).await,
+            vec!["v_short"]
+        );
     }
 
     #[tokio::test]

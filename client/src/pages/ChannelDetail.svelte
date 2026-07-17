@@ -79,7 +79,7 @@
 	}
 
 	$effect(() => {
-		channelId;
+		void channelId;
 		untrack(() => loadData(true));
 	});
 
@@ -112,7 +112,21 @@
 						<span class="toggle-track"><span class="toggle-thumb"></span></span>
 						ライブ表示
 					</button>
+					<button
+						class="toggle-btn"
+						class:active={channel.hide_shorts}
+						role="switch"
+						aria-checked={!!channel.hide_shorts}
+						aria-describedby="shorts-ng-description"
+						onclick={() => toggleSetting('hide_shorts')}
+					>
+						<span class="toggle-track"><span class="toggle-thumb"></span></span>
+						ショートNG
+					</button>
 				</div>
+				<p id="shorts-ng-description" class="setting-description">
+					ONにすると、このチャンネルのShortsを動画一覧・RSS・新着から除外します。
+				</p>
 			</div>
 		{/if}
 
@@ -232,6 +246,11 @@
 
 	.active &
 		left: 18px
+
+.setting-description
+	margin: var(--sp-2) 0 0
+	font-size: var(--fs-xs)
+	color: var(--c-text-sub)
 
 .video-list
 	display: flex

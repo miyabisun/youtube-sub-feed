@@ -15,6 +15,7 @@ pub fn open(path: &str) -> Connection {
 
     migrate(&conn);
     create_tables(&conn);
+    add_user_channels_hide_shorts(&conn);
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
     migrate_timestamps_to_unix(&conn);
@@ -23,6 +24,26 @@ pub fn open(path: &str) -> Connection {
     add_users_email_unique_index(&conn);
 
     conn
+}
+
+/// Add the per-user, per-channel Shorts suppression preference.
+///
+/// Existing subscriptions keep showing Shorts because the column defaults to
+/// zero. Idempotent so it is safe to run at every startup.
+fn add_user_channels_hide_shorts(conn: &Connection) {
+    if column_exists(conn, "user_channels", "hide_shorts") {
+        return;
+    }
+    match conn.execute(
+        "ALTER TABLE user_channels ADD COLUMN hide_shorts INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => tracing::info!("[migrate] Added user_channels.hide_shorts column"),
+        Err(e) => tracing::warn!(
+            "[migrate] Failed to add user_channels.hide_shorts column: {}",
+            e
+        ),
+    }
 }
 
 /// One-shot migration: decode XML entities in legacy `videos.title` rows.
@@ -232,6 +253,7 @@ fn create_tables(conn: &Connection) {
             channel_id TEXT NOT NULL,
             is_favorite INTEGER NOT NULL DEFAULT 0,
             show_livestreams INTEGER NOT NULL DEFAULT 0,
+            hide_shorts INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER DEFAULT (unixepoch()),
             PRIMARY KEY (user_id, channel_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -369,11 +391,12 @@ fn migrate_timestamps_to_unix(conn: &Connection) {
 
          CREATE TABLE user_channels_unix (
             user_id INTEGER NOT NULL, channel_id TEXT NOT NULL, is_favorite INTEGER NOT NULL DEFAULT 0,
-            show_livestreams INTEGER NOT NULL DEFAULT 0, created_at INTEGER DEFAULT (unixepoch()),
+            show_livestreams INTEGER NOT NULL DEFAULT 0, hide_shorts INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER DEFAULT (unixepoch()),
             PRIMARY KEY(user_id,channel_id), FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE);
          INSERT INTO user_channels_unix
-         SELECT user_id,channel_id,is_favorite,show_livestreams,
+         SELECT user_id,channel_id,is_favorite,show_livestreams,hide_shorts,
             CASE WHEN typeof(created_at)='integer' THEN created_at WHEN instr(created_at,'T')>0 AND (substr(trim(created_at),-1)='Z' OR substr(trim(created_at),-6,1) IN ('+','-')) THEN unixepoch(created_at) END
          FROM user_channels;
 
@@ -562,6 +585,7 @@ fn migrate(conn: &Connection) {
                 channel_id TEXT NOT NULL,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
                 show_livestreams INTEGER NOT NULL DEFAULT 0,
+                hide_shorts INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (user_id, channel_id),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -1119,15 +1143,48 @@ mod tests {
         )
         .unwrap();
 
-        let (is_favorite, show_livestreams): (i64, i64) = conn
+        let (is_favorite, show_livestreams, hide_shorts): (i64, i64, i64) = conn
             .query_row(
-                "SELECT is_favorite, show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
+                "SELECT is_favorite, show_livestreams, hide_shorts FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(is_favorite, 0);
         assert_eq!(show_livestreams, 0);
+        assert_eq!(hide_shorts, 0);
+    }
+
+    #[test]
+    fn add_user_channels_hide_shorts_preserves_existing_subscriptions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_channels (
+                user_id INTEGER NOT NULL,
+                channel_id TEXT NOT NULL,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                show_livestreams INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER,
+                PRIMARY KEY (user_id, channel_id)
+            );
+            INSERT INTO user_channels
+                (user_id, channel_id, is_favorite, show_livestreams, created_at)
+            VALUES (7, 'UClegacy', 1, 1, 123);",
+        )
+        .unwrap();
+
+        super::add_user_channels_hide_shorts(&conn);
+        super::add_user_channels_hide_shorts(&conn);
+
+        let row: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT is_favorite, show_livestreams, hide_shorts, created_at
+                 FROM user_channels WHERE user_id = 7 AND channel_id = 'UClegacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (1, 1, 0, 123));
     }
 
     #[test]
@@ -1671,6 +1728,7 @@ mod tests {
         // Run the same migration chain as open().
         migrate(&conn);
         create_tables(&conn);
+        add_user_channels_hide_shorts(&conn);
         drop_videos_thumbnail_url(&conn);
         add_videos_is_members_only(&conn);
         migrate_timestamps_to_unix(&conn);
@@ -1860,6 +1918,9 @@ mod tests {
                 is_livestream INTEGER NOT NULL DEFAULT 0, is_members_only INTEGER NOT NULL DEFAULT 0,
                 livestream_ended_at TEXT, fetched_at TEXT);
              INSERT INTO channels (id,title,created_at) VALUES ('UC1','Ch','2024-01-01T00:00:00Z');
+             INSERT INTO users (email,created_at) VALUES ('shorts@example.com','2024-01-01T00:00:00Z');
+             INSERT INTO user_channels (user_id,channel_id,hide_shorts,created_at)
+             VALUES (1,'UC1',1,'2024-01-01T00:00:00Z');
              INSERT INTO videos (id,channel_id,title,published_at)
              VALUES ('absolute','UC1','A','2024-01-15T19:00:00+09:00'),
                     ('naive','UC1','N','2024-01-15 19:00:00'),
@@ -1886,6 +1947,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(absolute, Some(1705312800));
+        let (hide_shorts, subscription_created_at): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT hide_shorts, created_at FROM user_channels
+                 WHERE user_id=1 AND channel_id='UC1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hide_shorts, 1);
+        assert_eq!(subscription_created_at, Some(1704067200));
         for id in ["naive", "invalid"] {
             let value: Option<i64> = conn
                 .query_row("SELECT published_at FROM videos WHERE id=?1", [id], |row| {

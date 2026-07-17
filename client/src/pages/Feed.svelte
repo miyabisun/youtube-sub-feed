@@ -76,7 +76,7 @@
 	loadGroups();
 
 	$effect(() => {
-		groupId;
+		void groupId;
 		untrack(() => loadVideos(true));
 	});
 

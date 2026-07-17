@@ -81,7 +81,7 @@ async fn get_channels(
               (SELECT GROUP_CONCAT(g.name, ', ')
                FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
                WHERE cg.channel_id = c.id AND g.user_id = ?1) as group_names,
-              uc.is_favorite
+              uc.is_favorite, uc.hide_shorts
             FROM channels c
             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
             ORDER BY c.title COLLATE NOCASE",
@@ -96,6 +96,7 @@ async fn get_channels(
                     "last_fetched_at": crate::util::row_timestamp_to_rfc3339(row, 4)?,
                     "group_names": row.get::<_, Option<String>>(5)?,
                     "is_favorite": row.get::<_, i64>(6)?,
+                    "hide_shorts": row.get::<_, i64>(7)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -456,6 +457,8 @@ pub(crate) struct UpdateChannelBody {
     show_livestreams: Option<i64>,
     /// お気に入り (0: 無効, 1: 有効)
     is_favorite: Option<i64>,
+    /// Shortsをフィードから除外 (0: 表示, 1: 除外)
+    hide_shorts: Option<i64>,
 }
 
 #[utoipa::path(
@@ -463,7 +466,7 @@ pub(crate) struct UpdateChannelBody {
     path = "/api/channels/{id}",
     tag = "チャンネル",
     summary = "チャンネル設定更新",
-    description = "show_livestreams, is_favorite を更新する（ユーザー単位の設定）。",
+    description = "show_livestreams, is_favorite, hide_shorts を更新する（ユーザー単位の設定）。",
     params(("id" = String, Path, description = "チャンネルID")),
     request_body(content = UpdateChannelBody),
     responses(
@@ -478,13 +481,14 @@ async fn update_channel(
     Path(id): Path<String>,
     Json(body): Json<UpdateChannelBody>,
 ) -> Result<Json<Value>, AppError> {
-    if body.show_livestreams.is_none() && body.is_favorite.is_none() {
+    if body.show_livestreams.is_none() && body.is_favorite.is_none() && body.hide_shorts.is_none() {
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
     for (val, name) in [
         (body.show_livestreams, "show_livestreams"),
         (body.is_favorite, "is_favorite"),
+        (body.hide_shorts, "hide_shorts"),
     ] {
         if let Some(v) = val {
             if v != 0 && v != 1 {
@@ -497,9 +501,16 @@ async fn update_channel(
         let conn = state.db.lock().unwrap();
         conn.execute(
             "UPDATE user_channels SET show_livestreams = COALESCE(?1, show_livestreams),
-                                      is_favorite = COALESCE(?2, is_favorite)
-             WHERE user_id = ?3 AND channel_id = ?4",
-            rusqlite::params![body.show_livestreams, body.is_favorite, user_id.0, id],
+                                      is_favorite = COALESCE(?2, is_favorite),
+                                      hide_shorts = COALESCE(?3, hide_shorts)
+             WHERE user_id = ?4 AND channel_id = ?5",
+            rusqlite::params![
+                body.show_livestreams,
+                body.is_favorite,
+                body.hide_shorts,
+                user_id.0,
+                id
+            ],
         )?;
     }
     Ok(Json(json!({"ok": true})))
@@ -1179,6 +1190,57 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn update_channel_sets_hide_shorts() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCshortsxxxxxxxxxxxxxxxx", "s");
+
+            assert_eq!(
+                patch_channel(&state, "UCshortsxxxxxxxxxxxxxxxx", r#"{"hide_shorts":1}"#).await,
+                StatusCode::OK
+            );
+
+            let val: i64 = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row(
+                    "SELECT hide_shorts FROM user_channels WHERE user_id = 1 AND channel_id = 'UCshortsxxxxxxxxxxxxxxxx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(val, 1);
+        }
+
+        #[tokio::test]
+        async fn channels_list_exposes_hide_shorts() {
+            let state = setup_state();
+            subscribe_user1(&state, "UClistxxxxxxxxxxxxxxxxxx", "s");
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "UPDATE user_channels SET hide_shorts = 1
+                     WHERE user_id = 1 AND channel_id = 'UClistxxxxxxxxxxxxxxxxxx'",
+                    [],
+                )
+                .unwrap();
+            }
+
+            let resp = app(&state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/channels")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let channels: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(channels[0]["hide_shorts"], 1);
+        }
+
+        #[tokio::test]
         async fn update_channel_rejects_value_other_than_0_or_1() {
             let state = setup_state();
             subscribe_user1(&state, "UCbadvaluexxxxxxxxxxxxxx", "s");
@@ -1196,6 +1258,28 @@ mod tests {
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
             assert!(error_message(resp).await.contains("must be 0 or 1"));
+        }
+
+        #[tokio::test]
+        async fn update_channel_rejects_invalid_hide_shorts_value() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCbadshortsxxxxxxxxxxxxx", "s");
+
+            let resp = app(&state)
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/channels/UCbadshortsxxxxxxxxxxxxx")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(r#"{"hide_shorts":2}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(error_message(resp)
+                .await
+                .contains("hide_shorts must be 0 or 1"));
         }
 
         #[tokio::test]

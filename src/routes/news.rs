@@ -26,7 +26,7 @@ struct NewsItem {
     path = "/api/news",
     tag = "RSS",
     summary = "お気に入りチャンネルの新着動画 (JSON Feed 1.1)",
-    description = "お気に入り (is_favorite=1) チャンネルの動画を JSON Feed 1.1 形式で配信する。news-server が定期取得して統合タイムラインに載せる。各 item の拡張フィールド `_news` にチャンネル名とサムネイルURLを含む。",
+    description = "お気に入り (is_favorite=1) チャンネルの動画を JSON Feed 1.1 形式で配信する。hide_shorts=1 のチャンネルではShortsを除外する。news-server が定期取得して統合タイムラインに載せる。各 item の拡張フィールド `_news` にチャンネル名とサムネイルURLを含む。",
     responses(
         (status = 200, description = "JSON Feed 1.1", content_type = "application/feed+json"),
         (status = 401, description = "未認証", body = ErrorResponse),
@@ -49,6 +49,7 @@ async fn get_news(
                AND COALESCE(uv.is_hidden, 0) = 0
                AND v.is_members_only = 0
                AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
+               AND (v.is_short = 0 OR uc.hide_shorts = 0)
              ORDER BY v.published_at DESC
              LIMIT 50",
         )?;
@@ -294,6 +295,26 @@ mod tests {
 
         let (_, feed) = get_news_feed(&state, 1).await;
         assert_eq!(item_ids(&feed), vec!["v_public"]);
+    }
+
+    #[tokio::test]
+    async fn news_excludes_shorts_when_channel_has_shorts_ng_enabled() {
+        let state = setup_state();
+        insert_video(&state, "v_short", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        insert_video(&state, "v_normal", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE user_channels SET hide_shorts = 1 WHERE user_id = 1 AND channel_id = 'UC_fav'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (_, feed) = get_news_feed(&state, 1).await;
+        assert_eq!(item_ids(&feed), vec!["v_normal"]);
     }
 
     #[tokio::test]

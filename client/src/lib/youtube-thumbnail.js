@@ -13,6 +13,6 @@
  *   - maxresdefault 1280x720 (only when the source was uploaded in HD)
  */
 export function videoThumbnail(videoId, quality = 'hqdefault') {
-	if (!videoId) return null;
-	return `https://i.ytimg.com/vi/${videoId}/${quality}.jpg`;
+  if (!videoId) return null
+  return `https://i.ytimg.com/vi/${videoId}/${quality}.jpg`
 }

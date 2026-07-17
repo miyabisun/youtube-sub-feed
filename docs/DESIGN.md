@@ -146,7 +146,9 @@ Domain components on top of the Sumi recipes:
 - **Channel detail:** header with the channel title, a YT external-link
   chip, and **toggle switches** (36×20 pill track, thumb slides right and
   track fills accent when on, label text beside it) for お気に入り and
-  ライブ表示. Videos here can be hidden AND restored: swipe left hides,
+  ライブ表示, plus ショートNG, which suppresses that channel's Shorts
+  from the main feed, RSS, and news feed while leaving them visible in
+  channel detail for inspection. Videos here can be hidden AND restored: swipe left hides,
   swipe right restores (quiet swipe-hint panel per the template's gesture
   rule; danger text for hide, accent for restore), hidden videos render at
   50% opacity with a small hidden marker; on PC the same actions appear as

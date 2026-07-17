@@ -63,6 +63,8 @@ pub struct ChannelItem {
     pub group_names: Option<String>,
     /// お気に入り (0: 無効, 1: 有効)
     pub is_favorite: i64,
+    /// Shortsをフィードから除外 (0: 表示, 1: 除外)
+    pub hide_shorts: i64,
 }
 
 /// チャンネル詳細の動画アイテム (非表示動画含む)

@@ -29,7 +29,7 @@ struct RssQuery {
     path = "/api/rss",
     tag = "RSS",
     summary = "お気に入りチャンネルのRSSフィード",
-    description = "お気に入り (is_favorite=1) チャンネルの動画をRSS 2.0形式で配信する。認証不要。token パラメータ（UUID）でユーザーを特定する。",
+    description = "お気に入り (is_favorite=1) チャンネルの動画をRSS 2.0形式で配信する。hide_shorts=1 のチャンネルではShortsを除外する。認証不要。token パラメータ（UUID）でユーザーを特定する。",
     params(
         ("token" = Option<String>, Query, description = "RSSトークン (UUID)"),
     ),
@@ -73,6 +73,7 @@ async fn get_rss_feed(
                AND COALESCE(uv.is_hidden, 0) = 0
                AND v.is_members_only = 0
                AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
+               AND (v.is_short = 0 OR uc.hide_shorts = 0)
              ORDER BY v.published_at DESC
              LIMIT 100",
         )?;
@@ -323,6 +324,26 @@ mod tests {
             vec!["v_public"],
             "members-only videos must be excluded from RSS"
         );
+    }
+
+    #[tokio::test]
+    async fn rss_excludes_shorts_when_channel_has_shorts_ng_enabled() {
+        let state = setup_state();
+        insert_video(&state, "v_short", "UC_fav", "2024-01-03T00:00:00Z", 0);
+        insert_video(&state, "v_normal", "UC_fav", "2024-01-02T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
+                .unwrap();
+            conn.execute(
+                "UPDATE user_channels SET hide_shorts = 1 WHERE user_id = 1 AND channel_id = 'UC_fav'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let (_, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(rss_video_ids(&body), vec!["v_normal"]);
     }
 
     #[tokio::test]
