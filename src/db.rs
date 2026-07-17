@@ -19,6 +19,7 @@ pub fn open(path: &str) -> Connection {
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
     migrate_timestamps_to_unix(&conn);
+    add_videos_details_checked_at(&conn);
     decode_video_titles_xml_entities(&conn);
     drop_users_oauth_token_columns(&conn);
     add_users_email_unique_index(&conn);
@@ -41,6 +42,28 @@ fn add_user_channels_hide_shorts(conn: &Connection) {
         Ok(_) => tracing::info!("[migrate] Added user_channels.hide_shorts column"),
         Err(e) => tracing::warn!(
             "[migrate] Failed to add user_channels.hide_shorts column: {}",
+            e
+        ),
+    }
+}
+
+/// Track when a video's details were last fetched from the YouTube Data API.
+///
+/// NULL means "never attempted": the enrichment backfill re-queries only those
+/// rows, so videos deleted from YouTube (absent from API responses) stop being
+/// re-queried once their batch succeeds. Runs after migrate_timestamps_to_unix
+/// because that migration rebuilds `videos` without this column. Idempotent.
+fn add_videos_details_checked_at(conn: &Connection) {
+    if column_exists(conn, "videos", "details_checked_at") {
+        return;
+    }
+    match conn.execute(
+        "ALTER TABLE videos ADD COLUMN details_checked_at INTEGER",
+        [],
+    ) {
+        Ok(_) => tracing::info!("[migrate] Added videos.details_checked_at column"),
+        Err(e) => tracing::warn!(
+            "[migrate] Failed to add videos.details_checked_at column: {}",
             e
         ),
     }
@@ -245,6 +268,7 @@ fn create_tables(conn: &Connection) {
             is_members_only INTEGER NOT NULL DEFAULT 0,
             livestream_ended_at INTEGER,
             fetched_at INTEGER,
+            details_checked_at INTEGER,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
 
@@ -1188,6 +1212,35 @@ mod tests {
     }
 
     #[test]
+    fn add_videos_details_checked_at_defaults_to_null_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE videos (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                duration TEXT,
+                is_short INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO videos (id, channel_id, title) VALUES ('v_legacy', 'UC1', 'T');",
+        )
+        .unwrap();
+
+        super::add_videos_details_checked_at(&conn);
+        super::add_videos_details_checked_at(&conn);
+
+        // NULL marks the row as "never enriched", making it a backfill target.
+        let checked_at: Option<i64> = conn
+            .query_row(
+                "SELECT details_checked_at FROM videos WHERE id = 'v_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(checked_at, None);
+    }
+
+    #[test]
     fn test_user_videos_defaults_is_hidden_to_zero() {
         // When a user_videos row is created without an explicit is_hidden, the
         // column must default to 0 (visible). Per-user hide/unhide behaviour is
@@ -1732,6 +1785,7 @@ mod tests {
         drop_videos_thumbnail_url(&conn);
         add_videos_is_members_only(&conn);
         migrate_timestamps_to_unix(&conn);
+        add_videos_details_checked_at(&conn);
 
         // Verify: auth table gone, users table exists with master role
         assert!(

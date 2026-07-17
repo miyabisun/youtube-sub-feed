@@ -1,6 +1,7 @@
 pub mod channel_sync;
 pub mod initial_setup;
 pub mod periodic_refresh;
+pub mod video_enrich;
 
 use crate::state::AppState;
 

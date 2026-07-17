@@ -24,6 +24,7 @@ impl AppState {
                 gis_client_id: String::new(),
                 discord_webhook_url: None,
                 websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),
+                youtube_api_key: None,
                 is_production: false,
             },
             http: reqwest::Client::new(),

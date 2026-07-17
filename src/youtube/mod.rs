@@ -1,12 +1,15 @@
-// YouTube API modules removed (OAuth撤去により不要).
-// playlist_items, subscriptions, videos は全て削除。
-// derive_playlist_id と PlaylistKind は channel_sync / channels で使用中のため保持。
+// OAuth-based modules (subscriptions, token handling) stay removed.
+// `videos` is the API-key-only client used for video detail enrichment.
+pub mod videos;
 
 /// A content-specific playlist that YouTube exposes for every channel, named by
 /// swapping the channel's "UC" prefix for a playlist prefix.
 pub enum PlaylistKind {
     /// All uploads ("UU").
     Uploads,
+    /// Shorts only ("UUSH"). Membership here is the authoritative Shorts
+    /// signal — the Data API exposes no per-video "is a Short" field.
+    Shorts,
 }
 
 /// Derive a channel's playlist ID from its "UC…" channel ID.
@@ -14,9 +17,11 @@ pub enum PlaylistKind {
 /// Playlist ID Derivation Spec: YouTube identifies content types by playlist ID
 /// prefix, all derived by replacing the channel's "UC" prefix:
 /// - "UU"   uploads playlist
+/// - "UUSH" Shorts playlist
 pub fn derive_playlist_id(channel_id: &str, kind: PlaylistKind) -> String {
     let prefix = match kind {
         PlaylistKind::Uploads => "UU",
+        PlaylistKind::Shorts => "UUSH",
     };
     let suffix = channel_id.get(2..).unwrap_or(channel_id);
     format!("{}{}", prefix, suffix)
@@ -31,6 +36,14 @@ mod tests {
         assert_eq!(
             derive_playlist_id("UCabc123", PlaylistKind::Uploads),
             "UUabc123"
+        );
+    }
+
+    #[test]
+    fn test_derive_playlist_id_swaps_uc_prefix_for_shorts() {
+        assert_eq!(
+            derive_playlist_id("UCabc123", PlaylistKind::Shorts),
+            "UUSHabc123"
         );
     }
 

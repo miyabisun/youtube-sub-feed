@@ -11,10 +11,12 @@ const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
 /// Runs once immediately on startup, then every 24 hours:
 ///   1. Subscribe new channels (channels without WebSub row) to WebSub hub
 ///   2. Renew WebSub subscriptions nearing expiry
+///   3. Backfill video details (duration / Shorts / livestream) for rows the
+///      push-time enrichment missed, via the API-key-only YouTube Data API
 ///
-/// NOTE: Since OAuth has been removed, this loop no longer fetches video data
-/// via the YouTube Data API. New videos arrive exclusively via WebSub push
-/// notifications. The periodic loop focuses on WebSub subscription health.
+/// New videos arrive exclusively via WebSub push notifications — this loop
+/// never discovers videos, it only maintains subscriptions and repairs
+/// missing metadata.
 pub fn start(state: AppState) {
     tokio::spawn(async move {
         tracing::info!("[refresh] Starting periodic refresh worker (24h cycle)");
@@ -46,6 +48,12 @@ async fn run_once(state: &AppState) {
 
     // 2. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
     renew_expiring_subscriptions(state, &callback).await;
+
+    // 3. Enrich videos still missing details (never attempted, failed on push,
+    //    or livestreams that were still running at the last check). Runs here —
+    //    not as a separate startup task — so push enrichment and backfill never
+    //    race over freshly inserted IDs, and retries ride the same 24h cycle.
+    crate::sync::video_enrich::backfill_missing_details(state).await;
 }
 
 fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
@@ -189,10 +197,11 @@ mod tests {
     // Responsibilities:
     //   1. WebSub backfill: subscribe channels missing a channel_subscriptions row
     //   2. WebSub renewal: re-subscribe entries within 2 days of expiry
+    //   3. Detail backfill: enrich videos still missing duration/Shorts/livestream
+    //      data via the API-key-only YouTube Data API (see sync::video_enrich)
     //
-    // New video discovery is entirely WebSub-push driven. duration, is_short,
-    // and is_members_only remain NULL/0 until the browser sync provides updates
-    // (or they are filed via WebSub Atom data).
+    // New video discovery is entirely WebSub-push driven. is_members_only
+    // remains 0 (its UUMO check was removed with OAuth).
 
     #[tokio::test]
     async fn register_new_subscription_preserves_secret_on_reregister() {

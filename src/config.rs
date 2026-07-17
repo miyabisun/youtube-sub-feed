@@ -11,6 +11,9 @@ pub struct Config {
     pub gis_client_id: String,
     pub discord_webhook_url: Option<String>,
     pub websub_callback_url: String,
+    /// YouTube Data API key for video detail enrichment (duration / Shorts /
+    /// livestream). API-key-only endpoints — no OAuth involved.
+    pub youtube_api_key: Option<String>,
     pub is_production: bool,
 }
 
@@ -38,6 +41,11 @@ impl Config {
         let websub_callback_url = env::var("WEBSUB_CALLBACK_URL")
             .unwrap_or_else(|_| "http://localhost:3000/api/websub/callback".to_string());
 
+        let youtube_api_key = env::var("YOUTUBE_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         let is_production = env::var("NODE_ENV")
             .map(|v| v == "production")
             .unwrap_or(false);
@@ -48,6 +56,12 @@ impl Config {
             );
         }
 
+        if youtube_api_key.is_none() {
+            tracing::info!(
+                "YOUTUBE_API_KEY not set. Video detail enrichment (duration / Shorts / livestream) is disabled."
+            );
+        }
+
         Self {
             port,
             db_path,
@@ -55,6 +69,7 @@ impl Config {
             gis_client_id,
             discord_webhook_url,
             websub_callback_url,
+            youtube_api_key,
             is_production,
         }
     }

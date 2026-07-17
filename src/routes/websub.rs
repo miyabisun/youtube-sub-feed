@@ -210,10 +210,21 @@ pub async fn notification(
         return StatusCode::OK;
     }
 
-    // NOTE: OAuth has been removed. Video enrichment (duration, is_short,
-    // is_members_only, is_livestream) via YouTube Data API is no longer performed
-    // on push. Those fields remain NULL/0 as set by the WebSub Atom payload.
-    // duration and is_livestream are populated only if the Atom entry carries them.
+    // Enrich the new rows (duration / Shorts / livestream) via the API-key-only
+    // YouTube Data API, spawned so the hub gets its 200 OK without waiting.
+    // A failed or skipped run is caught by the daily backfill
+    // (video_enrich::backfill_missing_details) — rows stay details_checked_at
+    // NULL until a batch succeeds. is_members_only is out of scope (needs the
+    // removed OAuth-based UUMO check) and remains 0.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            crate::sync::video_enrich::enrich_videos(&state_clone, &channel_id, &new_video_ids)
+                .await
+        {
+            tracing::warn!("[websub] enrichment failed for {}: {}", channel_id, e);
+        }
+    });
 
     StatusCode::OK
 }
