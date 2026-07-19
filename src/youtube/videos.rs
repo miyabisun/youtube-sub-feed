@@ -5,10 +5,6 @@ use std::time::Duration;
 const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ATTEMPTS: u32 = 3;
-/// Pagination safety cap for the UUSH playlist: 20 pages × 50 = 1000 Shorts
-/// (20 quota units). Beyond that `complete` turns false and classification of
-/// absent candidates becomes best-effort (see classify_is_short / the caller).
-const MAX_PLAYLIST_PAGES: u32 = 20;
 
 /// Per-video metadata the WebSub Atom payload does not carry.
 #[derive(Debug)]
@@ -20,6 +16,10 @@ pub struct VideoDetails {
     pub is_livestream: bool,
     /// RFC3339 end time of a finished livestream/premiere.
     pub livestream_ended_at: Option<String>,
+    /// Dimensions of the embedded player, scaled within a square boundary.
+    /// Missing values classify as a regular video.
+    pub player_width: Option<u64>,
+    pub player_height: Option<u64>,
 }
 
 impl VideoDetails {
@@ -28,6 +28,20 @@ impl VideoDetails {
     /// duration NULL and re-query after the stream ends.
     pub fn is_ongoing_live(&self) -> bool {
         self.is_livestream && self.livestream_ended_at.is_none()
+    }
+
+    /// Application-specific Shorts rule: up to three minutes and strictly
+    /// portrait. Square, landscape, and missing dimensions are regular videos.
+    pub fn is_short(&self) -> bool {
+        matches!(
+            (
+                self.duration.as_deref(),
+                self.player_width,
+                self.player_height
+            ),
+            (Some(duration), Some(width), Some(height))
+                if is_short_duration(duration) && height > width
+        )
     }
 }
 
@@ -39,7 +53,7 @@ pub enum FetchError {
     Http(u16),
     /// Transport failure or retries exhausted on 429/5xx.
     Transport(String),
-    /// Response body was not the expected videos.list / playlistItems.list shape.
+    /// Response body was not the expected videos.list shape.
     MalformedResponse,
 }
 
@@ -78,74 +92,11 @@ pub fn parse_video_details(data: &Value) -> Result<Vec<VideoDetails>, FetchError
                 livestream_ended_at: item["liveStreamingDetails"]["actualEndTime"]
                     .as_str()
                     .map(|s| s.to_string()),
+                player_width: item["player"]["embedWidth"].as_u64(),
+                player_height: item["player"]["embedHeight"].as_u64(),
             })
         })
         .collect())
-}
-
-/// Parse a playlistItems.list response into its video IDs.
-pub fn parse_playlist_video_ids(data: &Value) -> Result<Vec<String>, FetchError> {
-    let items = data["items"]
-        .as_array()
-        .ok_or(FetchError::MalformedResponse)?;
-
-    Ok(items
-        .iter()
-        .filter_map(|item| {
-            item["snippet"]["resourceId"]["videoId"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
-        .collect())
-}
-
-/// A channel's UUSH (Shorts-only) playlist contents.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ShortsPlaylist {
-    pub ids: Vec<String>,
-    /// True when every page was read. Only then is absence from `ids` proof
-    /// that a video is not a Short; a truncated list can merely confirm
-    /// membership, never rule it out.
-    pub complete: bool,
-}
-
-impl ShortsPlaylist {
-    pub fn contains(&self, video_id: &str) -> bool {
-        self.ids.iter().any(|id| id == video_id)
-    }
-}
-
-/// Shorts Classification Spec: the Data API has no per-video Shorts field, so
-/// a video counts as a Short only when BOTH hold:
-/// 1. duration is known and ≤ 180s (candidate filter, see is_short_duration)
-/// 2. the video appears in the channel's UUSH (Shorts-only) playlist
-///
-/// Returns None (inconclusive) for a candidate that is absent from an
-/// incomplete (page-capped) playlist listing. The caller decides what that
-/// means: sync::video_enrich records it as a regular video, a documented
-/// best-effort trade-off that guarantees convergence for channels with more
-/// Shorts than the pagination cap covers.
-///
-/// Ongoing livestreams are never Shorts even if their placeholder duration
-/// ("PT0S") parses short — is_short_duration already rejects zero.
-pub fn classify_is_short(
-    duration: Option<&str>,
-    playlist: &ShortsPlaylist,
-    video_id: &str,
-) -> Option<bool> {
-    let is_candidate = matches!(duration, Some(d) if is_short_duration(d));
-    if !is_candidate {
-        return Some(false);
-    }
-    if playlist.contains(video_id) {
-        return Some(true);
-    }
-    if playlist.complete {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 /// Fetch details for up to 50 video IDs (one videos.list call, 1 quota unit).
@@ -159,69 +110,13 @@ pub async fn fetch_video_details(
         return Ok(Vec::new());
     }
     let url = format!(
-        "{}/videos?part=contentDetails,liveStreamingDetails&id={}&key={}",
+        "{}/videos?part=contentDetails,liveStreamingDetails,player&id={}&maxWidth=1000&maxHeight=1000&key={}",
         YOUTUBE_API_BASE,
         video_ids.join(","),
         api_key
     );
     let data = get_json_with_retry(http, &url).await?;
     parse_video_details(&data)
-}
-
-/// Fetch the video IDs of a channel's UUSH (Shorts) playlist, following
-/// nextPageToken up to MAX_PLAYLIST_PAGES (1 quota unit per page).
-///
-/// A channel with no Shorts has no UUSH playlist — the API answers 404, which
-/// is a normal outcome mapped to an empty complete list.
-pub async fn fetch_shorts_playlist_ids(
-    http: &reqwest::Client,
-    api_key: &str,
-    channel_id: &str,
-) -> Result<ShortsPlaylist, FetchError> {
-    let playlist_id = super::derive_playlist_id(channel_id, super::PlaylistKind::Shorts);
-    let mut ids = Vec::new();
-    let mut page_token: Option<String> = None;
-
-    for _ in 0..MAX_PLAYLIST_PAGES {
-        let mut url = format!(
-            "{}/playlistItems?part=snippet&playlistId={}&maxResults=50&key={}",
-            YOUTUBE_API_BASE, playlist_id, api_key
-        );
-        if let Some(token) = &page_token {
-            url.push_str("&pageToken=");
-            url.push_str(token);
-        }
-        let data = match get_json_with_retry(http, &url).await {
-            Ok(data) => data,
-            Err(FetchError::Http(404)) => {
-                return Ok(ShortsPlaylist {
-                    ids: Vec::new(),
-                    complete: true,
-                })
-            }
-            Err(e) => return Err(e),
-        };
-        ids.extend(parse_playlist_video_ids(&data)?);
-        match data["nextPageToken"].as_str() {
-            Some(token) => page_token = Some(token.to_string()),
-            None => {
-                return Ok(ShortsPlaylist {
-                    ids,
-                    complete: true,
-                })
-            }
-        }
-    }
-
-    tracing::warn!(
-        "[enrich] UUSH playlist for {} exceeds {} pages, treating listing as incomplete",
-        channel_id,
-        MAX_PLAYLIST_PAGES
-    );
-    Ok(ShortsPlaylist {
-        ids,
-        complete: false,
-    })
 }
 
 /// GET with a bounded retry policy:
@@ -285,10 +180,9 @@ async fn get_json_with_retry(http: &reqwest::Client, url: &str) -> Result<Value,
 mod tests {
     // Video Details Enrichment Spec (parsing / classification layer)
     //
-    // WebSub Atom payloads carry no duration, Shorts, or livestream state, so
-    // those fields are enriched from the YouTube Data API (API key only, no
-    // OAuth): videos.list for details, playlistItems.list (UUSH playlist) for
-    // the authoritative Shorts signal. Both cost 1 quota unit per request.
+    // WebSub Atom payloads carry no duration, aspect ratio, or livestream
+    // state, so those fields are enriched from one videos.list request using
+    // an API key (no OAuth).
 
     use super::*;
     use serde_json::json;
@@ -373,93 +267,44 @@ mod tests {
     }
 
     #[test]
-    fn parses_playlist_video_ids() {
-        let data = json!({"items": [
-            {"snippet": {"resourceId": {"videoId": "s1"}}},
-            {"snippet": {"resourceId": {"videoId": "s2"}}},
-            {"snippet": {}}
-        ]});
-        assert_eq!(parse_playlist_video_ids(&data).unwrap(), vec!["s1", "s2"]);
+    fn vertical_video_up_to_three_minutes_is_a_short() {
+        let data = json!({"items": [{
+            "id": "v_vertical",
+            "contentDetails": {"duration": "PT3M"},
+            "player": {"embedWidth": 720, "embedHeight": 1280}
+        }]});
+        let details = parse_video_details(&data).unwrap();
+
+        assert!(details[0].is_short());
     }
 
     #[test]
-    fn playlist_missing_items_is_malformed() {
-        assert_eq!(
-            parse_playlist_video_ids(&json!({})).unwrap_err(),
-            FetchError::MalformedResponse
-        );
-    }
+    fn square_horizontal_and_missing_size_videos_are_regular() {
+        for player in [
+            json!({"embedWidth": 720, "embedHeight": 720}),
+            json!({"embedWidth": 1280, "embedHeight": 720}),
+            json!({}),
+        ] {
+            let data = json!({"items": [{
+                "id": "v_regular",
+                "contentDetails": {"duration": "PT30S"},
+                "player": player
+            }]});
+            let details = parse_video_details(&data).unwrap();
 
-    // Shorts Classification Spec: duration ≤ 180s alone is NOT enough — a
-    // 2-minute regular video must not be hidden. And absence from a truncated
-    // UUSH listing proves nothing: only a complete listing can rule a
-    // candidate out.
-    fn playlist(ids: &[&str], complete: bool) -> ShortsPlaylist {
-        ShortsPlaylist {
-            ids: ids.iter().map(|s| s.to_string()).collect(),
-            complete,
+            assert!(!details[0].is_short());
         }
     }
 
     #[test]
-    fn short_duration_and_uush_membership_makes_a_short() {
-        assert_eq!(
-            classify_is_short(Some("PT45S"), &playlist(&["v1"], true), "v1"),
-            Some(true)
-        );
-    }
+    fn vertical_video_over_three_minutes_is_regular() {
+        let data = json!({"items": [{
+            "id": "v_long_vertical",
+            "contentDetails": {"duration": "PT3M1S"},
+            "player": {"embedWidth": 720, "embedHeight": 1280}
+        }]});
+        let details = parse_video_details(&data).unwrap();
 
-    #[test]
-    fn membership_in_a_truncated_listing_still_confirms_a_short() {
-        assert_eq!(
-            classify_is_short(Some("PT45S"), &playlist(&["v1"], false), "v1"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn absence_from_a_complete_listing_makes_a_regular_video() {
-        assert_eq!(
-            classify_is_short(Some("PT45S"), &playlist(&[], true), "v1"),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn absence_from_a_truncated_listing_is_inconclusive() {
-        // The video may live on an unread page (channel with 1000+ Shorts) or
-        // in a stale cache snapshot — freezing is_short=0 here would hide the
-        // misclassification forever. None tells the caller to leave the row
-        // unchecked and re-judge later.
-        assert_eq!(
-            classify_is_short(Some("PT45S"), &playlist(&[], false), "v1"),
-            None
-        );
-    }
-
-    #[test]
-    fn long_duration_is_never_a_short_even_in_uush() {
-        assert_eq!(
-            classify_is_short(Some("PT10M"), &playlist(&["v1"], true), "v1"),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn unknown_duration_is_not_classified_as_short() {
-        assert_eq!(
-            classify_is_short(None, &playlist(&["v1"], true), "v1"),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn pt0s_placeholder_of_ongoing_live_is_never_a_short() {
-        // is_short_duration requires seconds > 0, so a live placeholder can't
-        // slip into the Shorts filter even if it somehow lands in UUSH.
-        assert_eq!(
-            classify_is_short(Some("PT0S"), &playlist(&["v1"], true), "v1"),
-            Some(false)
-        );
+        assert!(!details[0].is_short());
     }
 }

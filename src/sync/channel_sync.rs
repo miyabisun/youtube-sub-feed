@@ -85,10 +85,7 @@ pub async fn sync_subscriptions(
             // so each channel is processed exactly once.
             for channel_id in &remote_set {
                 if !local_ids.contains(channel_id) {
-                    let upload_playlist_id = crate::youtube::derive_playlist_id(
-                        channel_id,
-                        crate::youtube::PlaylistKind::Uploads,
-                    );
+                    let upload_playlist_id = crate::youtube::derive_upload_playlist_id(channel_id);
                     let (title, thumbnail_url) = titles
                         .get(channel_id)
                         .map(|m| (m.title.as_str(), m.thumbnail_url.as_deref()))

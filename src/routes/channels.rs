@@ -295,8 +295,7 @@ async fn add_channel(
     }
 
     let now = crate::util::now_unix();
-    let upload_playlist_id =
-        crate::youtube::derive_playlist_id(&channel_id, crate::youtube::PlaylistKind::Uploads);
+    let upload_playlist_id = crate::youtube::derive_upload_playlist_id(&channel_id);
     let title = body.title.as_deref().unwrap_or(&channel_id).to_string();
 
     {

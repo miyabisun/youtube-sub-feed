@@ -1,14 +1,7 @@
-use crate::duration::is_short_duration;
 use crate::state::AppState;
-use crate::youtube::videos::{
-    classify_is_short, fetch_shorts_playlist_ids, fetch_video_details, FetchError, ShortsPlaylist,
-    VideoDetails,
-};
+use crate::youtube::videos::{fetch_video_details, FetchError, VideoDetails};
 use rusqlite::Connection;
-use serde_json::json;
 use std::collections::HashSet;
-
-const UUSH_CACHE_TTL_SECONDS: u64 = 3600;
 
 /// Enrich the given videos of one channel with details from the YouTube Data
 /// API (duration / Shorts / livestream). No-op without an API key.
@@ -17,11 +10,6 @@ const UUSH_CACHE_TTL_SECONDS: u64 = 3600;
 /// so a failure in a later batch never discards earlier results. Any fetch
 /// error aborts the remaining batches and leaves them unchecked — the daily
 /// backfill retries them.
-///
-/// The UUSH (Shorts playlist) listing is fetched at most once per call
-/// (`playlist_memo`), so a channel costs at most 1 + ceil(videos/50) +
-/// MAX_PLAYLIST_PAGES quota units per run, regardless of how its candidates
-/// spread across chunks.
 pub async fn enrich_videos(
     state: &AppState,
     channel_id: &str,
@@ -35,72 +23,13 @@ pub async fn enrich_videos(
         return Ok(());
     };
 
-    let mut playlist_memo: Option<ShortsPlaylist> = None;
     for chunk in video_ids.chunks(50) {
         let details = fetch_video_details(&state.http, &api_key, chunk).await?;
-        let shorts_set =
-            shorts_playlist_for(state, &api_key, channel_id, &details, &mut playlist_memo).await?;
         let now = crate::util::now_unix();
         let conn = state.db.lock().unwrap();
-        apply_video_details(&conn, &details, &shorts_set, chunk, now);
+        apply_video_details(&conn, &details, chunk, now);
     }
     Ok(())
-}
-
-/// The channel's UUSH (Shorts playlist) listing, fetched only when the batch
-/// actually contains a ≤180s candidate and cached for an hour.
-///
-/// Trust order:
-/// 1. `memo` — a listing fetched fresh earlier in this same run. Always used,
-///    even when a candidate is absent: refetching within one run cannot learn
-///    more and would only burn quota (convergence guarantee).
-/// 2. The 1h cache — but only while it contains every candidate. A Short
-///    published after the snapshot was taken would be absent, and treating
-///    that absence as "not a Short" would freeze a misclassification.
-/// 3. A fresh fetch, which then populates both memo and cache.
-///
-/// Propagates fetch errors instead of degrading to "no Shorts": marking a real
-/// Short as checked with is_short=0 would misclassify it permanently.
-async fn shorts_playlist_for(
-    state: &AppState,
-    api_key: &str,
-    channel_id: &str,
-    details: &[VideoDetails],
-    memo: &mut Option<ShortsPlaylist>,
-) -> Result<ShortsPlaylist, FetchError> {
-    let candidates: Vec<&str> = details
-        .iter()
-        .filter(|d| matches!(d.duration.as_deref(), Some(x) if is_short_duration(x)))
-        .map(|d| d.id.as_str())
-        .collect();
-    if candidates.is_empty() {
-        return Ok(ShortsPlaylist {
-            ids: Vec::new(),
-            complete: true,
-        });
-    }
-
-    if let Some(playlist) = memo {
-        return Ok(playlist.clone());
-    }
-
-    let cache_key = format!("uush:{}", channel_id);
-    if let Some(cached) = state.cache.get(&cache_key) {
-        if let Ok(playlist) = serde_json::from_value::<ShortsPlaylist>(cached) {
-            if candidates.iter().all(|c| playlist.contains(c)) {
-                return Ok(playlist);
-            }
-        }
-    }
-
-    let playlist = fetch_shorts_playlist_ids(&state.http, api_key, channel_id).await?;
-    state.cache.set(
-        &cache_key,
-        json!(playlist.clone()),
-        Some(UUSH_CACHE_TTL_SECONDS),
-    );
-    *memo = Some(playlist.clone());
-    Ok(playlist)
 }
 
 /// Write one successful videos.list batch into the DB.
@@ -111,19 +40,11 @@ async fn shorts_playlist_for(
 /// - A row returned without duration is skipped — left unchecked, so the
 ///   daily backfill retries it. Marking it checked would freeze the missing
 ///   duration forever.
-/// - A candidate absent from an incomplete (page-capped) UUSH listing is
-///   recorded as a regular video. This is a deliberate best-effort trade-off:
-///   the caller guarantees such a listing was fetched fresh this run, so
-///   retrying cannot learn more — leaving the row unchecked would re-fetch
-///   20 pages every day forever without converging. The cost is that a Short
-///   buried deeper than MAX_PLAYLIST_PAGES×50 (≈1000) entries in the Shorts
-///   playlist stays visible instead of being hidden.
 /// - Requested IDs absent from the response (deleted/private videos) are
 ///   marked checked so the backfill stops re-querying them.
 pub fn apply_video_details(
     conn: &Connection,
     details: &[VideoDetails],
-    shorts_playlist: &ShortsPlaylist,
     requested_ids: &[String],
     now: i64,
 ) {
@@ -141,14 +62,7 @@ pub fn apply_video_details(
                 );
                 continue;
             }
-            let is_short = classify_is_short(d.duration.as_deref(), shorts_playlist, &d.id)
-                .unwrap_or_else(|| {
-                    tracing::debug!(
-                        "[enrich] {} absent from page-capped UUSH listing, recording as regular (best effort)",
-                        d.id
-                    );
-                    false
-                });
+            let is_short = d.is_short();
             let ended_at = d
                 .livestream_ended_at
                 .as_deref()
@@ -306,159 +220,45 @@ mod tests {
         .unwrap()
     }
 
-    fn playlist(ids: &[&str], complete: bool) -> ShortsPlaylist {
-        ShortsPlaylist {
-            ids: ids.iter().map(|s| s.to_string()).collect(),
-            complete,
-        }
-    }
-
     #[test]
-    fn short_video_in_uush_playlist_is_marked_short() {
+    fn vertical_video_up_to_three_minutes_is_marked_short() {
         let state = setup_conn();
         let details = vec![VideoDetails {
             id: "v_short".into(),
-            duration: Some("PT45S".into()),
+            duration: Some("PT3M".into()),
             is_livestream: false,
             livestream_ended_at: None,
+            player_width: Some(720),
+            player_height: Some(1280),
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&["v_short"], true),
-                &["v_short".to_string()],
-                1000,
-            );
+            apply_video_details(&conn, &details, &["v_short".to_string()], 1000);
         }
         let (duration, is_short, _, _, checked) = video_row(&state, "v_short");
-        assert_eq!(duration.as_deref(), Some("PT45S"));
+        assert_eq!(duration.as_deref(), Some("PT3M"));
         assert_eq!(is_short, 1);
         assert_eq!(checked, Some(1000));
     }
 
     #[test]
-    fn short_duration_video_outside_uush_stays_regular() {
-        // A 45-second announcement video is NOT a Short — this is the
-        // misclassification the UUSH check exists to prevent.
+    fn short_video_without_player_size_is_marked_regular() {
         let state = setup_conn();
         let details = vec![VideoDetails {
             id: "v_normal".into(),
             duration: Some("PT45S".into()),
             is_livestream: false,
             livestream_ended_at: None,
+            player_width: None,
+            player_height: None,
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&[], true),
-                &["v_normal".to_string()],
-                1000,
-            );
+            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000);
         }
         let (_, is_short, _, _, checked) = video_row(&state, "v_normal");
         assert_eq!(is_short, 0);
         assert_eq!(checked, Some(1000));
-    }
-
-    #[test]
-    fn candidate_absent_from_page_capped_listing_converges_as_regular() {
-        // Deliberate best-effort trade-off for channels with 1000+ Shorts: the
-        // listing was fetched fresh this run, so retrying cannot learn more.
-        // The row is recorded as regular and marked checked — it must NOT stay
-        // pending, or the backfill would re-fetch 20 pages daily forever.
-        let state = setup_conn();
-        let details = vec![VideoDetails {
-            id: "v_short".into(),
-            duration: Some("PT45S".into()),
-            is_livestream: false,
-            livestream_ended_at: None,
-        }];
-        {
-            let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&[], false),
-                &["v_short".to_string()],
-                1000,
-            );
-        }
-        let (duration, is_short, _, _, checked) = video_row(&state, "v_short");
-        assert_eq!(duration.as_deref(), Some("PT45S"));
-        assert_eq!(is_short, 0);
-        assert_eq!(checked, Some(1000));
-
-        let conn = state.db.lock().unwrap();
-        let pending = pending_enrichment(&conn);
-        assert!(!pending
-            .iter()
-            .any(|(_, ids)| ids.contains(&"v_short".to_string())));
-    }
-
-    #[tokio::test]
-    async fn shorts_playlist_prefers_memo_over_cache_and_network() {
-        // Within one enrich run the fresh listing fetched earlier is reused
-        // even when a candidate is absent — refetching the same capped pages
-        // could not learn more and would burn quota on every chunk.
-        let state = setup_conn();
-        let mut memo = Some(playlist(&["other"], false));
-        let details = vec![VideoDetails {
-            id: "v_short".into(),
-            duration: Some("PT45S".into()),
-            is_livestream: false,
-            livestream_ended_at: None,
-        }];
-        let result = shorts_playlist_for(&state, "key", "UC1", &details, &mut memo)
-            .await
-            .unwrap();
-        assert!(!result.contains("v_short"));
-        assert!(result.contains("other"));
-    }
-
-    #[tokio::test]
-    async fn shorts_playlist_uses_cache_only_while_it_covers_all_candidates() {
-        // A cached snapshot that contains every candidate is trusted (no
-        // network call — "key" is not a valid API key, so a fetch would fail).
-        let state = setup_conn();
-        state
-            .cache
-            .set("uush:UC1", json!(playlist(&["v_short"], true)), Some(3600));
-        let details = vec![VideoDetails {
-            id: "v_short".into(),
-            duration: Some("PT45S".into()),
-            is_livestream: false,
-            livestream_ended_at: None,
-        }];
-        let mut memo = None;
-        let result = shorts_playlist_for(&state, "key", "UC1", &details, &mut memo)
-            .await
-            .unwrap();
-        assert!(result.contains("v_short"));
-        // The cache path must not populate the memo: only a fresh fetch is
-        // authoritative for candidates the cache does not cover.
-        assert!(memo.is_none());
-    }
-
-    #[tokio::test]
-    async fn shorts_playlist_skips_lookup_entirely_without_candidates() {
-        // No ≤180s candidate → no UUSH lookup at all (saves a quota unit).
-        let state = setup_conn();
-        let details = vec![VideoDetails {
-            id: "v_normal".into(),
-            duration: Some("PT10M".into()),
-            is_livestream: false,
-            livestream_ended_at: None,
-        }];
-        let mut memo = None;
-        let result = shorts_playlist_for(&state, "key", "UC1", &details, &mut memo)
-            .await
-            .unwrap();
-        assert!(result.complete);
-        assert!(result.ids.is_empty());
     }
 
     #[test]
@@ -472,16 +272,12 @@ mod tests {
             duration: None,
             is_livestream: false,
             livestream_ended_at: None,
+            player_width: None,
+            player_height: None,
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&[], true),
-                &["v_normal".to_string()],
-                1000,
-            );
+            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000);
         }
         let (duration, _, _, _, checked) = video_row(&state, "v_normal");
         assert_eq!(duration, None);
@@ -503,16 +299,12 @@ mod tests {
             duration: Some("PT0S".into()),
             is_livestream: true,
             livestream_ended_at: None,
+            player_width: Some(720),
+            player_height: Some(1280),
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&[], true),
-                &["v_live".to_string()],
-                1000,
-            );
+            apply_video_details(&conn, &details, &["v_live".to_string()], 1000);
         }
         let (duration, is_short, is_livestream, ended_at, checked) = video_row(&state, "v_live");
         assert_eq!(duration, None);
@@ -535,16 +327,12 @@ mod tests {
             duration: Some("PT1H2M".into()),
             is_livestream: true,
             livestream_ended_at: Some("2024-01-15T10:00:00Z".into()),
+            player_width: Some(720),
+            player_height: Some(1280),
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &details,
-                &playlist(&[], true),
-                &["v_live".to_string()],
-                2000,
-            );
+            apply_video_details(&conn, &details, &["v_live".to_string()], 2000);
         }
         let (duration, _, is_livestream, ended_at, checked) = video_row(&state, "v_live");
         assert_eq!(duration.as_deref(), Some("PT1H2M"));
@@ -560,13 +348,7 @@ mod tests {
         let state = setup_conn();
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(
-                &conn,
-                &[],
-                &playlist(&[], true),
-                &["v_deleted".to_string()],
-                3000,
-            );
+            apply_video_details(&conn, &[], &["v_deleted".to_string()], 3000);
         }
         let (duration, _, _, _, checked) = video_row(&state, "v_deleted");
         assert_eq!(duration, None);
