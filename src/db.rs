@@ -20,6 +20,7 @@ pub fn open(path: &str) -> Connection {
     add_videos_is_members_only(&conn);
     migrate_timestamps_to_unix(&conn);
     add_videos_details_checked_at(&conn);
+    add_videos_shorts_classifier_version(&conn);
     decode_video_titles_xml_entities(&conn);
     drop_users_oauth_token_columns(&conn);
     add_users_email_unique_index(&conn);
@@ -64,6 +65,28 @@ fn add_videos_details_checked_at(conn: &Connection) {
         Ok(_) => tracing::info!("[migrate] Added videos.details_checked_at column"),
         Err(e) => tracing::warn!(
             "[migrate] Failed to add videos.details_checked_at column: {}",
+            e
+        ),
+    }
+}
+
+/// Version the persisted Shorts verdict so classifier fixes can requeue rows
+/// that were previously marked checked. Version zero means the current
+/// classifier has never evaluated the row.
+fn add_videos_shorts_classifier_version(conn: &Connection) {
+    if column_exists(conn, "videos", "shorts_classifier_version") {
+        return;
+    }
+    match conn.execute(
+        "ALTER TABLE videos
+         ADD COLUMN shorts_classifier_version INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => tracing::info!(
+            "[migrate] Added videos.shorts_classifier_version column; existing videos will be re-enriched"
+        ),
+        Err(e) => tracing::warn!(
+            "[migrate] Failed to add videos.shorts_classifier_version column: {}",
             e
         ),
     }
@@ -269,6 +292,7 @@ fn create_tables(conn: &Connection) {
             livestream_ended_at INTEGER,
             fetched_at INTEGER,
             details_checked_at INTEGER,
+            shorts_classifier_version INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
 
@@ -1238,6 +1262,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(checked_at, None);
+    }
+
+    #[test]
+    fn shorts_classifier_version_defaults_existing_rows_to_zero_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE videos (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                details_checked_at INTEGER
+            );
+            INSERT INTO videos (id, channel_id, title, details_checked_at)
+            VALUES ('v_legacy', 'UC1', 'T', 123);",
+        )
+        .unwrap();
+
+        super::add_videos_shorts_classifier_version(&conn);
+        super::add_videos_shorts_classifier_version(&conn);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT shorts_classifier_version FROM videos WHERE id = 'v_legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 0);
     }
 
     #[test]

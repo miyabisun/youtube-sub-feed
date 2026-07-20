@@ -5,6 +5,8 @@ use std::time::Duration;
 const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ATTEMPTS: u32 = 3;
+/// Increment when persisted Shorts classifications must be recomputed.
+pub const SHORTS_CLASSIFIER_VERSION: i64 = 1;
 
 /// Per-video metadata the WebSub Atom payload does not carry.
 #[derive(Debug)]
@@ -92,11 +94,20 @@ pub fn parse_video_details(data: &Value) -> Result<Vec<VideoDetails>, FetchError
                 livestream_ended_at: item["liveStreamingDetails"]["actualEndTime"]
                     .as_str()
                     .map(|s| s.to_string()),
-                player_width: item["player"]["embedWidth"].as_u64(),
-                player_height: item["player"]["embedHeight"].as_u64(),
+                // Google Discovery represents int64 fields as JSON strings.
+                // Keep accepting numbers too so fixtures and proxy-normalized
+                // responses remain compatible.
+                player_width: parse_u64(&item["player"]["embedWidth"]),
+                player_height: parse_u64(&item["player"]["embedHeight"]),
             })
         })
         .collect())
+}
+
+fn parse_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
 }
 
 /// Fetch details for up to 50 video IDs (one videos.list call, 1 quota unit).
@@ -267,15 +278,43 @@ mod tests {
     }
 
     #[test]
-    fn vertical_video_up_to_three_minutes_is_a_short() {
+    fn string_encoded_player_dimensions_classify_a_vertical_short() {
         let data = json!({"items": [{
             "id": "v_vertical",
             "contentDetails": {"duration": "PT3M"},
+            "player": {"embedWidth": "720", "embedHeight": "1280"}
+        }]});
+        let details = parse_video_details(&data).unwrap();
+
+        assert_eq!(details[0].player_width, Some(720));
+        assert_eq!(details[0].player_height, Some(1280));
+        assert!(details[0].is_short());
+    }
+
+    #[test]
+    fn numeric_player_dimensions_remain_supported() {
+        let data = json!({"items": [{
+            "id": "v_vertical",
+            "contentDetails": {"duration": "PT45S"},
             "player": {"embedWidth": 720, "embedHeight": 1280}
         }]});
         let details = parse_video_details(&data).unwrap();
 
         assert!(details[0].is_short());
+    }
+
+    #[test]
+    fn invalid_string_player_dimensions_are_treated_as_missing() {
+        let data = json!({"items": [{
+            "id": "v_invalid",
+            "contentDetails": {"duration": "PT45S"},
+            "player": {"embedWidth": "", "embedHeight": "not-a-number"}
+        }]});
+        let details = parse_video_details(&data).unwrap();
+
+        assert_eq!(details[0].player_width, None);
+        assert_eq!(details[0].player_height, None);
+        assert!(!details[0].is_short());
     }
 
     #[test]
