@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "youtube-sub-feed"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "axum",
  "chrono",
