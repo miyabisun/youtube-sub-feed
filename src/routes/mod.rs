@@ -28,6 +28,7 @@ use utoipa_swagger_ui::SwaggerUi;
     paths(
         auth::me,
         feed::get_feed,
+        feed::get_history,
         feed::hide_video,
         feed::unhide_video,
         channels::get_channels,
@@ -50,6 +51,7 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::ErrorResponse,
         openapi::OkResponse,
         openapi::FeedItem,
+        openapi::HistoryItem,
         openapi::ChannelItem,
         openapi::ChannelVideoItem,
         openapi::GroupItem,
@@ -263,6 +265,7 @@ mod tests {
             let protected: &[(&str, &str)] = &[
                 ("GET", "/api/auth/me"),
                 ("GET", "/api/feed"),
+                ("GET", "/api/history"),
                 ("GET", "/api/news"),
                 ("PATCH", "/api/videos/abc/hide"),
                 ("PATCH", "/api/videos/abc/unhide"),

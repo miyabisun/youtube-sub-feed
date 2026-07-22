@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/feed", get(get_feed))
+        .route("/api/history", get(get_history))
         .route("/api/videos/{id}/hide", patch(hide_video))
         .route("/api/videos/{id}/unhide", patch(unhide_video))
 }
@@ -20,6 +21,31 @@ struct FeedQuery {
     limit: Option<i64>,
     offset: Option<i64>,
     group: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+fn video_json(row: &rusqlite::Row, watched_at_index: Option<usize>) -> rusqlite::Result<Value> {
+    let mut value = json!({
+        "id": row.get::<_, String>(0)?,
+        "channel_id": row.get::<_, String>(1)?,
+        "title": row.get::<_, String>(2)?,
+        "published_at": crate::util::row_timestamp_to_rfc3339(row, 3)?,
+        "duration": row.get::<_, Option<String>>(4)?,
+        "is_short": row.get::<_, i64>(5)?,
+        "is_livestream": row.get::<_, i64>(6)?,
+        "livestream_ended_at": crate::util::row_timestamp_to_rfc3339(row, 7)?,
+        "channel_title": row.get::<_, String>(8)?,
+        "channel_thumbnail": row.get::<_, Option<String>>(9)?,
+    });
+    if let Some(index) = watched_at_index {
+        value["watched_at"] = json!(crate::util::row_timestamp_to_rfc3339(row, index)?);
+    }
+    Ok(value)
 }
 
 #[utoipa::path(
@@ -80,20 +106,7 @@ async fn get_feed(
             offset_idx = if query.group.is_some() { 4 } else { 3 },
         );
 
-        let map_row = |row: &rusqlite::Row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "channel_id": row.get::<_, String>(1)?,
-                "title": row.get::<_, String>(2)?,
-                "published_at": crate::util::row_timestamp_to_rfc3339(row, 3)?,
-                "duration": row.get::<_, Option<String>>(4)?,
-                "is_short": row.get::<_, i64>(5)?,
-                "is_livestream": row.get::<_, i64>(6)?,
-                "livestream_ended_at": crate::util::row_timestamp_to_rfc3339(row, 7)?,
-                "channel_title": row.get::<_, String>(8)?,
-                "channel_thumbnail": row.get::<_, Option<String>>(9)?,
-            }))
-        };
+        let map_row = |row: &rusqlite::Row| video_json(row, None);
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = if let Some(group_id) = query.group {
@@ -103,6 +116,53 @@ async fn get_feed(
             stmt.query_map(rusqlite::params![uid, limit, offset], map_row)?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        rows
+    };
+
+    Ok(Json(Value::Array(rows)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/history",
+    tag = "動画フィード",
+    summary = "視聴履歴取得",
+    description = "ユーザーが視聴済み（非表示）にした動画を記録日時の降順で取得する。",
+    params(
+        ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
+        ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
+    ),
+    responses(
+        (status = 200, description = "視聴履歴", body = Vec<HistoryItem>),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
+async fn get_history(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Value>, AppError> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let rows = {
+        let conn = state.db.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT v.id, v.channel_id, v.title, v.published_at,
+                    v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
+                    c.title AS channel_title, c.thumbnail_url AS channel_thumbnail,
+                    uv.created_at
+             FROM user_videos uv
+             JOIN videos v ON v.id = uv.video_id
+             JOIN channels c ON c.id = v.channel_id
+             WHERE uv.user_id = ?1 AND uv.is_hidden = 1
+             ORDER BY COALESCE(uv.created_at, 0) DESC, v.id DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![user_id.0, limit, offset], |row| {
+                video_json(row, Some(10))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         rows
     };
 
@@ -270,6 +330,38 @@ mod tests {
         let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         json.as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    async fn history_json_as(
+        state: &AppState,
+        query: &str,
+        email: Option<&str>,
+    ) -> serde_json::Value {
+        let mut builder = Request::builder().uri(format!("/api/history{query}"));
+        if let Some(email) = email {
+            builder = builder.header("Cf-Access-Authenticated-User-Email", email);
+        }
+        let resp = app(state)
+            .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn history_ids(state: &AppState, query: &str) -> Vec<String> {
+        history_ids_as(state, query, None).await
+    }
+
+    async fn history_ids_as(state: &AppState, query: &str, email: Option<&str>) -> Vec<String> {
+        history_json_as(state, query, email)
+            .await
+            .as_array()
             .unwrap()
             .iter()
             .map(|v| v["id"].as_str().unwrap().to_string())
@@ -483,9 +575,71 @@ mod tests {
 
         hide(&state, "v1").await;
         assert!(feed_ids(&state, "").await.is_empty());
+        assert_eq!(history_ids(&state, "").await, vec!["v1"]);
 
         unhide(&state, "v1").await;
         assert_eq!(feed_ids(&state, "").await, vec!["v1"]);
+        assert!(history_ids(&state, "").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_lists_hidden_videos_by_marked_time_with_pagination() {
+        let state = setup_state();
+        insert_video(&state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO user_videos (user_id, video_id, is_hidden, created_at) VALUES
+                    (1, 'v1', 1, 10),
+                    (1, 'v2', 1, 30),
+                    (1, 'v3', 1, 20);",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            history_ids(&state, "?limit=2&offset=0").await,
+            vec!["v2", "v3"]
+        );
+        assert_eq!(history_ids(&state, "?limit=2&offset=2").await, vec!["v1"]);
+
+        let first_page = history_json_as(&state, "?limit=1", None).await;
+        assert_eq!(first_page[0]["watched_at"], "1970-01-01T00:00:30Z");
+        assert_eq!(first_page[0]["channel_title"], "Ch1");
+    }
+
+    #[tokio::test]
+    async fn history_is_isolated_per_user_and_excludes_unhidden_rows() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
+                [],
+            )
+            .unwrap();
+        }
+        insert_video(&state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
+        insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
+        insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO user_videos (user_id, video_id, is_hidden, created_at) VALUES
+                    (1, 'v1', 1, 10),
+                    (1, 'v3', 0, 30),
+                    (2, 'v2', 1, 20);",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(history_ids(&state, "").await, vec!["v1"]);
+        assert_eq!(
+            history_ids_as(&state, "", Some("user2@example.com")).await,
+            vec!["v2"]
+        );
     }
 
     #[tokio::test]

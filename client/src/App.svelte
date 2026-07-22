@@ -7,6 +7,7 @@
   import Channels from './pages/Channels.svelte'
   import ChannelDetail from './pages/ChannelDetail.svelte'
   import Settings from './pages/Settings.svelte'
+  import History from './pages/History.svelte'
 
   let authenticated = $state(false)
   let checking = $state(true)
@@ -74,6 +75,8 @@
           <ChannelDetail channelId={router.params.id} />
         {:else if router.index === 5}
           <Settings />
+        {:else if router.index === 6}
+          <History />
         {/if}
       </main>
     {/if}

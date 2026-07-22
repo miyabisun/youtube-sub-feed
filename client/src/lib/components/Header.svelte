@@ -22,6 +22,7 @@
       return router.index === 1 && router.params.id === href.split('/')[2]
     if (href === '/channels') return router.index === 2
     if (href === '/settings') return router.index === 5
+    if (href === '/history') return router.index === 6
     return false
   }
 
@@ -194,6 +195,12 @@
       <nav class="menu-dropdown">
         <a class="menu-item" class:active={isActive('/')} href={link('/')} onclick={closeMenu}
           >動画一覧</a
+        >
+        <a
+          class="menu-item"
+          class:active={isActive('/history')}
+          href={link('/history')}
+          onclick={closeMenu}>視聴履歴</a
         >
         <a
           class="menu-item"

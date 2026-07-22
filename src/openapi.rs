@@ -46,6 +46,23 @@ pub struct FeedItem {
     pub channel_thumbnail: Option<String>,
 }
 
+/// 視聴履歴アイテム
+#[derive(Serialize, ToSchema)]
+pub struct HistoryItem {
+    pub id: String,
+    pub channel_id: String,
+    pub title: String,
+    pub published_at: Option<String>,
+    pub duration: Option<String>,
+    pub is_short: i64,
+    pub is_livestream: i64,
+    pub livestream_ended_at: Option<String>,
+    pub channel_title: String,
+    pub channel_thumbnail: Option<String>,
+    /// 視聴済みとして記録した日時 (ISO 8601)
+    pub watched_at: Option<String>,
+}
+
 /// チャンネルアイテム
 #[derive(Serialize, ToSchema)]
 pub struct ChannelItem {

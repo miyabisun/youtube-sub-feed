@@ -16,6 +16,7 @@ export const routes = [
   { pattern: /^\/channel\/([^/]+)$/, params: ['id'] },
   { pattern: /^\/login$/, params: [] },
   { pattern: /^\/settings$/, params: [] },
+  { pattern: /^\/history$/, params: [] },
 ]
 
 export function matchRoute(path) {

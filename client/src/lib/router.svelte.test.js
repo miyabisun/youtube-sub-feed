@@ -24,6 +24,10 @@ describe('matchRoute', () => {
     expect(matchRoute('/channels')).toEqual({ index: 2, params: {} })
   })
 
+  test('matches /history to its route index', () => {
+    expect(matchRoute('/history')).toEqual({ index: 6, params: {} })
+  })
+
   test('captures the id param for /group/:id', () => {
     expect(matchRoute('/group/abc')).toEqual({ index: 1, params: { id: 'abc' } })
   })

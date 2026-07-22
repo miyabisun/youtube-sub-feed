@@ -10,6 +10,7 @@
   import { swipeNav } from '$lib/swipe.js'
   import { navigate } from '$lib/router.svelte.js'
   import { startAutoReload } from '$lib/auto-reload.js'
+  import { createVideoHider } from '$lib/video-watch.js'
 
   let { groupId = null } = $props()
   let groups = $derived(getGroups())
@@ -52,15 +53,12 @@
     }
   }
 
-  async function hideVideo(id) {
-    try {
-      await fetcher(`${config.path.api}/videos/${id}/hide`, { method: 'PATCH' })
-      videos = videos.filter((v) => v.id !== id)
-      toast = { message: '非表示にしました', type: 'success' }
-    } catch (e) {
-      toast = { message: e.message, type: 'error' }
-    }
-  }
+  const hideVideo = createVideoHider({
+    hideRequest: (id, options) => fetcher(`${config.path.api}/videos/${id}/hide`, options),
+    onHidden: (id) => (videos = videos.filter((v) => v.id !== id)),
+    onSuccess: () => (toast = { message: '非表示にしました', type: 'success' }),
+    onError: (error) => (toast = { message: error.message, type: 'error' }),
+  })
 
   const PLAY_ALL_LIMIT = 20
 
@@ -137,7 +135,7 @@
       {#each videos as video (video.id)}
         <div class="video-wrapper">
           <div class="video-item">
-            <VideoCard {video} />
+            <VideoCard {video} onwatch={(id) => hideVideo(id, { silent: true })} />
             <button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
           </div>
         </div>

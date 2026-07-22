@@ -3,8 +3,9 @@
   import { formatDuration } from '$lib/format-duration.js'
   import { link } from '$lib/router.svelte.js'
   import { videoThumbnail } from '$lib/youtube-thumbnail.js'
+  import { isWatchActivation } from '$lib/video-watch.js'
 
-  let { video } = $props()
+  let { video, onwatch = null } = $props()
 
   let videoUrl = $derived(getVideoUrl(video))
   let label = $derived(getLabel(video))
@@ -27,10 +28,22 @@
     if (v.is_livestream) return 'label-archive'
     return ''
   }
+
+  function handleWatch(event) {
+    if (!isWatchActivation(event)) return
+    onwatch?.(video.id)
+  }
 </script>
 
 <div class="video-card">
-  <a class="thumbnail-link" href={videoUrl} target="_blank" rel="noopener">
+  <a
+    class="thumbnail-link"
+    href={videoUrl}
+    target="_blank"
+    rel="noopener"
+    onclick={handleWatch}
+    onauxclick={handleWatch}
+  >
     <div class="thumbnail-wrap">
       <img class="thumbnail" src={videoThumbnail(video.id)} alt="" loading="lazy" />
       {#if video.duration}
@@ -42,7 +55,14 @@
     </div>
   </a>
   <div class="info">
-    <a class="title" href={videoUrl} target="_blank" rel="noopener">{video.title}</a>
+    <a
+      class="title"
+      href={videoUrl}
+      target="_blank"
+      rel="noopener"
+      onclick={handleWatch}
+      onauxclick={handleWatch}>{video.title}</a
+    >
     <div class="meta">
       {#if video.channel_title}
         <a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>
