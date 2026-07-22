@@ -1,18 +1,20 @@
 <script>
-	let { message = '', type = 'success' } = $props();
-	let visible = $state(true);
+  let { message = '', type = 'success' } = $props()
+  let visible = $state(true)
 
-	$effect(() => {
-		const duration = type === 'error' ? 3000 : 500;
-		const timer = setTimeout(() => { visible = false; }, duration);
-		return () => clearTimeout(timer);
-	});
+  $effect(() => {
+    const duration = type === 'error' ? 3000 : 500
+    const timer = setTimeout(() => {
+      visible = false
+    }, duration)
+    return () => clearTimeout(timer)
+  })
 </script>
 
 {#if visible}
-	<div class="toast" class:error={type === 'error'}>
-		{message}
-	</div>
+  <div class="toast" class:error={type === 'error'}>
+    {message}
+  </div>
 {/if}
 
 <style lang="sass">

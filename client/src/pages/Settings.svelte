@@ -1,316 +1,371 @@
 <script>
-	import config from '$lib/config.js';
-	import fetcher from '$lib/fetcher.js';
-	import { setGroups } from '$lib/groups.svelte.js';
-	import { videoThumbnail } from '$lib/youtube-thumbnail.js';
-	import Spinner from '$lib/components/Spinner.svelte';
-	import Toast from '$lib/components/Toast.svelte';
-	import Icon from '$lib/components/Icon.svelte';
+  import config from '$lib/config.js'
+  import fetcher from '$lib/fetcher.js'
+  import { setGroups } from '$lib/groups.svelte.js'
+  import { videoThumbnail } from '$lib/youtube-thumbnail.js'
+  import Spinner from '$lib/components/Spinner.svelte'
+  import Toast from '$lib/components/Toast.svelte'
+  import Icon from '$lib/components/Icon.svelte'
 
-	let groups = $state([]);
-	let channels = $state([]);
-	let loading = $state(true);
-	let toast = $state(null);
-	let newGroupName = $state('');
-	let editingGroup = $state(null);
-	let selectedGroup = $state(null);
-	let channelAssignments = $state({});
+  let groups = $state([])
+  let channels = $state([])
+  let loading = $state(true)
+  let toast = $state(null)
+  let newGroupName = $state('')
+  let editingGroup = $state(null)
+  let selectedGroup = $state(null)
+  let channelAssignments = $state({})
 
-	// Drag state
-	let dragIndex = $state(null);
-	let dragOverIndex = $state(null);
+  // Drag state
+  let dragIndex = $state(null)
+  let dragOverIndex = $state(null)
 
-	// Pending group delete confirmation (two-step inline, matches Channels)
-	let pendingDeleteGroupId = $state(null);
-	let deletingGroup = $state(false);
+  // Pending group delete confirmation (two-step inline, matches Channels)
+  let pendingDeleteGroupId = $state(null)
+  let deletingGroup = $state(false)
 
-	// Accordion state
-	let expandedChannel = $state(null);
-	let videoCache = $state({});
+  // Accordion state
+  let expandedChannel = $state(null)
+  let videoCache = $state({})
 
-	// Filter state
-	let showUnassignedOnly = $state(false);
-	let filteredChannels = $derived(
-		showUnassignedOnly ? channels.filter((ch) => !ch.group_names || channelAssignments[ch.id]) : channels
-	);
+  // Filter state
+  let showUnassignedOnly = $state(false)
+  let filteredChannels = $derived(
+    showUnassignedOnly
+      ? channels.filter((ch) => !ch.group_names || channelAssignments[ch.id])
+      : channels,
+  )
 
-	async function loadData() {
-		try {
-			[groups, channels] = await Promise.all([
-				fetcher(`${config.path.api}/groups`),
-				fetcher(`${config.path.api}/channels`),
-			]);
-			setGroups(groups);
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-		loading = false;
-	}
+  async function loadData() {
+    try {
+      ;[groups, channels] = await Promise.all([
+        fetcher(`${config.path.api}/groups`),
+        fetcher(`${config.path.api}/channels`),
+      ])
+      setGroups(groups)
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+    loading = false
+  }
 
-	async function createGroup() {
-		if (!newGroupName.trim()) return;
-		try {
-			const group = await fetcher(`${config.path.api}/groups`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ name: newGroupName.trim() }),
-			});
-			groups = [...groups, group];
-			setGroups(groups);
-			newGroupName = '';
-			toast = { message: '作成しました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function createGroup() {
+    if (!newGroupName.trim()) return
+    try {
+      const group = await fetcher(`${config.path.api}/groups`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newGroupName.trim() }),
+      })
+      groups = [...groups, group]
+      setGroups(groups)
+      newGroupName = ''
+      toast = { message: '作成しました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	async function renameGroup(id) {
-		if (!editingGroup || !editingGroup.name.trim()) return;
-		try {
-			await fetcher(`${config.path.api}/groups/${id}`, {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ name: editingGroup.name }),
-			});
-			groups = groups.map((g) => g.id === id ? { ...g, name: editingGroup.name } : g);
-			setGroups(groups);
-			editingGroup = null;
-			toast = { message: '更新しました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function renameGroup(id) {
+    if (!editingGroup || !editingGroup.name.trim()) return
+    try {
+      await fetcher(`${config.path.api}/groups/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: editingGroup.name }),
+      })
+      groups = groups.map((g) => (g.id === id ? { ...g, name: editingGroup.name } : g))
+      setGroups(groups)
+      editingGroup = null
+      toast = { message: '更新しました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	function confirmDeleteGroup(id) {
-		pendingDeleteGroupId = id;
-	}
+  function confirmDeleteGroup(id) {
+    pendingDeleteGroupId = id
+  }
 
-	function cancelDeleteGroup() {
-		pendingDeleteGroupId = null;
-	}
+  function cancelDeleteGroup() {
+    pendingDeleteGroupId = null
+  }
 
-	async function deleteGroup(id) {
-		if (deletingGroup) return;
-		deletingGroup = true;
-		try {
-			await fetcher(`${config.path.api}/groups/${id}`, { method: 'DELETE' });
-			groups = groups.filter((g) => g.id !== id);
-			setGroups(groups);
-			if (selectedGroup === id) selectedGroup = null;
-			pendingDeleteGroupId = null;
-			toast = { message: '削除しました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		} finally {
-			deletingGroup = false;
-		}
-	}
+  async function deleteGroup(id) {
+    if (deletingGroup) return
+    deletingGroup = true
+    try {
+      await fetcher(`${config.path.api}/groups/${id}`, { method: 'DELETE' })
+      groups = groups.filter((g) => g.id !== id)
+      setGroups(groups)
+      if (selectedGroup === id) selectedGroup = null
+      pendingDeleteGroupId = null
+      toast = { message: '削除しました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    } finally {
+      deletingGroup = false
+    }
+  }
 
-	async function reorderGroups() {
-		const order = groups.map((g) => g.id);
-		try {
-			await fetcher(`${config.path.api}/groups/reorder`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ order }),
-			});
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function reorderGroups() {
+    const order = groups.map((g) => g.id)
+    try {
+      await fetcher(`${config.path.api}/groups/reorder`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order }),
+      })
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	async function selectGroup(groupId) {
-		selectedGroup = groupId;
-		expandedChannel = null;
-		try {
-			const assignedIds = await fetcher(`${config.path.api}/groups/${groupId}/channels`);
-			const assignedSet = new Set(assignedIds);
-			channelAssignments = {};
-			for (const ch of channels) {
-				channelAssignments[ch.id] = assignedSet.has(ch.id);
-			}
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function selectGroup(groupId) {
+    selectedGroup = groupId
+    expandedChannel = null
+    try {
+      const assignedIds = await fetcher(`${config.path.api}/groups/${groupId}/channels`)
+      const assignedSet = new Set(assignedIds)
+      channelAssignments = {}
+      for (const ch of channels) {
+        channelAssignments[ch.id] = assignedSet.has(ch.id)
+      }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	async function saveChannelAssignments() {
-		if (!selectedGroup) return;
-		const channelIds = Object.entries(channelAssignments).filter(([, v]) => v).map(([k]) => k);
-		try {
-			await fetcher(`${config.path.api}/groups/${selectedGroup}/channels`, {
-				method: 'PUT',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ channelIds }),
-			});
-			toast = { message: '保存しました', type: 'success' };
-			loadData();
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function saveChannelAssignments() {
+    if (!selectedGroup) return
+    const channelIds = Object.entries(channelAssignments)
+      .filter(([, v]) => v)
+      .map(([k]) => k)
+    try {
+      await fetcher(`${config.path.api}/groups/${selectedGroup}/channels`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelIds }),
+      })
+      toast = { message: '保存しました', type: 'success' }
+      loadData()
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	async function toggleExpand(channelId) {
-		if (expandedChannel === channelId) {
-			expandedChannel = null;
-			return;
-		}
-		expandedChannel = channelId;
-		if (!videoCache[channelId]) {
-			try {
-				videoCache[channelId] = await fetcher(`${config.path.api}/channels/${channelId}/videos?limit=3`);
-			} catch {
-				videoCache[channelId] = [];
-			}
-		}
-	}
+  async function toggleExpand(channelId) {
+    if (expandedChannel === channelId) {
+      expandedChannel = null
+      return
+    }
+    expandedChannel = channelId
+    if (!videoCache[channelId]) {
+      try {
+        videoCache[channelId] = await fetcher(
+          `${config.path.api}/channels/${channelId}/videos?limit=3`,
+        )
+      } catch {
+        videoCache[channelId] = []
+      }
+    }
+  }
 
-	// Drag and drop handlers
-	function onDragStart(index) {
-		dragIndex = index;
-	}
+  // Drag and drop handlers
+  function onDragStart(index) {
+    dragIndex = index
+  }
 
-	function onDragOver(e, index) {
-		e.preventDefault();
-		dragOverIndex = index;
-	}
+  function onDragOver(e, index) {
+    e.preventDefault()
+    dragOverIndex = index
+  }
 
-	function onDrop(index) {
-		if (dragIndex === null || dragIndex === index) return;
-		const items = [...groups];
-		const [moved] = items.splice(dragIndex, 1);
-		items.splice(index, 0, moved);
-		groups = items;
-		setGroups(groups);
-		dragIndex = null;
-		dragOverIndex = null;
-		reorderGroups();
-	}
+  function onDrop(index) {
+    if (dragIndex === null || dragIndex === index) return
+    const items = [...groups]
+    const [moved] = items.splice(dragIndex, 1)
+    items.splice(index, 0, moved)
+    groups = items
+    setGroups(groups)
+    dragIndex = null
+    dragOverIndex = null
+    reorderGroups()
+  }
 
-	function onDragEnd() {
-		dragIndex = null;
-		dragOverIndex = null;
-	}
+  function onDragEnd() {
+    dragIndex = null
+    dragOverIndex = null
+  }
 
-	loadData();
+  loadData()
 </script>
 
 <div class="settings-page">
-	{#if loading}
-		<Spinner />
-	{:else}
-		<section class="section">
-			<h2>グループ管理</h2>
+  {#if loading}
+    <Spinner />
+  {:else}
+    <section class="section">
+      <h2>グループ管理</h2>
 
-			<div class="create-group">
-				<input type="text" placeholder="新しいグループ名" bind:value={newGroupName} onkeydown={(e) => e.key === 'Enter' && createGroup()} />
-				<button onclick={createGroup}>追加</button>
-			</div>
+      <div class="create-group">
+        <input
+          type="text"
+          placeholder="新しいグループ名"
+          bind:value={newGroupName}
+          onkeydown={(e) => e.key === 'Enter' && createGroup()}
+        />
+        <button onclick={createGroup}>追加</button>
+      </div>
 
-			<div class="group-list">
-				{#each groups as group, i (group.id)}
-					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div
-						class="group-item"
-						class:drag-over={dragOverIndex === i}
-						draggable="true"
-						ondragstart={() => onDragStart(i)}
-						ondragover={(e) => onDragOver(e, i)}
-						ondrop={() => onDrop(i)}
-						ondragend={onDragEnd}
-					>
-						<span class="drag-handle" aria-hidden="true">
-							<Icon>
-								<circle cx="9" cy="6" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="9" cy="18" r="1" />
-								<circle cx="15" cy="6" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="18" r="1" />
-							</Icon>
-						</span>
-						{#if editingGroup?.id === group.id}
-							<input
-								class="edit-input"
-								type="text"
-								bind:value={editingGroup.name}
-								onkeydown={(e) => e.key === 'Enter' && renameGroup(group.id)}
-								onblur={() => renameGroup(group.id)}
-							/>
-						{:else}
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<span class="group-name" onclick={() => editingGroup = { id: group.id, name: group.name }}>{group.name}</span>
-						{/if}
-						<div class="group-actions">
-							<button class="btn-assign" class:active={selectedGroup === group.id} onclick={() => selectGroup(group.id)}>割当</button>
-							{#if pendingDeleteGroupId === group.id}
-								<button class="delete-confirm" onclick={() => deleteGroup(group.id)} disabled={deletingGroup}>
-									{deletingGroup ? '削除中...' : '削除確認'}
-								</button>
-								<button class="delete-cancel" onclick={cancelDeleteGroup}>キャンセル</button>
-							{:else}
-								<button class="btn-delete" onclick={() => confirmDeleteGroup(group.id)}>削除</button>
-							{/if}
-						</div>
-					</div>
-				{/each}
-			</div>
-		</section>
+      <div class="group-list">
+        {#each groups as group, i (group.id)}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="group-item"
+            class:drag-over={dragOverIndex === i}
+            draggable="true"
+            ondragstart={() => onDragStart(i)}
+            ondragover={(e) => onDragOver(e, i)}
+            ondrop={() => onDrop(i)}
+            ondragend={onDragEnd}
+          >
+            <span class="drag-handle" aria-hidden="true">
+              <Icon>
+                <circle cx="9" cy="6" r="1" /><circle cx="9" cy="12" r="1" /><circle
+                  cx="9"
+                  cy="18"
+                  r="1"
+                />
+                <circle cx="15" cy="6" r="1" /><circle cx="15" cy="12" r="1" /><circle
+                  cx="15"
+                  cy="18"
+                  r="1"
+                />
+              </Icon>
+            </span>
+            {#if editingGroup?.id === group.id}
+              <input
+                class="edit-input"
+                type="text"
+                bind:value={editingGroup.name}
+                onkeydown={(e) => e.key === 'Enter' && renameGroup(group.id)}
+                onblur={() => renameGroup(group.id)}
+              />
+            {:else}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <span
+                class="group-name"
+                onclick={() => (editingGroup = { id: group.id, name: group.name })}
+                >{group.name}</span
+              >
+            {/if}
+            <div class="group-actions">
+              <button
+                class="btn-assign"
+                class:active={selectedGroup === group.id}
+                onclick={() => selectGroup(group.id)}>割当</button
+              >
+              {#if pendingDeleteGroupId === group.id}
+                <button
+                  class="delete-confirm"
+                  onclick={() => deleteGroup(group.id)}
+                  disabled={deletingGroup}
+                >
+                  {deletingGroup ? '削除中...' : '削除確認'}
+                </button>
+                <button class="delete-cancel" onclick={cancelDeleteGroup}>キャンセル</button>
+              {:else}
+                <button class="btn-delete" onclick={() => confirmDeleteGroup(group.id)}>削除</button
+                >
+              {/if}
+            </div>
+          </div>
+        {/each}
+      </div>
+    </section>
 
-		{#if selectedGroup}
-			<section class="section">
-				<div class="assign-header">
-					<h2>チャンネル割り当て: {groups.find(g => g.id === selectedGroup)?.name}</h2>
-					<button class="btn-filter" class:active={showUnassignedOnly} onclick={() => showUnassignedOnly = !showUnassignedOnly}>未割当のみ</button>
-				</div>
-				<div class="channel-assign-list">
-					{#each filteredChannels as ch (ch.id)}
-						<div class="assign-card">
-							<!-- svelte-ignore a11y_no_static_element_interactions -->
-							<!-- svelte-ignore a11y_click_events_have_key_events -->
-							<div class="assign-row" onclick={() => toggleExpand(ch.id)}>
-								<input type="checkbox" bind:checked={channelAssignments[ch.id]} onclick={(e) => e.stopPropagation()} />
-								{#if ch.thumbnail_url}
-									<img class="channel-icon" src={ch.thumbnail_url} alt="" />
-								{/if}
-								<span class="channel-name">{ch.title}</span>
-								{#if ch.group_names}
-									<span class="group-labels">
-										{#each ch.group_names.split(', ') as name}
-											<span class="group-label">{name}</span>
-										{/each}
-									</span>
-								{/if}
-								<a class="yt-link" href="https://www.youtube.com/channel/{ch.id}" target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>YT</a>
-							</div>
-							<div class="video-accordion" class:open={expandedChannel === ch.id}>
-								<div class="video-accordion-inner">
-									{#if expandedChannel === ch.id && videoCache[ch.id]}
-										{#if videoCache[ch.id].length === 0}
-											<p class="no-videos">動画がありません</p>
-										{:else}
-											<div class="video-thumbs">
-												{#each videoCache[ch.id] as video}
-													<a class="video-thumb" href="https://www.youtube.com/watch?v={video.id}" target="_blank" rel="noopener">
-														<img src={videoThumbnail(video.id, 'mqdefault')} alt={video.title} loading="lazy" />
-														<span class="video-title">{video.title}</span>
-													</a>
-												{/each}
-											</div>
-										{/if}
-									{/if}
-								</div>
-							</div>
-						</div>
-					{/each}
-				</div>
-				<button class="save-btn" onclick={saveChannelAssignments}>保存</button>
-			</section>
-		{/if}
-	{/if}
+    {#if selectedGroup}
+      <section class="section">
+        <div class="assign-header">
+          <h2>チャンネル割り当て: {groups.find((g) => g.id === selectedGroup)?.name}</h2>
+          <button
+            class="btn-filter"
+            class:active={showUnassignedOnly}
+            onclick={() => (showUnassignedOnly = !showUnassignedOnly)}>未割当のみ</button
+          >
+        </div>
+        <div class="channel-assign-list">
+          {#each filteredChannels as ch (ch.id)}
+            <div class="assign-card">
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <div class="assign-row" onclick={() => toggleExpand(ch.id)}>
+                <input
+                  type="checkbox"
+                  bind:checked={channelAssignments[ch.id]}
+                  onclick={(e) => e.stopPropagation()}
+                />
+                {#if ch.thumbnail_url}
+                  <img class="channel-icon" src={ch.thumbnail_url} alt="" />
+                {/if}
+                <span class="channel-name">{ch.title}</span>
+                {#if ch.group_names}
+                  <span class="group-labels">
+                    {#each ch.group_names.split(', ') as name}
+                      <span class="group-label">{name}</span>
+                    {/each}
+                  </span>
+                {/if}
+                <a
+                  class="yt-link"
+                  href="https://www.youtube.com/channel/{ch.id}"
+                  target="_blank"
+                  rel="noopener"
+                  onclick={(e) => e.stopPropagation()}>YT</a
+                >
+              </div>
+              <div class="video-accordion" class:open={expandedChannel === ch.id}>
+                <div class="video-accordion-inner">
+                  {#if expandedChannel === ch.id && videoCache[ch.id]}
+                    {#if videoCache[ch.id].length === 0}
+                      <p class="no-videos">動画がありません</p>
+                    {:else}
+                      <div class="video-thumbs">
+                        {#each videoCache[ch.id] as video}
+                          <a
+                            class="video-thumb"
+                            href="https://www.youtube.com/watch?v={video.id}"
+                            target="_blank"
+                            rel="noopener"
+                          >
+                            <img
+                              src={videoThumbnail(video.id, 'mqdefault')}
+                              alt={video.title}
+                              loading="lazy"
+                            />
+                            <span class="video-title">{video.title}</span>
+                          </a>
+                        {/each}
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+        <button class="save-btn" onclick={saveChannelAssignments}>保存</button>
+      </section>
+    {/if}
+  {/if}
 </div>
 
 {#if toast}
-	{#key Date.now()}
-		<Toast message={toast.message} type={toast.type} />
-	{/key}
+  {#key Date.now()}
+    <Toast message={toast.message} type={toast.type} />
+  {/key}
 {/if}
 
 <style lang="sass">

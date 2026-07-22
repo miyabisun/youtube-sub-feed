@@ -1,82 +1,83 @@
 <script>
-	import { router, navigate, getBasePath } from '$lib/router.svelte.js';
-	import config from '$lib/config.js';
-	import Header from '$lib/components/Header.svelte';
-	import Login from './pages/Login.svelte';
-	import Feed from './pages/Feed.svelte';
-	import Channels from './pages/Channels.svelte';
-	import ChannelDetail from './pages/ChannelDetail.svelte';
-	import Settings from './pages/Settings.svelte';
+  import { router, navigate, getBasePath } from '$lib/router.svelte.js'
+  import config from '$lib/config.js'
+  import Header from '$lib/components/Header.svelte'
+  import Login from './pages/Login.svelte'
+  import Feed from './pages/Feed.svelte'
+  import Channels from './pages/Channels.svelte'
+  import ChannelDetail from './pages/ChannelDetail.svelte'
+  import Settings from './pages/Settings.svelte'
 
-	let authenticated = $state(false);
-	let checking = $state(true);
+  let authenticated = $state(false)
+  let checking = $state(true)
 
-	async function checkAuth() {
-		try {
-			const res = await fetch(`${config.path.api}/auth/me`);
-			authenticated = res.ok;
-		} catch {
-			authenticated = false;
-		}
-		checking = false;
+  async function checkAuth() {
+    try {
+      const res = await fetch(`${config.path.api}/auth/me`)
+      authenticated = res.ok
+    } catch {
+      authenticated = false
+    }
+    checking = false
 
-		// /api/auth/me returns 401 when:
-		// - Production: Cloudflare Access did not authenticate (shouldn't happen if CF Access is configured)
-		// - Development: DB is empty (no users yet)
-		// In both cases, show the login page which explains the CF Access requirement.
-		if (!authenticated && router.index !== 4) {
-			navigate('/login');
-		}
-	}
+    // /api/auth/me returns 401 when:
+    // - Production: Cloudflare Access did not authenticate (shouldn't happen if CF Access is configured)
+    // - Development: DB is empty (no users yet)
+    // In both cases, show the login page which explains the CF Access requirement.
+    if (!authenticated && router.index !== 4) {
+      navigate('/login')
+    }
+  }
 
-	checkAuth();
+  checkAuth()
 
-	$effect(() => {
-		function handleClick(e) {
-			const a = e.target.closest('a');
-			if (!a) return;
-			const href = a.getAttribute('href');
-			if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('/api/')) return;
-			if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  $effect(() => {
+    function handleClick(e) {
+      const a = e.target.closest('a')
+      if (!a) return
+      const href = a.getAttribute('href')
+      if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('/api/'))
+        return
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return
 
-			const base = getBasePath();
-			let path = href;
-			if (base && path.startsWith(base)) {
-				path = path.slice(base.length) || '/';
-			}
+      const base = getBasePath()
+      let path = href
+      if (base && path.startsWith(base)) {
+        path = path.slice(base.length) || '/'
+      }
 
-			e.preventDefault();
-			navigate(path);
-		}
+      e.preventDefault()
+      navigate(path)
+    }
 
-		document.addEventListener('click', handleClick);
-		return () => document.removeEventListener('click', handleClick);
-	});
+    document.addEventListener('click', handleClick)
+    return () => document.removeEventListener('click', handleClick)
+  })
 </script>
 
 {#if checking}
-	<div class="app loading"></div>
+  <div class="app loading"></div>
 {:else}
-	<div class="app">
-		{#if router.index === 4}
-			<main><Login /></main>
-		{:else}
-			<Header />
-			<main>
-				{#if router.index === 0}
-					<Feed />
-				{:else if router.index === 1}
-					<Feed groupId={router.params.id} />
-				{:else if router.index === 2}
-					<Channels />
-				{:else if router.index === 3}
-					<ChannelDetail channelId={router.params.id} />
-				{:else if router.index === 5}
-					<Settings />
-				{/if}
-			</main>
-		{/if}
-	</div>
+  <div class="app">
+    {#if router.index === 4}
+      <main><Login /></main>
+    {:else}
+      <Header />
+      <main>
+        {#if router.index === 0}
+          <Feed />
+        {:else if router.index === 1}
+          <Feed groupId={router.params.id} />
+        {:else if router.index === 2}
+          <Channels />
+        {:else if router.index === 3}
+          <ChannelDetail channelId={router.params.id} />
+        {:else if router.index === 5}
+          <Settings />
+        {/if}
+      </main>
+    {/if}
+  </div>
 {/if}
 
 <style lang="sass">

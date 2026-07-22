@@ -1,9 +1,9 @@
 <div class="login-page">
-	<div class="login-card">
-		<h1>youtube-sub-feed</h1>
-		<p>登録チャンネルの最新動画を時系列で閲覧</p>
-		<p class="note">Cloudflare Access で認証してアクセスしてください。</p>
-	</div>
+  <div class="login-card">
+    <h1>youtube-sub-feed</h1>
+    <p>登録チャンネルの最新動画を時系列で閲覧</p>
+    <p class="note">Cloudflare Access で認証してアクセスしてください。</p>
+  </div>
 </div>
 
 <style lang="sass">

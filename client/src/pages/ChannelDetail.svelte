@@ -1,171 +1,198 @@
 <script>
-	import { untrack } from 'svelte';
-	import config from '$lib/config.js';
-	import fetcher from '$lib/fetcher.js';
-	import VideoCard from '$lib/components/VideoCard.svelte';
-	import Spinner from '$lib/components/Spinner.svelte';
-	import Toast from '$lib/components/Toast.svelte';
-	import { swipeable } from '$lib/swipe.js';
+  import { untrack } from 'svelte'
+  import config from '$lib/config.js'
+  import fetcher from '$lib/fetcher.js'
+  import VideoCard from '$lib/components/VideoCard.svelte'
+  import Spinner from '$lib/components/Spinner.svelte'
+  import Toast from '$lib/components/Toast.svelte'
+  import { swipeable } from '$lib/swipe.js'
 
-	let { channelId } = $props();
+  let { channelId } = $props()
 
-	let channel = $state(null);
-	let videos = $state([]);
-	let loading = $state(true);
-	let loadingMore = $state(false);
-	let hasMore = $state(true);
-	let toast = $state(null);
-	let sentinel = $state(null);
+  let channel = $state(null)
+  let videos = $state([])
+  let loading = $state(true)
+  let loadingMore = $state(false)
+  let hasMore = $state(true)
+  let toast = $state(null)
+  let sentinel = $state(null)
 
-	const LIMIT = 100;
+  const LIMIT = 100
 
-	async function loadData(reset = false) {
-		if (reset) {
-			videos = [];
-			hasMore = true;
-			loading = true;
-		} else {
-			loadingMore = true;
-		}
+  async function loadData(reset = false) {
+    if (reset) {
+      videos = []
+      hasMore = true
+      loading = true
+    } else {
+      loadingMore = true
+    }
 
-		try {
-			if (reset) {
-				const channels = await fetcher(`${config.path.api}/channels`);
-				channel = channels.find((c) => c.id === channelId) || null;
-			}
-			const offset = videos.length;
-			const data = await fetcher(`${config.path.api}/channels/${channelId}/videos?limit=${LIMIT}&offset=${offset}`);
-			videos = [...videos, ...data];
-			hasMore = data.length === LIMIT;
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		} finally {
-			loading = false;
-			loadingMore = false;
-		}
-	}
+    try {
+      if (reset) {
+        const channels = await fetcher(`${config.path.api}/channels`)
+        channel = channels.find((c) => c.id === channelId) || null
+      }
+      const offset = videos.length
+      const data = await fetcher(
+        `${config.path.api}/channels/${channelId}/videos?limit=${LIMIT}&offset=${offset}`,
+      )
+      videos = [...videos, ...data]
+      hasMore = data.length === LIMIT
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    } finally {
+      loading = false
+      loadingMore = false
+    }
+  }
 
-	async function setVideoHidden(id, hide) {
-		const action = hide ? 'hide' : 'unhide';
-		const message = hide ? '非表示にしました' : '復元しました';
-		try {
-			await fetcher(`${config.path.api}/videos/${id}/${action}`, { method: 'PATCH' });
-			videos = videos.map((v) => v.id === id ? { ...v, is_hidden: hide ? 1 : 0 } : v);
-			toast = { message, type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function setVideoHidden(id, hide) {
+    const action = hide ? 'hide' : 'unhide'
+    const message = hide ? '非表示にしました' : '復元しました'
+    try {
+      await fetcher(`${config.path.api}/videos/${id}/${action}`, { method: 'PATCH' })
+      videos = videos.map((v) => (v.id === id ? { ...v, is_hidden: hide ? 1 : 0 } : v))
+      toast = { message, type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	let toggling = $state(false);
+  let toggling = $state(false)
 
-	async function toggleSetting(field) {
-		if (!channel || toggling) return;
-		toggling = true;
-		const newVal = channel[field] ? 0 : 1;
-		try {
-			await fetcher(`${config.path.api}/channels/${channelId}`, {
-				method: 'PATCH',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ [field]: newVal }),
-			});
-			channel = { ...channel, [field]: newVal };
-			toast = { message: '設定を更新しました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		} finally {
-			toggling = false;
-		}
-	}
+  async function toggleSetting(field) {
+    if (!channel || toggling) return
+    toggling = true
+    const newVal = channel[field] ? 0 : 1
+    try {
+      await fetcher(`${config.path.api}/channels/${channelId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [field]: newVal }),
+      })
+      channel = { ...channel, [field]: newVal }
+      toast = { message: '設定を更新しました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    } finally {
+      toggling = false
+    }
+  }
 
-	$effect(() => {
-		void channelId;
-		untrack(() => loadData(true));
-	});
+  $effect(() => {
+    void channelId
+    untrack(() => loadData(true))
+  })
 
-	$effect(() => {
-		if (!sentinel) return;
-		const observer = new IntersectionObserver((entries) => {
-			if (entries[0].isIntersecting && hasMore && !loading && !loadingMore) loadData();
-		}, { rootMargin: '200px' });
-		observer.observe(sentinel);
-		return () => observer.disconnect();
-	});
+  $effect(() => {
+    if (!sentinel) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMore && !loading && !loadingMore) loadData()
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  })
 </script>
 
 <div class="channel-detail">
-	{#if loading}
-		<Spinner />
-	{:else}
-		{#if channel}
-			<div class="channel-header">
-				<div class="channel-name-row">
-					<div class="channel-name">{channel.title}</div>
-					<a class="youtube-link" href="https://www.youtube.com/channel/{channel.id}" target="_blank" rel="noopener">YouTube</a>
-				</div>
-				<div class="channel-settings">
-					<button class="toggle-btn" class:active={channel.is_favorite} role="switch" aria-checked={!!channel.is_favorite} onclick={() => toggleSetting('is_favorite')}>
-						<span class="toggle-track"><span class="toggle-thumb"></span></span>
-						お気に入り
-					</button>
-					<button class="toggle-btn" class:active={channel.show_livestreams} role="switch" aria-checked={!!channel.show_livestreams} onclick={() => toggleSetting('show_livestreams')}>
-						<span class="toggle-track"><span class="toggle-thumb"></span></span>
-						ライブ表示
-					</button>
-					<button
-						class="toggle-btn"
-						class:active={channel.hide_shorts}
-						role="switch"
-						aria-checked={!!channel.hide_shorts}
-						aria-describedby="shorts-ng-description"
-						onclick={() => toggleSetting('hide_shorts')}
-					>
-						<span class="toggle-track"><span class="toggle-thumb"></span></span>
-						ショートNG
-					</button>
-				</div>
-				<p id="shorts-ng-description" class="setting-description">
-					ONにすると、このチャンネルのShortsを動画一覧・RSS・新着から除外します。
-				</p>
-			</div>
-		{/if}
+  {#if loading}
+    <Spinner />
+  {:else}
+    {#if channel}
+      <div class="channel-header">
+        <div class="channel-name-row">
+          <div class="channel-name">{channel.title}</div>
+          <a
+            class="youtube-link"
+            href="https://www.youtube.com/channel/{channel.id}"
+            target="_blank"
+            rel="noopener">YouTube</a
+          >
+        </div>
+        <div class="channel-settings">
+          <button
+            class="toggle-btn"
+            class:active={channel.is_favorite}
+            role="switch"
+            aria-checked={!!channel.is_favorite}
+            onclick={() => toggleSetting('is_favorite')}
+          >
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            お気に入り
+          </button>
+          <button
+            class="toggle-btn"
+            class:active={channel.show_livestreams}
+            role="switch"
+            aria-checked={!!channel.show_livestreams}
+            onclick={() => toggleSetting('show_livestreams')}
+          >
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            ライブ表示
+          </button>
+          <button
+            class="toggle-btn"
+            class:active={channel.hide_shorts}
+            role="switch"
+            aria-checked={!!channel.hide_shorts}
+            aria-describedby="shorts-ng-description"
+            onclick={() => toggleSetting('hide_shorts')}
+          >
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            ショートNG
+          </button>
+        </div>
+        <p id="shorts-ng-description" class="setting-description">
+          ONにすると、このチャンネルのShortsを動画一覧・RSS・新着から除外します。
+        </p>
+      </div>
+    {/if}
 
-		<div class="video-list">
-			{#each videos as video (video.id)}
-				<div class="video-wrapper" class:hidden={video.is_hidden}>
-					<div class="swipe-bg">{video.is_hidden ? '復元' : '非表示'}</div>
-					<div class="video-item"
-						use:swipeable={{
-							onSwipeLeft: video.is_hidden ? null : () => setVideoHidden(video.id, true),
-							onSwipeRight: video.is_hidden ? () => setVideoHidden(video.id, false) : null,
-						}}
-					>
-						{#if video.is_hidden}<div class="hidden-badge"></div>{/if}
-						<VideoCard {video} />
-						<div class="action-btns">
-							{#if video.is_hidden}
-								<button class="action-btn restore" onclick={() => setVideoHidden(video.id, false)}>復元</button>
-							{:else}
-								<button class="action-btn hide" onclick={() => setVideoHidden(video.id, true)}>非表示</button>
-							{/if}
-						</div>
-					</div>
-				</div>
-			{/each}
-		</div>
+    <div class="video-list">
+      {#each videos as video (video.id)}
+        <div class="video-wrapper" class:hidden={video.is_hidden}>
+          <div class="swipe-bg">{video.is_hidden ? '復元' : '非表示'}</div>
+          <div
+            class="video-item"
+            use:swipeable={{
+              onSwipeLeft: video.is_hidden ? null : () => setVideoHidden(video.id, true),
+              onSwipeRight: video.is_hidden ? () => setVideoHidden(video.id, false) : null,
+            }}
+          >
+            {#if video.is_hidden}<div class="hidden-badge"></div>{/if}
+            <VideoCard {video} />
+            <div class="action-btns">
+              {#if video.is_hidden}
+                <button class="action-btn restore" onclick={() => setVideoHidden(video.id, false)}
+                  >復元</button
+                >
+              {:else}
+                <button class="action-btn hide" onclick={() => setVideoHidden(video.id, true)}
+                  >非表示</button
+                >
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/each}
+    </div>
 
-		{#if hasMore}
-			<div bind:this={sentinel} class="sentinel">
-				{#if loadingMore}<Spinner />{/if}
-			</div>
-		{/if}
-	{/if}
+    {#if hasMore}
+      <div bind:this={sentinel} class="sentinel">
+        {#if loadingMore}<Spinner />{/if}
+      </div>
+    {/if}
+  {/if}
 </div>
 
 {#if toast}
-	{#key Date.now()}
-		<Toast message={toast.message} type={toast.type} />
-	{/key}
+  {#key Date.now()}
+    <Toast message={toast.message} type={toast.type} />
+  {/key}
 {/if}
 
 <style lang="sass">

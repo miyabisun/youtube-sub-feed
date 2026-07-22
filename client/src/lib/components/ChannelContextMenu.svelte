@@ -1,61 +1,67 @@
 <script>
-	let { channel, onclose, ontoggle, toggling = false } = $props();
-	let dialogElement = $state(null);
-	let favoriteButton = $state(null);
+  let { channel, onclose, ontoggle, toggling = false } = $props()
+  let dialogElement = $state(null)
+  let favoriteButton = $state(null)
 
-	$effect(() => {
-		const dialog = dialogElement;
-		if (!dialog) return;
-		dialog.showModal();
-		queueMicrotask(() => favoriteButton?.focus());
-		return () => {
-			if (dialog.open) dialog.close();
-		};
-	});
+  $effect(() => {
+    const dialog = dialogElement
+    if (!dialog) return
+    dialog.showModal()
+    queueMicrotask(() => favoriteButton?.focus())
+    return () => {
+      if (dialog.open) dialog.close()
+    }
+  })
 
-	function trapFocus(event) {
-		if (event.key !== 'Tab') return;
-		const buttons = [...dialogElement.querySelectorAll('button:not(:disabled)')];
-		const first = buttons[0];
-		const last = buttons.at(-1);
-		if (event.shiftKey && document.activeElement === first) {
-			event.preventDefault();
-			last.focus();
-		} else if (!event.shiftKey && document.activeElement === last) {
-			event.preventDefault();
-			first.focus();
-		}
-	}
+  function trapFocus(event) {
+    if (event.key !== 'Tab') return
+    const buttons = [...dialogElement.querySelectorAll('button:not(:disabled)')]
+    const first = buttons[0]
+    const last = buttons.at(-1)
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
 </script>
 
 <dialog
-	class="channel-dialog"
-	aria-labelledby="channel-menu-title"
-	bind:this={dialogElement}
-	oncancel={(event) => {
-		event.preventDefault();
-		onclose();
-	}}
-	onclick={(event) => event.target === event.currentTarget && onclose()}
-	onkeydown={trapFocus}
+  class="channel-dialog"
+  aria-labelledby="channel-menu-title"
+  bind:this={dialogElement}
+  oncancel={(event) => {
+    event.preventDefault()
+    onclose()
+  }}
+  onclick={(event) => event.target === event.currentTarget && onclose()}
+  onkeydown={trapFocus}
 >
-	<div class="context-menu">
-		<div class="menu-heading">
-			<span class="eyebrow">チャンネル操作</span>
-			<h2 id="channel-menu-title">{channel.title}</h2>
-		</div>
-		<button
-			class="favorite-action"
-			class:active={channel.is_favorite}
-			onclick={ontoggle}
-			disabled={toggling}
-			bind:this={favoriteButton}
-		>
-			<span class="star" aria-hidden="true">★</span>
-			<span>{toggling ? '更新中…' : channel.is_favorite ? 'お気に入りから外す' : 'お気に入りに追加'}</span>
-		</button>
-		<button class="cancel-action" onclick={onclose}>キャンセル</button>
-	</div>
+  <div class="context-menu">
+    <div class="menu-heading">
+      <span class="eyebrow">チャンネル操作</span>
+      <h2 id="channel-menu-title">{channel.title}</h2>
+    </div>
+    <button
+      class="favorite-action"
+      class:active={channel.is_favorite}
+      onclick={ontoggle}
+      disabled={toggling}
+      bind:this={favoriteButton}
+    >
+      <span class="star" aria-hidden="true">★</span>
+      <span
+        >{toggling
+          ? '更新中…'
+          : channel.is_favorite
+            ? 'お気に入りから外す'
+            : 'お気に入りに追加'}</span
+      >
+    </button>
+    <button class="cancel-action" onclick={onclose}>キャンセル</button>
+  </div>
 </dialog>
 
 <style lang="sass">

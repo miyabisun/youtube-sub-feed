@@ -1,55 +1,55 @@
 <script>
-	import { relativeTime } from '$lib/relative-time.js';
-	import { formatDuration } from '$lib/format-duration.js';
-	import { link } from '$lib/router.svelte.js';
-	import { videoThumbnail } from '$lib/youtube-thumbnail.js';
+  import { relativeTime } from '$lib/relative-time.js'
+  import { formatDuration } from '$lib/format-duration.js'
+  import { link } from '$lib/router.svelte.js'
+  import { videoThumbnail } from '$lib/youtube-thumbnail.js'
 
-	let { video } = $props();
+  let { video } = $props()
 
-	let videoUrl = $derived(getVideoUrl(video));
-	let label = $derived(getLabel(video));
+  let videoUrl = $derived(getVideoUrl(video))
+  let label = $derived(getLabel(video))
 
-	function getVideoUrl(v) {
-		if (v.is_short) return `https://www.youtube.com/shorts/${v.id}`;
-		return `https://www.youtube.com/watch?v=${v.id}`;
-	}
+  function getVideoUrl(v) {
+    if (v.is_short) return `https://www.youtube.com/shorts/${v.id}`
+    return `https://www.youtube.com/watch?v=${v.id}`
+  }
 
-	function getLabel(v) {
-		if (v.is_short) return 'Shorts';
-		if (v.is_livestream && !v.livestream_ended_at) return 'LIVE';
-		if (v.is_livestream && v.livestream_ended_at) return '配信アーカイブ';
-		return null;
-	}
+  function getLabel(v) {
+    if (v.is_short) return 'Shorts'
+    if (v.is_livestream && !v.livestream_ended_at) return 'LIVE'
+    if (v.is_livestream && v.livestream_ended_at) return '配信アーカイブ'
+    return null
+  }
 
-	function getLabelClass(v) {
-		if (v.is_short) return 'label-shorts';
-		if (v.is_livestream && !v.livestream_ended_at) return 'label-live';
-		if (v.is_livestream) return 'label-archive';
-		return '';
-	}
+  function getLabelClass(v) {
+    if (v.is_short) return 'label-shorts'
+    if (v.is_livestream && !v.livestream_ended_at) return 'label-live'
+    if (v.is_livestream) return 'label-archive'
+    return ''
+  }
 </script>
 
 <div class="video-card">
-	<a class="thumbnail-link" href={videoUrl} target="_blank" rel="noopener">
-		<div class="thumbnail-wrap">
-			<img class="thumbnail" src={videoThumbnail(video.id)} alt="" loading="lazy" />
-			{#if video.duration}
-				<span class="duration">{formatDuration(video.duration)}</span>
-			{/if}
-			{#if label}
-				<span class="label {getLabelClass(video)}">{label}</span>
-			{/if}
-		</div>
-	</a>
-	<div class="info">
-		<a class="title" href={videoUrl} target="_blank" rel="noopener">{video.title}</a>
-		<div class="meta">
-			{#if video.channel_title}
-				<a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>
-			{/if}
-			<span class="time">{relativeTime(video.published_at)}</span>
-		</div>
-	</div>
+  <a class="thumbnail-link" href={videoUrl} target="_blank" rel="noopener">
+    <div class="thumbnail-wrap">
+      <img class="thumbnail" src={videoThumbnail(video.id)} alt="" loading="lazy" />
+      {#if video.duration}
+        <span class="duration">{formatDuration(video.duration)}</span>
+      {/if}
+      {#if label}
+        <span class="label {getLabelClass(video)}">{label}</span>
+      {/if}
+    </div>
+  </a>
+  <div class="info">
+    <a class="title" href={videoUrl} target="_blank" rel="noopener">{video.title}</a>
+    <div class="meta">
+      {#if video.channel_title}
+        <a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>
+      {/if}
+      <span class="time">{relativeTime(video.published_at)}</span>
+    </div>
+  </div>
 </div>
 
 <style lang="sass">

@@ -1,143 +1,160 @@
 <script>
-	import { untrack } from 'svelte';
-	import config from '$lib/config.js';
-	import fetcher from '$lib/fetcher.js';
-	import { getGroups, loadGroups } from '$lib/groups.svelte.js';
-	import VideoCard from '$lib/components/VideoCard.svelte';
-	import Spinner from '$lib/components/Spinner.svelte';
-	import Toast from '$lib/components/Toast.svelte';
-	import Icon from '$lib/components/Icon.svelte';
-	import { swipeNav } from '$lib/swipe.js';
-	import { navigate } from '$lib/router.svelte.js';
+  import { untrack } from 'svelte'
+  import config from '$lib/config.js'
+  import fetcher from '$lib/fetcher.js'
+  import { getGroups, loadGroups } from '$lib/groups.svelte.js'
+  import VideoCard from '$lib/components/VideoCard.svelte'
+  import Spinner from '$lib/components/Spinner.svelte'
+  import Toast from '$lib/components/Toast.svelte'
+  import Icon from '$lib/components/Icon.svelte'
+  import { swipeNav } from '$lib/swipe.js'
+  import { navigate } from '$lib/router.svelte.js'
+  import { startAutoReload } from '$lib/auto-reload.js'
 
-	let { groupId = null } = $props();
-	let groups = $derived(getGroups());
+  let { groupId = null } = $props()
+  let groups = $derived(getGroups())
 
-	let videos = $state([]);
-	let loading = $state(false);
-	let loadingMore = $state(false);
-	let hasMore = $state(true);
-	let toast = $state(null);
-	let sentinel = $state(null);
+  let videos = $state([])
+  let loading = $state(false)
+  let loadingMore = $state(false)
+  let hasMore = $state(true)
+  let toast = $state(null)
+  let sentinel = $state(null)
+  let requestSeq = 0
 
-	const LIMIT = 100;
+  const LIMIT = 100
 
-	async function loadVideos(reset = false) {
-		if (reset) {
-			videos = [];
-			hasMore = true;
-		}
-		if (loading || loadingMore) return;
+  async function loadVideos(reset = false) {
+    if (!reset && (loading || loadingMore)) return
+    const seq = ++requestSeq
 
-		if (reset) loading = true;
-		else loadingMore = true;
+    if (reset) {
+      loading = true
+      loadingMore = false
+    } else loadingMore = true
 
-		try {
-			const offset = videos.length;
-			let url = `${config.path.api}/feed?limit=${LIMIT}&offset=${offset}`;
-			if (groupId) url += `&group=${groupId}`;
-			const data = await fetcher(url);
-			videos = [...videos, ...data];
-			hasMore = data.length === LIMIT;
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		} finally {
-			loading = false;
-			loadingMore = false;
-		}
-	}
+    try {
+      const offset = reset ? 0 : videos.length
+      let url = `${config.path.api}/feed?limit=${LIMIT}&offset=${offset}`
+      if (groupId) url += `&group=${groupId}`
+      const data = await fetcher(url)
+      if (seq !== requestSeq) return
+      videos = reset ? data : [...videos, ...data]
+      hasMore = data.length === LIMIT
+    } catch (e) {
+      if (seq !== requestSeq) return
+      toast = { message: e.message, type: 'error' }
+    } finally {
+      if (seq === requestSeq) {
+        loading = false
+        loadingMore = false
+      }
+    }
+  }
 
-	async function hideVideo(id) {
-		try {
-			await fetcher(`${config.path.api}/videos/${id}/hide`, { method: 'PATCH' });
-			videos = videos.filter((v) => v.id !== id);
-			toast = { message: '非表示にしました', type: 'success' };
-		} catch (e) {
-			toast = { message: e.message, type: 'error' };
-		}
-	}
+  async function hideVideo(id) {
+    try {
+      await fetcher(`${config.path.api}/videos/${id}/hide`, { method: 'PATCH' })
+      videos = videos.filter((v) => v.id !== id)
+      toast = { message: '非表示にしました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
+    }
+  }
 
-	const PLAY_ALL_LIMIT = 20;
+  const PLAY_ALL_LIMIT = 20
 
-	function openPlayAll(shortsOnly = false) {
-		const ids = videos.filter(v => shortsOnly ? v.is_short : !v.is_short).slice(0, PLAY_ALL_LIMIT).map(v => v.id).join(',');
-		window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`);
-	}
+  function openPlayAll(shortsOnly = false) {
+    const ids = videos
+      .filter((v) => (shortsOnly ? v.is_short : !v.is_short))
+      .slice(0, PLAY_ALL_LIMIT)
+      .map((v) => v.id)
+      .join(',')
+    window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`)
+  }
 
-	let groupCycle = $derived([null, ...groups.map((g) => String(g.id))]);
+  let groupCycle = $derived([null, ...groups.map((g) => String(g.id))])
 
-	function navigateGroup(delta) {
-		const currentIndex = groupCycle.indexOf(groupId ?? null);
-		const nextIndex = (currentIndex + delta + groupCycle.length) % groupCycle.length;
-		const next = groupCycle[nextIndex];
-		navigate(next ? `/group/${next}` : '/');
-	}
+  function navigateGroup(delta) {
+    const currentIndex = groupCycle.indexOf(groupId ?? null)
+    const nextIndex = (currentIndex + delta + groupCycle.length) % groupCycle.length
+    const next = groupCycle[nextIndex]
+    navigate(next ? `/group/${next}` : '/')
+  }
 
-	loadGroups();
+  loadGroups()
 
-	$effect(() => {
-		void groupId;
-		untrack(() => loadVideos(true));
-	});
+  $effect(() => {
+    void groupId
+    untrack(() => loadVideos(true))
+  })
 
-	$effect(() => {
-		if (!sentinel) return;
-		const observer = new IntersectionObserver((entries) => {
-			if (entries[0].isIntersecting && hasMore && !loading && !loadingMore) {
-				loadVideos();
-			}
-		}, { rootMargin: '200px' });
-		observer.observe(sentinel);
-		return () => observer.disconnect();
-	});
+  $effect(() => startAutoReload(() => loadVideos(true)))
+
+  $effect(() => {
+    if (!sentinel) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && hasMore && !loading && !loadingMore) {
+          loadVideos()
+        }
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  })
 </script>
 
-<div class="feed" use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}>
-	{#if loading}
-		<Spinner />
-	{:else if videos.length === 0}
-		<p class="empty">動画がありません</p>
-	{:else}
-		{@const normalCount = videos.filter(v => !v.is_short).length}
-		{@const shortsCount = videos.filter(v => v.is_short).length}
-		{#if normalCount > 0 || shortsCount > 0}
-			<div class="play-all-bar">
-				{#if normalCount > 0}
-					<button class="play-all-btn" onclick={() => openPlayAll()}>
-						<Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
-						連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
-					</button>
-				{/if}
-				{#if shortsCount > 0}
-					<button class="play-all-btn" onclick={() => openPlayAll(true)}>
-						<Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
-						Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
-					</button>
-				{/if}
-			</div>
-		{/if}
-		<div class="video-list">
-			{#each videos as video (video.id)}
-				<div class="video-wrapper">
-					<div class="video-item">
-						<VideoCard {video} />
-						<button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
-					</div>
-				</div>
-			{/each}
-		</div>
-		{#if hasMore}
-			<div bind:this={sentinel} class="sentinel">
-				{#if loadingMore}<Spinner />{/if}
-			</div>
-		{/if}
-	{/if}
+<div
+  class="feed"
+  use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}
+>
+  {#if loading && videos.length === 0}
+    <Spinner />
+  {:else if videos.length === 0}
+    <p class="empty">動画がありません</p>
+  {:else}
+    {@const normalCount = videos.filter((v) => !v.is_short).length}
+    {@const shortsCount = videos.filter((v) => v.is_short).length}
+    {#if normalCount > 0 || shortsCount > 0}
+      <div class="play-all-bar">
+        {#if normalCount > 0}
+          <button class="play-all-btn" onclick={() => openPlayAll()}>
+            <Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
+            連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
+          </button>
+        {/if}
+        {#if shortsCount > 0}
+          <button class="play-all-btn" onclick={() => openPlayAll(true)}>
+            <Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
+            Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
+          </button>
+        {/if}
+      </div>
+    {/if}
+    <div class="video-list">
+      {#each videos as video (video.id)}
+        <div class="video-wrapper">
+          <div class="video-item">
+            <VideoCard {video} />
+            <button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
+          </div>
+        </div>
+      {/each}
+    </div>
+    {#if hasMore}
+      <div bind:this={sentinel} class="sentinel">
+        {#if loadingMore}<Spinner />{/if}
+      </div>
+    {/if}
+  {/if}
 </div>
 
 {#if toast}
-	{#key Date.now()}
-		<Toast message={toast.message} type={toast.type} />
-	{/key}
+  {#key Date.now()}
+    <Toast message={toast.message} type={toast.type} />
+  {/key}
 {/if}
 
 <style lang="sass">
