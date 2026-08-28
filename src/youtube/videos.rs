@@ -1,4 +1,5 @@
 use crate::duration::is_short_duration;
+use crate::websub::atom::AtomEntry;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -128,6 +129,54 @@ pub async fn fetch_video_details(
     );
     let data = get_json_with_retry(http, &url).await?;
     parse_video_details(&data)
+}
+
+/// Parse a playlistItems.list response into the same entry shape a WebSub Atom
+/// push carries, so both discovery paths feed one insertion routine.
+///
+/// - Missing/non-array `items` → MalformedResponse (the channel must not read
+///   as "no uploads" when the body was not a list response at all).
+/// - An item without `snippet.resourceId.videoId` is skipped.
+/// - `contentDetails.videoPublishedAt` is the video's own publication time;
+///   `snippet.publishedAt` only records when the item entered the uploads
+///   playlist, so it is the fallback rather than the first choice.
+pub fn parse_playlist_items(data: &Value) -> Result<Vec<AtomEntry>, FetchError> {
+    let items = data["items"]
+        .as_array()
+        .ok_or(FetchError::MalformedResponse)?;
+
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let snippet = &item["snippet"];
+            let video_id = snippet["resourceId"]["videoId"]
+                .as_str()
+                .filter(|s| !s.is_empty())?;
+            Some(AtomEntry {
+                video_id: video_id.to_string(),
+                title: snippet["title"].as_str().unwrap_or_default().to_string(),
+                published: item["contentDetails"]["videoPublishedAt"]
+                    .as_str()
+                    .or_else(|| snippet["publishedAt"].as_str())
+                    .and_then(crate::util::rfc3339_to_unix),
+            })
+        })
+        .collect())
+}
+
+/// List the most recent uploads of one channel (one playlistItems.list call,
+/// 1 quota unit). 50 is the per-call maximum, and costs the same as fewer.
+pub async fn fetch_playlist_items(
+    http: &reqwest::Client,
+    api_key: &str,
+    playlist_id: &str,
+) -> Result<Vec<AtomEntry>, FetchError> {
+    let url = format!(
+        "{}/playlistItems?part=snippet,contentDetails&playlistId={}&maxResults=50&key={}",
+        YOUTUBE_API_BASE, playlist_id, api_key
+    );
+    let data = get_json_with_retry(http, &url).await?;
+    parse_playlist_items(&data)
 }
 
 /// GET with a bounded retry policy:
@@ -345,5 +394,73 @@ mod tests {
         let details = parse_video_details(&data).unwrap();
 
         assert!(!details[0].is_short());
+    }
+
+    // Playlist Sweep Spec (uploads-playlist listing layer)
+    //
+    // WebSub pushes are occasionally dropped between YouTube and the hub, so a
+    // startup sweep lists each channel's uploads playlist. One playlistItems.list
+    // call costs 1 quota unit and carries the same three fields an Atom entry does.
+
+    fn playlist_item(video_id: &str, title: &str) -> Value {
+        json!({
+            "snippet": {
+                "title": title,
+                "publishedAt": "2026-08-28T13:00:08Z",
+                "resourceId": {"videoId": video_id}
+            },
+            "contentDetails": {"videoPublishedAt": "2026-08-28T12:00:00Z"}
+        })
+    }
+
+    #[test]
+    fn playlist_items_become_feed_entries() {
+        let entries =
+            parse_playlist_items(&json!({"items": [playlist_item("v1", "First")]})).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].video_id, "v1");
+        assert_eq!(entries[0].title, "First");
+        // videoPublishedAt is when the video went public; the item's own
+        // publishedAt only says when it entered the uploads playlist.
+        assert_eq!(entries[0].published, Some(1_787_918_400)); // 2026-08-28T12:00:00Z
+    }
+
+    #[test]
+    fn playlist_item_without_video_publish_time_falls_back_to_item_publish_time() {
+        let data = json!({"items": [{
+            "snippet": {
+                "title": "T",
+                "publishedAt": "2026-08-28T13:00:08Z",
+                "resourceId": {"videoId": "v2"}
+            }
+        }]});
+
+        let entries = parse_playlist_items(&data).unwrap();
+
+        assert_eq!(entries[0].published, Some(1_787_922_008)); // 2026-08-28T13:00:08Z
+    }
+
+    #[test]
+    fn playlist_item_without_video_id_is_skipped() {
+        let data = json!({"items": [
+            {"snippet": {"title": "no resourceId"}},
+            playlist_item("v3", "kept")
+        ]});
+
+        let entries = parse_playlist_items(&data).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].video_id, "v3");
+    }
+
+    #[test]
+    fn playlist_response_without_items_array_is_malformed() {
+        // Mirrors parse_video_details: a body that is not a list response must
+        // fail the whole channel rather than read as "this channel has no uploads".
+        assert_eq!(
+            parse_playlist_items(&json!({"error": "x"})).unwrap_err(),
+            FetchError::MalformedResponse
+        );
     }
 }

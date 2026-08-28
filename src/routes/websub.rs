@@ -229,7 +229,7 @@ pub async fn notification(
     StatusCode::OK
 }
 
-fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {
+pub(crate) fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {
     conn.query_row(
         "SELECT title FROM channels WHERE id = ?1",
         [channel_id],
@@ -244,7 +244,7 @@ fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String
 ///
 /// Pulled out as a pure function so the new-video detection logic can be tested
 /// directly without going through HTTP/HMAC plumbing.
-fn partition_new_entries<'a>(
+pub(crate) fn partition_new_entries<'a>(
     conn: &rusqlite::Connection,
     channel_id: &str,
     entries: &'a [AtomEntry],
