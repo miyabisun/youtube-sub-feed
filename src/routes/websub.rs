@@ -146,7 +146,7 @@ pub async fn notification(
     };
 
     let Some(channel_id) = extract_channel_id(xml) else {
-        tracing::warn!("[websub] push without yt:channelId, dropping");
+        tracing::warn!("[websub] push without identifiable channel, dropping");
         return StatusCode::BAD_REQUEST;
     };
 
@@ -818,5 +818,105 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn tombstone(channel_id: &str, video_id: &str) -> String {
+        format!(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:at="http://purl.org/atompub/tombstones/1.0" xmlns="http://www.w3.org/2005/Atom">
+  <at:deleted-entry ref="yt:video:{video_id}" when="2026-08-28T13:00:00.000000+00:00">
+    <link href="https://www.youtube.com/watch?v={video_id}"/>
+    <at:by>
+      <name>Ch</name>
+      <uri>https://www.youtube.com/channel/{channel_id}</uri>
+    </at:by>
+  </at:deleted-entry>
+</feed>"#
+        )
+    }
+
+    fn post_push(body: &str, signature: &str) -> Request<axum::body::Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/websub/callback")
+            .header("content-type", "application/atom+xml")
+            .header("x-hub-signature", signature)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_notification_signed_deleted_entry_is_accepted() {
+        // A tombstone is a successful delivery, not a malformed body. Answering
+        // 400 told the hub the push had failed and made it redeliver forever.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_del", &secret);
+        let app = routes().with_state(state);
+        let body = tombstone("UC_del", "gone_video");
+        let sig = sign(secret.as_bytes(), &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_notification_deleted_entry_with_bad_signature_is_rejected() {
+        // Recognising the tombstone must not bypass HMAC verification: the
+        // channel is still read from an unverified body before the check.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_del", &secret);
+        let app = routes().with_state(state);
+        let body = tombstone("UC_del", "gone_video");
+        let sig = sign(b"wrong_secret", &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_notification_deleted_entry_for_unsubscribed_channel_is_rejected() {
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_del", &secret);
+        let app = routes().with_state(state);
+        let body = tombstone("UC_other", "gone_video");
+        let sig = sign(secret.as_bytes(), &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_notification_feed_identified_only_by_author_uri_is_accepted() {
+        // A feed's <author><uri> names the same channel its entries would, so an
+        // entry-less push carrying it is identified, not malformed. Answering
+        // 400 here would be the same lie the tombstone fix removes.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_auth", &secret);
+        let app = routes().with_state(state);
+        let body = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <author><uri>https://www.youtube.com/channel/UC_auth</uri></author>
+</feed>"#;
+        let sig = sign(secret.as_bytes(), body);
+
+        let resp = app.oneshot(post_push(body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_notification_body_naming_no_channel_is_rejected() {
+        // Nothing in the body says which subscription it belongs to, so no
+        // secret can be selected and no signature can be checked. 400 stays.
+        let (state, _) = setup_state_with_subscription("UC_none", "s");
+        let app = routes().with_state(state);
+        let body = r#"<?xml version="1.0"?><feed><title>no channel here</title></feed>"#;
+
+        let resp = app.oneshot(post_push(body, "sha1=whatever")).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
