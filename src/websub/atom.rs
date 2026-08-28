@@ -8,6 +8,8 @@ static VIDEO_ID_RE: LazyLock<Regex> =
 static TITLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<title>([^<]+)</title>").unwrap());
 static PUBLISHED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<published>([^<]+)</published>").unwrap());
+static DELETED_VIDEO_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"<at:deleted-entry[^>]*\sref="yt:video:([^"]+)""#).unwrap());
 static NUMERIC_ENTITY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&#([xX][0-9a-fA-F]+|[0-9]+);").unwrap());
 
@@ -80,6 +82,21 @@ pub fn parse_atom_feed(xml: &str) -> Vec<AtomEntry> {
     }
 
     entries
+}
+
+/// The video IDs a push retires, read from its `<at:deleted-entry>` tombstones.
+///
+/// A tombstone carries no `<entry>`, so `parse_atom_feed` returns nothing for
+/// it; this is the only place the retired video is named.
+///
+/// The `ref` is read from inside the `<at:deleted-entry>` start tag only.
+/// Video titles are author-written and reach us verbatim, so a bare search for
+/// the attribute would let a title spell out a deletion.
+pub fn parse_deleted_video_ids(xml: &str) -> Vec<String> {
+    DELETED_VIDEO_REF_RE
+        .captures_iter(xml)
+        .map(|c| c[1].to_string())
+        .collect()
 }
 
 #[cfg(test)]
@@ -227,5 +244,44 @@ mod tests {
     fn test_decode_xml_entities_preserves_overflowing_decimal_reference() {
         // A decimal reference that overflows u32 fails to parse and is preserved.
         assert_eq!(decode_xml_entities("&#99999999999;"), "&#99999999999;");
+    }
+
+    // Tombstone Parser Spec
+    //
+    // YouTube announces a deleted or newly-private video on the same
+    // subscription as an <at:deleted-entry>. It carries no <entry>, so
+    // parse_atom_feed sees nothing; the video it retires is named by the
+    // "yt:video:" prefixed ref attribute.
+
+    const TOMBSTONE: &str = r#"<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:at="http://purl.org/atompub/tombstones/1.0" xmlns="http://www.w3.org/2005/Atom">
+  <at:deleted-entry ref="yt:video:stw7lYY3W3I" when="2026-08-28T13:00:00.000000+00:00">
+    <link href="https://www.youtube.com/watch?v=stw7lYY3W3I"/>
+    <at:by><name>Ch</name><uri>https://www.youtube.com/channel/UC_x</uri></at:by>
+  </at:deleted-entry>
+</feed>"#;
+
+    #[test]
+    fn parses_the_video_id_a_tombstone_retires() {
+        assert_eq!(parse_deleted_video_ids(TOMBSTONE), vec!["stw7lYY3W3I"]);
+    }
+
+    #[test]
+    fn a_new_video_feed_retires_nothing() {
+        assert!(parse_deleted_video_ids(SAMPLE_FEED).is_empty());
+    }
+
+    #[test]
+    fn a_title_that_spells_out_a_deletion_retires_nothing() {
+        // Titles are author-written and arrive verbatim inside a signed push,
+        // so the attribute only counts where the tombstone element declares it.
+        let xml = r#"<feed>
+<entry>
+<yt:videoId>abc123</yt:videoId>
+<title>ref="yt:video:victim"</title>
+</entry>
+</feed>"#;
+
+        assert!(parse_deleted_video_ids(xml).is_empty());
     }
 }

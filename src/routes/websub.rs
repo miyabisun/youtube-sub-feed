@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::websub::atom::{parse_atom_feed, AtomEntry};
+use crate::websub::atom::{parse_atom_feed, parse_deleted_video_ids, AtomEntry};
 use crate::websub::{extract_channel_id, signature};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -182,6 +182,27 @@ pub async fn notification(
             channel_id
         );
         return StatusCode::UNAUTHORIZED;
+    }
+
+    // Tombstones retire videos rather than announcing them. The DELETE is scoped
+    // to the signing channel: the HMAC proves the push belongs to that
+    // subscription and to nothing else.
+    {
+        let conn = state.db.lock().unwrap();
+        for video_id in parse_deleted_video_ids(xml) {
+            match conn.execute(
+                "DELETE FROM videos WHERE id = ?1 AND channel_id = ?2",
+                rusqlite::params![video_id, channel_id],
+            ) {
+                Ok(0) => tracing::debug!(
+                    "[websub] {} retired {}, which we do not hold",
+                    channel_id,
+                    video_id
+                ),
+                Ok(_) => tracing::info!("[websub] video removed: {} ({})", video_id, channel_id),
+                Err(e) => tracing::warn!("[websub] failed to remove {}: {}", video_id, e),
+            }
+        }
     }
 
     let entries = parse_atom_feed(xml);
@@ -918,5 +939,79 @@ mod tests {
         let resp = app.oneshot(post_push(body, "sha1=whatever")).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn insert_video(state: &crate::state::AppState, video_id: &str, channel_id: &str) {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES (?1, ?2, 'V', ?3)",
+            rusqlite::params![video_id, channel_id, crate::util::now_unix()],
+        )
+        .unwrap();
+    }
+
+    fn video_exists(state: &crate::state::AppState, video_id: &str) -> bool {
+        let conn = state.db.lock().unwrap();
+        conn.query_row("SELECT 1 FROM videos WHERE id = ?1", [video_id], |_| Ok(()))
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn test_deleted_entry_removes_the_video_it_retires() {
+        // The whole point of accepting the tombstone: a video pulled from
+        // YouTube must stop appearing in the feed.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_gone", &secret);
+        insert_video(&state, "retired", "UC_gone");
+        insert_video(&state, "still_up", "UC_gone");
+        let app = routes().with_state(state.clone());
+        let body = tombstone("UC_gone", "retired");
+        let sig = sign(secret.as_bytes(), &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!video_exists(&state, "retired"));
+        assert!(video_exists(&state, "still_up"));
+    }
+
+    #[tokio::test]
+    async fn test_deleted_entry_cannot_retire_another_channels_video() {
+        // The signature only proves the push belongs to its own subscription,
+        // so a tombstone must never reach a video owned by someone else.
+        let secret = generate_secret();
+        let (state, now) = setup_state_with_subscription("UC_signer", &secret);
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES ('UC_victim', 'T', ?1)",
+                [&now],
+            )
+            .unwrap();
+        }
+        insert_video(&state, "victims_video", "UC_victim");
+        let app = routes().with_state(state.clone());
+        let body = tombstone("UC_signer", "victims_video");
+        let sig = sign(secret.as_bytes(), &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(video_exists(&state, "victims_video"));
+    }
+
+    #[tokio::test]
+    async fn test_deleted_entry_for_an_unknown_video_is_still_accepted() {
+        // The hub redelivers, and a video may have been retired before we ever
+        // stored it. Neither case is a delivery failure.
+        let secret = generate_secret();
+        let (state, _) = setup_state_with_subscription("UC_gone", &secret);
+        let app = routes().with_state(state);
+        let body = tombstone("UC_gone", "never_seen");
+        let sig = sign(secret.as_bytes(), &body);
+
+        let resp = app.oneshot(post_push(&body, &sig)).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
