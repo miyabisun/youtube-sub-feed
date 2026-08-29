@@ -1,9 +1,14 @@
 use crate::notify::notify_warning;
 use crate::state::AppState;
 use crate::websub::{hub, signature};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 const REFRESH_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
+/// Concurrent hub subscribe requests. These are POSTs to the hub and cost no
+/// YouTube quota, so the limit is about not flooding the hub.
+const SUBSCRIBE_CONCURRENCY: usize = 10;
 const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
 
 /// Spawn the periodic refresh loop.
@@ -74,12 +79,54 @@ fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
     result
 }
 
-pub(crate) async fn register_new_subscription(state: &AppState, channel_id: &str, callback: &str) {
+/// Send a subscribe request for every given channel, returning (queued, failed).
+///
+/// "Queued" is as far as this can report: the hub answers 202 and verifies
+/// out-of-band by calling our callback back, so a request accepted here can
+/// still fail verification later. Callers must not present the count as a
+/// completed subscription.
+///
+/// Shared by the startup pass, which passes only the channels missing a
+/// subscription row, and by the manual action, which passes all of them.
+pub(crate) async fn subscribe_all(state: &AppState, channel_ids: Vec<String>) -> (usize, usize) {
+    let callback = state.config.websub_callback_url.clone();
+    let semaphore = Arc::new(Semaphore::new(SUBSCRIBE_CONCURRENCY));
+    let mut handles = Vec::with_capacity(channel_ids.len());
+
+    for channel_id in channel_ids {
+        let state = state.clone();
+        let callback = callback.clone();
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+
+        handles.push(tokio::spawn(async move {
+            let _permit = permit; // released when task ends
+            register_new_subscription(&state, &channel_id, &callback).await
+        }));
+    }
+
+    let mut queued = 0;
+    let mut failed = 0;
+    for handle in handles {
+        match handle.await {
+            Ok(true) => queued += 1,
+            _ => failed += 1,
+        }
+    }
+    (queued, failed)
+}
+
+/// Send one channel's subscribe request, returning whether the hub accepted it.
+/// Acceptance is not verification — see `subscribe_all`.
+pub(crate) async fn register_new_subscription(
+    state: &AppState,
+    channel_id: &str,
+    callback: &str,
+) -> bool {
     // If a subscription already exists, preserve its secret: rotating it here creates
     // a window where hub pushes (still signed with the old secret) fail HMAC verification
     // until the hub re-verifies with the new secret.
     let now = crate::util::now_unix();
-    let secret = {
+    let stored = {
         let conn = state.db.lock().unwrap();
         let existing: Option<String> = conn
             .query_row(
@@ -90,34 +137,49 @@ pub(crate) async fn register_new_subscription(state: &AppState, channel_id: &str
             .ok();
 
         match existing {
-            Some(s) => {
-                let _ = conn.execute(
+            Some(s) => conn
+                .execute(
                     "UPDATE channel_subscriptions
                      SET subscribed_at = ?1, verification_status = 'pending'
                      WHERE channel_id = ?2",
                     rusqlite::params![now, channel_id],
-                );
-                s
-            }
+                )
+                .map(|_| s),
             None => {
                 let fresh = signature::generate_secret();
-                let _ = conn.execute(
+                conn.execute(
                     "INSERT INTO channel_subscriptions
                      (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
                      VALUES (?1, ?2, 0, ?3, ?3, 'pending')",
                     rusqlite::params![channel_id, fresh, now],
-                );
-                fresh
+                )
+                .map(|_| fresh)
             }
+        }
+    };
+
+    // Without the stored row the hub's pushes have no secret to verify against,
+    // so sending the request anyway would produce a subscription we can never
+    // accept a push from.
+    let secret = match stored {
+        Ok(secret) => secret,
+        Err(e) => {
+            tracing::error!(
+                "[refresh] could not persist subscription for {}: {}",
+                channel_id,
+                e
+            );
+            return false;
         }
     };
 
     if let Err(e) = hub::subscribe(&state.http, channel_id, callback, &secret).await {
         tracing::error!("[refresh] subscribe failed for {}: {}", channel_id, e);
         notify_subscribe_failure(state, channel_id, &e.to_string()).await;
-    } else {
-        tracing::info!("[refresh] Subscribe queued: {}", channel_id);
+        return false;
     }
+    tracing::info!("[refresh] Subscribe queued: {}", channel_id);
+    true
 }
 
 /// Discord notification for persistent subscribe failures, throttled to at most

@@ -14,6 +14,9 @@ pub struct Config {
     /// YouTube Data API key for video detail enrichment (duration / Shorts /
     /// livestream). API-key-only endpoints — no OAuth involved.
     pub youtube_api_key: Option<String>,
+    /// How often to re-sweep every channel's uploads playlist for videos WebSub
+    /// never delivered. None leaves the sweep to startup and the manual action.
+    pub catchup_interval_minutes: Option<u64>,
     pub is_production: bool,
 }
 
@@ -46,6 +49,9 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let catchup_interval_minutes =
+            parse_interval_minutes(env::var("CATCHUP_INTERVAL_MINUTES").ok().as_deref());
+
         let is_production = env::var("NODE_ENV")
             .map(|v| v == "production")
             .unwrap_or(false);
@@ -62,6 +68,17 @@ impl Config {
             );
         }
 
+        match catchup_interval_minutes {
+            Some(minutes) => tracing::info!(
+                "CATCHUP_INTERVAL_MINUTES={}. Sweeping every channel for undelivered videos every {} minute(s).",
+                minutes,
+                minutes
+            ),
+            None => tracing::info!(
+                "CATCHUP_INTERVAL_MINUTES not set to a positive number. The periodic catch-up sweep is disabled; startup and the manual action still sweep."
+            ),
+        }
+
         Self {
             port,
             db_path,
@@ -70,7 +87,79 @@ impl Config {
             discord_webhook_url,
             websub_callback_url,
             youtube_api_key,
+            catchup_interval_minutes,
             is_production,
+        }
+    }
+}
+
+/// Read the periodic sweep interval.
+///
+/// Unset, empty, unparseable and zero all mean "no periodic sweep". Empty is
+/// the case that occurs in production: docker compose substitutes an empty
+/// string for a variable its .env does not define, so the variable reaches the
+/// process without a value.
+///
+/// A value too large to convert into seconds is rejected here rather than left
+/// to wrap at the call site — a wrapped interval of zero would sweep in a loop
+/// and drain the day's quota.
+pub fn parse_interval_minutes(raw: Option<&str>) -> Option<u64> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|minutes| *minutes > 0 && minutes.checked_mul(60).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Periodic Catch-up Interval Spec
+    //
+    // CATCHUP_INTERVAL_MINUTES turns the periodic sweep on. docker compose
+    // substitutes an empty string for a variable missing from its .env, so the
+    // variable can exist while carrying no value — empty means "off", not "0
+    // minutes". Minutes rather than hours so the interval can be tuned without
+    // fractions.
+
+    #[test]
+    fn a_positive_interval_enables_the_periodic_sweep() {
+        assert_eq!(parse_interval_minutes(Some("180")), Some(180));
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_disable_the_interval() {
+        assert_eq!(parse_interval_minutes(Some("  180\n")), Some(180));
+    }
+
+    #[test]
+    fn an_interval_too_large_to_express_in_seconds_is_refused() {
+        // u64::MAX / 60 minutes still converts; one more minute does not, and a
+        // wrapped conversion would mean "sweep with no wait at all".
+        assert_eq!(
+            parse_interval_minutes(Some(&(u64::MAX / 60).to_string())),
+            Some(u64::MAX / 60)
+        );
+        assert_eq!(
+            parse_interval_minutes(Some(&(u64::MAX / 60 + 1).to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn unset_empty_unparseable_and_zero_all_disable_the_periodic_sweep() {
+        // Empty is the one that matters in production: compose passes "" for a
+        // variable the .env does not define. Zero would otherwise mean an
+        // interval of no time at all, which is a busy loop over the quota.
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("abc"),
+            Some("-5"),
+            Some("0"),
+        ] {
+            assert_eq!(parse_interval_minutes(raw), None, "input: {raw:?}");
         }
     }
 }

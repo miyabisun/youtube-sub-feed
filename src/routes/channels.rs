@@ -3,13 +3,91 @@ use crate::middleware::UserId;
 use crate::openapi::*;
 use crate::state::AppState;
 use crate::sync::channel_sync;
-use crate::sync::periodic_refresh::register_new_subscription;
+use crate::sync::periodic_refresh::{register_new_subscription, subscribe_all};
 use crate::websub::hub;
 use axum::extract::{Extension, Path, Query, State};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// Re-subscribe every channel with the hub, then sweep every uploads playlist
+/// for videos WebSub never delivered.
+///
+/// The operator reaches for this when the feed looks stale, so the two halves
+/// run together: re-subscribing repairs the push path going forward, and the
+/// sweep recovers what was already missed. The result is reported to the caller
+/// and to Discord — the sweep takes long enough that the operator may have left
+/// the page. New videos are NOT reported as a WebSub failure here: the operator
+/// asked for this run, so recovering videos is the expected outcome, not news.
+///
+/// `resubscribe_queued` counts requests the hub accepted, not verified
+/// subscriptions — the hub verifies out-of-band by calling our callback back.
+#[utoipa::path(
+    post,
+    path = "/api/channels/refresh",
+    tag = "channels",
+    responses(
+        (status = 200, description = "再購読を要求し、取りこぼしを取り込んだ結果"),
+        (status = 409, description = "取りこぼしチェックが既に実行中", body = ErrorResponse),
+    )
+)]
+pub async fn refresh_all(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+    let channel_ids = list_channel_ids(&state)?;
+    let total = channel_ids.len();
+    let (resubscribe_queued, resubscribe_failed) = subscribe_all(&state, channel_ids).await;
+
+    let Some(outcome) = crate::sync::catchup::sweep_missed_videos(&state).await else {
+        return Err(AppError::Conflict(
+            "取りこぼしチェックが既に実行中です".to_string(),
+        ));
+    };
+
+    crate::notify::notify_warning(
+        &state.http,
+        &state.config,
+        "全件取得し直し 完了",
+        &format!(
+            "{} チャンネルに再購読を要求しました (受付 {} / 失敗 {})。取り込んだ動画は {} 本です。{}{}",
+            total,
+            resubscribe_queued,
+            resubscribe_failed,
+            outcome.imported,
+            if outcome.failed_channels > 0 {
+                format!(
+                    "{} チャンネルの取りこぼしチェックに失敗しています。",
+                    outcome.failed_channels
+                )
+            } else {
+                String::new()
+            },
+            if outcome.quota_exhausted {
+                "クォータを使い切ったため、途中のチャンネルで中断しています。"
+            } else {
+                ""
+            }
+        ),
+    )
+    .await;
+
+    Ok(Json(json!({
+        "resubscribe_queued": resubscribe_queued,
+        "resubscribe_failed": resubscribe_failed,
+        "imported": outcome.imported,
+        "failed_channels": outcome.failed_channels,
+        "quota_exhausted": outcome.quota_exhausted,
+    })))
+}
+
+fn list_channel_ids(state: &AppState) -> Result<Vec<String>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn.prepare("SELECT id FROM channels ORDER BY id")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ids)
+}
 
 /// Validate a YouTube channel ID.
 ///
@@ -52,6 +130,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/channels", get(get_channels).post(add_channel))
         .route("/api/channels/sync", post(sync_channels))
+        .route("/api/channels/refresh", post(refresh_all))
         .route("/api/channels/{id}/videos", get(get_channel_videos))
         .route(
             "/api/channels/{id}",
@@ -1441,6 +1520,91 @@ mod tests {
                 .unwrap()
             };
             assert_eq!(ch, 1, "another user's channel must be untouched");
+        }
+    }
+
+    // Manual full-refresh Spec
+    //
+    // One action, run from the header menu when the feed looks stale: every
+    // channel is re-subscribed with the hub (no YouTube quota) and then every
+    // uploads playlist is swept for videos WebSub never delivered (1 quota unit
+    // per channel). It reports what it did so the operator does not have to
+    // read the server log.
+
+    mod refresh {
+        use crate::routes::channels::routes;
+        use crate::state::AppState;
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn post_refresh() -> Request<axum::body::Body> {
+            Request::builder()
+                .method("POST")
+                .uri("/api/channels/refresh")
+                .body(axum::body::Body::empty())
+                .unwrap()
+        }
+
+        #[test]
+        fn every_channel_is_re_subscribed_not_just_the_unsubscribed_ones() {
+            // The startup pass deliberately skips channels that already hold a
+            // subscription row. This action exists because those rows can be
+            // present while the hub has stopped delivering, so it must cover them.
+            let state = AppState::test();
+            {
+                let conn = state.db.lock().unwrap();
+                conn.execute(
+                    "INSERT INTO channels (id, title, created_at) VALUES
+                       ('UC_subscribed', 'A', 0), ('UC_bare', 'B', 0)",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO channel_subscriptions
+                       (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
+                     VALUES ('UC_subscribed', 's', 432000, 0, 0, 'verified')",
+                    [],
+                )
+                .unwrap();
+            }
+
+            assert_eq!(
+                crate::routes::channels::list_channel_ids(&state).unwrap(),
+                vec!["UC_bare".to_string(), "UC_subscribed".to_string()]
+            );
+        }
+
+        #[tokio::test]
+        async fn refresh_reports_what_it_did() {
+            let state = AppState::test();
+            let app = routes().with_state(state);
+
+            let resp = app.oneshot(post_refresh()).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["resubscribe_queued"], 0);
+            assert_eq!(json["resubscribe_failed"], 0);
+            assert_eq!(json["imported"], 0);
+            assert_eq!(json["failed_channels"], 0);
+            assert_eq!(json["quota_exhausted"], false);
+        }
+
+        #[tokio::test]
+        async fn refresh_is_refused_while_a_sweep_is_already_running() {
+            // Each run spends a quota unit per channel against an allowance that
+            // does not refill until the next day, so a second press must be told
+            // no rather than doubling the spend.
+            let state = AppState::test();
+            let held = state.catchup_lock.clone();
+            let _guard = held.lock().await;
+            let app = routes().with_state(state);
+
+            let resp = app.oneshot(post_refresh()).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
         }
     }
 }

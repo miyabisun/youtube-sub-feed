@@ -23,6 +23,7 @@ async fn main() {
         cache: cache.clone(),
         config: config.clone(),
         http,
+        catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     cache::start_sweep(cache);

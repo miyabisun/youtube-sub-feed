@@ -1,9 +1,5 @@
 use crate::state::AppState;
-use crate::sync::periodic_refresh::register_new_subscription;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-
-const SETUP_CONCURRENCY: usize = 10;
+use crate::sync::periodic_refresh::subscribe_all;
 
 /// Run at startup: subscribe all existing channels to WebSub (if not already).
 ///
@@ -51,31 +47,17 @@ pub async fn run_initial_setup(state: &AppState) {
     }
 
     tracing::info!(
-        "[setup] Subscribing {} channel(s) to WebSub (concurrency {})...",
-        unsubscribed.len(),
-        SETUP_CONCURRENCY
+        "[setup] Subscribing {} channel(s) to WebSub...",
+        unsubscribed.len()
     );
 
-    let callback = state.config.websub_callback_url.clone();
-    let semaphore = Arc::new(Semaphore::new(SETUP_CONCURRENCY));
-    let mut handles = Vec::with_capacity(unsubscribed.len());
+    let (succeeded, failed) = subscribe_all(state, unsubscribed).await;
 
-    for channel_id in unsubscribed {
-        let state = state.clone();
-        let callback = callback.clone();
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-        handles.push(tokio::spawn(async move {
-            let _permit = permit; // released when task ends
-            register_new_subscription(&state, &channel_id, &callback).await;
-        }));
-    }
-
-    for handle in handles {
-        let _ = handle.await;
-    }
-
-    tracing::info!("[setup] Initial WebSub subscription pass complete");
+    tracing::info!(
+        "[setup] Initial WebSub subscription pass complete: {} queued, {} failed",
+        succeeded,
+        failed
+    );
 }
 
 // Initial Setup Spec

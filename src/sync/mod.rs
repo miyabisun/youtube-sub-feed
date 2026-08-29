@@ -16,6 +16,7 @@ pub fn start_sync(state: AppState) {
         // Runs before the refresh loop so its enrichment backfill picks up
         // anything the sweep's own enrichment could not finish.
         catchup::sweep_missed_videos(&state_clone).await;
+        catchup::start(state_clone.clone());
         periodic_refresh::start(state_clone);
     });
 }

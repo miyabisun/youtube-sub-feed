@@ -131,8 +131,11 @@ Domain components on top of the Sumi recipes:
   gesture rule.
 - **Menu (hamburger):** quiet icon button at the header's right opening a
   floating menu (Sumi menu recipe): video list, channel list, group
-  management, and the YouTube sync action, which shows busy state by
-  disabling itself and swapping its label (同期中...).
+  management, and two actions — the YouTube sync action and 全件取得し直し
+  (re-subscribe every channel with the WebSub hub, then pull anything the
+  hub never delivered). Both show busy state the same way, by disabling
+  themselves and swapping their label (同期中... / 取得し直し中...), and
+  report their result through the Toast recipe.
 - **Channel row:** 40px **circular** avatar — the deliberate domain
   exception to the template's no-circles rule, because a channel icon is
   YouTube identity, not chrome — with title and group names (caption,

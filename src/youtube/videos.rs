@@ -164,8 +164,13 @@ pub fn parse_playlist_items(data: &Value) -> Result<Vec<AtomEntry>, FetchError> 
         .collect())
 }
 
-/// List the most recent uploads of one channel (one playlistItems.list call,
+/// List the newest uploads of one channel (one playlistItems.list call,
 /// 1 quota unit). 50 is the per-call maximum, and costs the same as fewer.
+///
+/// Deliberately one page. This exists to recover videos the hub failed to push,
+/// and a channel does not publish 50 videos between two sweeps — anything older
+/// than the first page is therefore already stored. Paging further would spend
+/// quota walking uploads we already hold.
 pub async fn fetch_playlist_items(
     http: &reqwest::Client,
     api_key: &str,
