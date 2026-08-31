@@ -1,15 +1,8 @@
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 use regex_lite::Regex;
 use std::sync::LazyLock;
 
-static ENTRY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<entry>([\s\S]*?)</entry>").unwrap());
-static VIDEO_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<yt:videoId>([^<]+)</yt:videoId>").unwrap());
-static TITLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<title>([^<]+)</title>").unwrap());
-static PUBLISHED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<published>([^<]+)</published>").unwrap());
-static DELETED_VIDEO_REF_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"<at:deleted-entry[^>]*\sref="yt:video:([^"]+)""#).unwrap());
 static NUMERIC_ENTITY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"&#([xX][0-9a-fA-F]+|[0-9]+);").unwrap());
 
@@ -19,6 +12,29 @@ pub struct AtomEntry {
     pub video_id: String,
     pub title: String,
     pub published: Option<i64>,
+}
+
+#[derive(Debug, Default)]
+pub struct ParsedAtomDocument {
+    pub entries: Vec<AtomEntry>,
+    pub entry_elements: usize,
+    pub incomplete_entries: usize,
+    pub deleted_video_ids: Vec<String>,
+    pub malformed: bool,
+}
+
+#[derive(Default)]
+struct EntryBuilder {
+    video_id: String,
+    title: String,
+    published: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EntryField {
+    VideoId,
+    Title,
+    Published,
 }
 
 /// Decode the five XML predefined entities and numeric character references
@@ -58,45 +74,130 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
-pub fn parse_atom_feed(xml: &str) -> Vec<AtomEntry> {
-    let mut entries = Vec::new();
+pub fn parse_atom_document(xml: &str) -> ParsedAtomDocument {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
 
-    for cap in ENTRY_RE.captures_iter(xml) {
-        let block = &cap[1];
-        let video_id = VIDEO_ID_RE.captures(block).map(|c| c[1].to_string());
-        let title = TITLE_RE
-            .captures(block)
-            .map(|c| decode_xml_entities(&c[1]))
-            .unwrap_or_default();
-        let published = PUBLISHED_RE
-            .captures(block)
-            .and_then(|c| crate::util::rfc3339_to_unix(&c[1]));
+    let mut parsed = ParsedAtomDocument::default();
+    let mut entry: Option<EntryBuilder> = None;
+    let mut field: Option<EntryField> = None;
 
-        if let Some(video_id) = video_id {
-            entries.push(AtomEntry {
-                video_id,
-                title,
-                published,
-            });
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => match element.local_name().as_ref() {
+                b"entry" => {
+                    parsed.entry_elements += 1;
+                    entry = Some(EntryBuilder::default());
+                }
+                b"videoId" if entry.is_some() => field = Some(EntryField::VideoId),
+                b"title" if entry.is_some() => field = Some(EntryField::Title),
+                b"published" if entry.is_some() => field = Some(EntryField::Published),
+                b"deleted-entry" => push_deleted_video_id(&element, &mut parsed),
+                _ => {}
+            },
+            Ok(Event::Empty(element)) => match element.local_name().as_ref() {
+                b"entry" => {
+                    parsed.entry_elements += 1;
+                    parsed.incomplete_entries += 1;
+                }
+                b"deleted-entry" => push_deleted_video_id(&element, &mut parsed),
+                _ => {}
+            },
+            Ok(Event::Text(text)) => {
+                let Some(current) = entry.as_mut() else {
+                    continue;
+                };
+                let decoded = decode_xml_entities(&String::from_utf8_lossy(text.as_ref()));
+                match field {
+                    Some(EntryField::VideoId) => current.video_id.push_str(&decoded),
+                    Some(EntryField::Title) => current.title.push_str(&decoded),
+                    Some(EntryField::Published) => current.published.push_str(&decoded),
+                    None => {}
+                }
+            }
+            Ok(Event::CData(text)) => {
+                let Some(current) = entry.as_mut() else {
+                    continue;
+                };
+                let decoded = String::from_utf8_lossy(text.as_ref());
+                match field {
+                    Some(EntryField::VideoId) => current.video_id.push_str(&decoded),
+                    Some(EntryField::Title) => current.title.push_str(&decoded),
+                    Some(EntryField::Published) => current.published.push_str(&decoded),
+                    None => {}
+                }
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let Some(current) = entry.as_mut() else {
+                    continue;
+                };
+                let encoded = format!("&{};", String::from_utf8_lossy(reference.as_ref()));
+                let decoded = decode_xml_entities(&encoded);
+                match field {
+                    Some(EntryField::VideoId) => current.video_id.push_str(&decoded),
+                    Some(EntryField::Title) => current.title.push_str(&decoded),
+                    Some(EntryField::Published) => current.published.push_str(&decoded),
+                    None => {}
+                }
+            }
+            Ok(Event::End(element)) => match element.local_name().as_ref() {
+                b"entry" => {
+                    if let Some(entry) = entry.take() {
+                        let published = crate::util::rfc3339_to_unix(&entry.published);
+                        if entry.video_id.is_empty()
+                            || entry.title.is_empty()
+                            || published.is_none()
+                        {
+                            parsed.incomplete_entries += 1;
+                        }
+                        if !entry.video_id.is_empty() {
+                            parsed.entries.push(AtomEntry {
+                                video_id: entry.video_id,
+                                title: entry.title,
+                                published,
+                            });
+                        }
+                    }
+                    field = None;
+                }
+                b"videoId" if field == Some(EntryField::VideoId) => field = None,
+                b"title" if field == Some(EntryField::Title) => field = None,
+                b"published" if field == Some(EntryField::Published) => field = None,
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(_) => {
+                parsed.malformed = true;
+                break;
+            }
+            _ => {}
         }
     }
 
-    entries
+    parsed
 }
 
-/// The video IDs a push retires, read from its `<at:deleted-entry>` tombstones.
-///
-/// A tombstone carries no `<entry>`, so `parse_atom_feed` returns nothing for
-/// it; this is the only place the retired video is named.
-///
-/// The `ref` is read from inside the `<at:deleted-entry>` start tag only.
-/// Video titles are author-written and reach us verbatim, so a bare search for
-/// the attribute would let a title spell out a deletion.
+fn push_deleted_video_id(element: &BytesStart<'_>, parsed: &mut ParsedAtomDocument) {
+    let video_id = element
+        .attributes()
+        .filter_map(Result::ok)
+        .find(|attribute| attribute.key.local_name().as_ref() == b"ref")
+        .and_then(|attribute| {
+            let value = decode_xml_entities(&String::from_utf8_lossy(attribute.value.as_ref()));
+            value.strip_prefix("yt:video:").map(str::to_string)
+        });
+    if let Some(video_id) = video_id {
+        parsed.deleted_video_ids.push(video_id);
+    }
+}
+
+pub fn parse_atom_feed(xml: &str) -> Vec<AtomEntry> {
+    parse_atom_document(xml).entries
+}
+
+/// The video IDs a push retires, read from its tombstone elements.
 pub fn parse_deleted_video_ids(xml: &str) -> Vec<String> {
-    DELETED_VIDEO_REF_RE
-        .captures_iter(xml)
-        .map(|c| c[1].to_string())
-        .collect()
+    parse_atom_document(xml).deleted_video_ids
 }
 
 #[cfg(test)]
@@ -132,6 +233,50 @@ mod tests {
         assert_eq!(entries[0].video_id, "abc123");
         assert_eq!(entries[0].title, "Test Video 1");
         assert_eq!(entries[1].video_id, "def456");
+    }
+
+    #[test]
+    fn parses_attributes_and_arbitrary_namespace_prefixes_by_local_name() {
+        let xml = r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom" xmlns:video="urn:youtube">
+          <atom:entry data-source="hub">
+            <video:videoId format="text">v-prefixed</video:videoId>
+            <atom:title type="text">S&amp;P500</atom:title>
+            <atom:published precision="seconds">2026-08-30T12:34:56Z</atom:published>
+          </atom:entry>
+        </atom:feed>"#;
+
+        let parsed = parse_atom_document(xml);
+
+        assert_eq!(parsed.entry_elements, 1);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].video_id, "v-prefixed");
+        assert_eq!(parsed.entries[0].title, "S&P500");
+        assert_eq!(parsed.entries[0].published, Some(1788093296));
+    }
+
+    #[test]
+    fn records_entry_elements_that_cannot_be_imported() {
+        let xml = r#"<feed><entry><title>No ID</title></entry></feed>"#;
+
+        let parsed = parse_atom_document(xml);
+
+        assert_eq!(parsed.entry_elements, 1);
+        assert_eq!(parsed.incomplete_entries, 1);
+        assert!(parsed.entries.is_empty());
+    }
+
+    #[test]
+    fn records_missing_title_and_invalid_published_without_dropping_the_entry() {
+        let xml = r#"<feed>
+          <entry><videoId>missing-title</videoId><published>2026-08-30T12:34:56Z</published></entry>
+          <entry><videoId>bad-published</videoId><title>Kept</title><published>not-a-date</published></entry>
+        </feed>"#;
+
+        let parsed = parse_atom_document(xml);
+
+        assert_eq!(parsed.entry_elements, 2);
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.incomplete_entries, 2);
     }
 
     #[test]
@@ -264,6 +409,13 @@ mod tests {
     #[test]
     fn parses_the_video_id_a_tombstone_retires() {
         assert_eq!(parse_deleted_video_ids(TOMBSTONE), vec!["stw7lYY3W3I"]);
+    }
+
+    #[test]
+    fn parses_tombstones_with_an_arbitrary_prefix_and_attribute_order() {
+        let xml = r#"<feed xmlns:t="urn:tombstone"><t:deleted-entry when="now" ref="yt:video:retired" /></feed>"#;
+
+        assert_eq!(parse_deleted_video_ids(xml), vec!["retired"]);
     }
 
     #[test]

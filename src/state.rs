@@ -2,6 +2,18 @@ use crate::cache::Cache;
 use crate::config::Config;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .build()
+        .expect("Failed to build HTTP client")
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -9,9 +21,8 @@ pub struct AppState {
     pub cache: Arc<Cache>,
     pub config: Config,
     pub http: reqwest::Client,
-    /// Held for the duration of a catch-up sweep. Every sweep spends one quota
-    /// unit per channel against an allowance that only refills the next day, so
-    /// startup, the periodic loop and the manual action share one slot.
+    /// Held for the duration of any catch-up work so startup, the periodic
+    /// videoCount scan and the manual full sweep never duplicate quota spend.
     pub catchup_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -32,7 +43,7 @@ impl AppState {
                 catchup_interval_minutes: None,
                 is_production: false,
             },
-            http: reqwest::Client::new(),
+            http: build_http_client(),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }

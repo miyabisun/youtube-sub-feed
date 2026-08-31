@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::websub::atom::{parse_atom_feed, parse_deleted_video_ids, AtomEntry};
+use crate::websub::atom::{parse_atom_document, AtomEntry};
 use crate::websub::{extract_channel_id, signature};
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -139,14 +139,19 @@ pub async fn notification(
 ) -> impl IntoResponse {
     let Ok(xml) = std::str::from_utf8(&body) else {
         tracing::warn!(
-            "[websub] non-UTF-8 push body, dropping ({} bytes)",
-            body.len()
+            "[websub] non-UTF-8 push body, dropping: bytes={}, preview=\"{}\"",
+            body.len(),
+            body_preview(&body)
         );
         return StatusCode::BAD_REQUEST;
     };
 
     let Some(channel_id) = extract_channel_id(xml) else {
-        tracing::warn!("[websub] push without identifiable channel, dropping");
+        tracing::warn!(
+            "[websub] push without identifiable channel, dropping: bytes={}, preview=\"{}\"",
+            body.len(),
+            body_preview(&body)
+        );
         return StatusCode::BAD_REQUEST;
     };
 
@@ -184,12 +189,31 @@ pub async fn notification(
         return StatusCode::UNAUTHORIZED;
     }
 
+    let parsed = parse_atom_document(xml);
+    let tombstone_count = parsed.deleted_video_ids.len();
+    if parsed.malformed
+        || parsed.incomplete_entries > 0
+        || (parsed.entry_elements == 0 && tombstone_count == 0)
+    {
+        tracing::warn!(
+            "[websub] unexpected push body for {}: malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}, preview=\"{}\"",
+            channel_id,
+            parsed.malformed,
+            parsed.entry_elements,
+            parsed.incomplete_entries,
+            parsed.entries.len(),
+            tombstone_count,
+            body_preview(&body)
+        );
+    }
+
     // Tombstones retire videos rather than announcing them. The DELETE is scoped
     // to the signing channel: the HMAC proves the push belongs to that
     // subscription and to nothing else.
+    let mut removed_videos = 0usize;
     {
         let conn = state.db.lock().unwrap();
-        for video_id in parse_deleted_video_ids(xml) {
+        for video_id in &parsed.deleted_video_ids {
             match conn.execute(
                 "DELETE FROM videos WHERE id = ?1 AND channel_id = ?2",
                 rusqlite::params![video_id, channel_id],
@@ -199,35 +223,37 @@ pub async fn notification(
                     channel_id,
                     video_id
                 ),
-                Ok(_) => tracing::info!("[websub] video removed: {} ({})", video_id, channel_id),
+                Ok(count) => {
+                    removed_videos += count;
+                    tracing::info!("[websub] video removed: {} ({})", video_id, channel_id);
+                }
                 Err(e) => tracing::warn!("[websub] failed to remove {}: {}", video_id, e),
             }
         }
     }
 
-    let entries = parse_atom_feed(xml);
-    if entries.is_empty() {
-        return StatusCode::OK;
-    }
-
     let now = crate::util::now_unix();
-
     let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
         let channel_title = lookup_channel_title(&conn, &channel_id);
-        let newly_inserted = partition_new_entries(&conn, &channel_id, &entries, now);
+        let newly_inserted = partition_new_entries(&conn, &channel_id, &parsed.entries, now);
         log_new_videos(&channel_title, &channel_id, &newly_inserted);
         newly_inserted.iter().map(|e| e.video_id.clone()).collect()
     };
 
+    tracing::info!(
+        "[websub] push processed: channel={}, bytes={}, entry_elements={}, incomplete_entries={}, entries={}, inserted={}, tombstones={}, removed={}",
+        channel_id,
+        body.len(),
+        parsed.entry_elements,
+        parsed.incomplete_entries,
+        parsed.entries.len(),
+        new_video_ids.len(),
+        tombstone_count,
+        removed_videos
+    );
+
     if new_video_ids.is_empty() {
-        // All entries were already in the DB (likely a hub redelivery after a 5xx
-        // retry, or a metadata-only refresh). Logged at debug to avoid noise.
-        tracing::debug!(
-            "[websub] {} — {} entries, no new videos",
-            channel_id,
-            entries.len()
-        );
         return StatusCode::OK;
     }
 
@@ -248,6 +274,14 @@ pub async fn notification(
     });
 
     StatusCode::OK
+}
+
+fn body_preview(body: &[u8]) -> String {
+    String::from_utf8_lossy(body)
+        .chars()
+        .take(512)
+        .flat_map(char::escape_default)
+        .collect()
 }
 
 pub(crate) fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str) -> String {
@@ -375,6 +409,23 @@ mod tests {
         let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret).unwrap();
         mac.update(body.as_bytes());
         format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[test]
+    fn unexpected_body_preview_is_bounded_and_single_line() {
+        let xml = format!("<feed>\n{}", "x".repeat(600));
+
+        let preview = body_preview(xml.as_bytes());
+
+        assert!(preview.starts_with("<feed>\\n"));
+        assert_eq!(preview.matches('x').count(), 505);
+    }
+
+    #[test]
+    fn unexpected_body_preview_safely_represents_invalid_utf8() {
+        let preview = body_preview(b"<feed>\n\xff</feed>");
+
+        assert_eq!(preview, "<feed>\\n\\u{fffd}</feed>");
     }
 
     #[test]

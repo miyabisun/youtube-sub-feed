@@ -28,6 +28,7 @@ docker run -d \
   -e DATABASE_PATH=/data/feed.db \
   -e GIS_CLIENT_ID=xxx.apps.googleusercontent.com \
   -e YOUTUBE_API_KEY=AIzaXXXX \
+  -e CATCHUP_INTERVAL_MINUTES=10 \
   -e WEBSUB_CALLBACK_URL=https://feed.sis.jp/api/websub/callback \
   -e PUBLIC_BASE_URL=https://feed.sis.jp \
   -e DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx \
@@ -54,16 +55,20 @@ WebSub (PubSubHubbub) 経由で YouTube から新着動画のプッシュ通知�
 ## YOUTUBE_API_KEY の設定
 
 `YOUTUBE_API_KEY` は YouTube Data API v3 の API キーです。動画詳細
-（再生時間・プレーヤー寸法による Shorts 判定・ライブ配信状態）のエンリッチに使用します。
-未設定でも動作しますが、Shorts フィルタ（ショートNG）とライブ判定が機能しません。
+（再生時間・プレーヤー寸法による Shorts 判定・ライブ配信状態）のエンリッチと、
+WebSub の取りこぼし検出に使用します。未設定でも WebSub push は動作しますが、
+Shorts フィルタ、ライブ判定、取りこぼし検出は機能しません。
 
 1. [Google Cloud Console](https://console.cloud.google.com/) で「APIとサービス」→「ライブラリ」から **YouTube Data API v3** を有効化
 2. 「認証情報」→「認証情報を作成」→「APIキー」を作成
 3. 作成したキーを `YOUTUBE_API_KEY` に設定（「APIの制限」で YouTube Data API v3 のみに絞ることを推奨）
 
-消費クォータは新着動画 1 push あたり 1 ユニットです。再生時間・プレーヤー寸法・
-ライブ配信状態は同じ `videos.list` リクエストで取得するため、無料枠 10,000
-ユニット/日に対して十分小さい値です。
+`CATCHUP_INTERVAL_MINUTES` を設定すると、最大 50 チャンネルを 1 unit の
+`channels.list` で確認します。`videoCount` が増えたチャンネルだけを
+`playlistItems.list` で取得します。166 チャンネルを 10 分間隔で確認する場合、
+探索は 576 units/日です。新着の playlist 取得と動画詳細エンリッチを加えても、
+無料枠 10,000 units/日に十分な余裕があります。上限超過時に課金は発生せず、
+太平洋時間 0 時のリセットまで API が `quotaExceeded` を返します。
 
 ## 初回セットアップ
 
@@ -110,7 +115,8 @@ server {
 | `PORT` | サーバーポート (デフォルト: 3000) |
 | `DATABASE_PATH` | SQLite DBファイルパス |
 | `GIS_CLIENT_ID` | Google Identity Services クライアント ID（ブラウザ側チャンネル同期に使用） |
-| `YOUTUBE_API_KEY` | YouTube Data API v3 の API キー（動画詳細エンリッチに使用、省略可） |
+| `YOUTUBE_API_KEY` | YouTube Data API v3 の API キー（動画詳細と取りこぼし検出に使用、省略可） |
+| `CATCHUP_INTERVAL_MINUTES` | `videoCount` を確認する間隔。未設定・空・0 は定期確認を無効化 |
 | `WEBSUB_CALLBACK_URL` | WebSub 通知受信エンドポイント（例: `https://feed.sis.jp/api/websub/callback`）。公開 HTTPS URL 必須 |
 | `PUBLIC_BASE_URL` | JSON Feedなどのフィード内リンクに使う公開オリジン（例: `https://feed.sis.jp`） |
 | `DISCORD_WEBHOOK_URL` | Discord Webhook URL（省略可） |

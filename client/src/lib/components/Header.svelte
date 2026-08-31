@@ -95,10 +95,9 @@
   }
 
   /**
-   * Re-subscribe every channel with the WebSub hub and sweep every uploads
-   * playlist for videos the hub never pushed. Reached for when the feed looks
-   * stale. It walks every channel, so it takes a while — the button reports
-   * busy the same way the sync action does.
+   * Ask the server to re-subscribe every channel and sweep every uploads
+   * playlist in the background. The request returns as soon as the shared
+   * sweep slot is reserved; Discord reports the eventual result.
    */
   async function refreshAll() {
     if (refreshing) return
@@ -106,17 +105,10 @@
     closeMenu()
 
     try {
-      const result = await fetcher(`${config.path.api}/channels/refresh`, { method: 'POST' })
-      // The hub verifies out-of-band, so the server can only report requests it
-      // accepted — say 要求 rather than claiming the subscriptions are live.
-      const parts = [`再購読要求 ${result?.resubscribe_queued ?? 0} 件`]
-      const failed = (result?.resubscribe_failed ?? 0) + (result?.failed_channels ?? 0)
-      if (failed > 0) parts.push(`失敗 ${failed} 件`)
-      parts.push(`取り込み ${result?.imported ?? 0} 本`)
-      if (result?.quota_exhausted) parts.push('クォータ枯渇のため中断')
+      await fetcher(`${config.path.api}/channels/refresh`, { method: 'POST' })
       toast = {
-        message: `全件取得し直し完了 (${parts.join(', ')})`,
-        type: result?.quota_exhausted || failed > 0 ? 'error' : 'success',
+        message: '全件取得し直しを受け付けました。完了は Discord で通知します',
+        type: 'success',
       }
     } catch (e) {
       console.error('[refresh] full refresh failed:', e)

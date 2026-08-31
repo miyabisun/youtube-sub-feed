@@ -21,6 +21,7 @@ pub fn open(path: &str) -> Connection {
     migrate_timestamps_to_unix(&conn);
     add_videos_details_checked_at(&conn);
     add_videos_shorts_classifier_version(&conn);
+    add_channels_video_count(&conn);
     decode_video_titles_xml_entities(&conn);
     drop_users_oauth_token_columns(&conn);
     add_users_email_unique_index(&conn);
@@ -89,6 +90,18 @@ fn add_videos_shorts_classifier_version(conn: &Connection) {
             "[migrate] Failed to add videos.shorts_classifier_version column: {}",
             e
         ),
+    }
+}
+
+/// Remember the last channels.list statistics.videoCount value used by the
+/// periodic catch-up scan. NULL means the next scan establishes a baseline.
+fn add_channels_video_count(conn: &Connection) {
+    if column_exists(conn, "channels", "video_count") {
+        return;
+    }
+    match conn.execute("ALTER TABLE channels ADD COLUMN video_count INTEGER", []) {
+        Ok(_) => tracing::info!("[migrate] Added channels.video_count column"),
+        Err(e) => tracing::warn!("[migrate] Failed to add channels.video_count: {}", e),
     }
 }
 
@@ -277,6 +290,7 @@ fn create_tables(conn: &Connection) {
             thumbnail_url TEXT,
             upload_playlist_id TEXT,
             last_fetched_at INTEGER,
+            video_count INTEGER,
             created_at INTEGER
         );
 
@@ -769,6 +783,26 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn channels_store_the_last_observed_video_count() {
+        let conn = open_memory();
+        conn.execute(
+            "INSERT INTO channels (id, title, video_count) VALUES ('UC1', 'Test', 42)",
+            [],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT video_count FROM channels WHERE id = 'UC1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 42);
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct VideoDetails {
     pub player_height: Option<u64>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct ChannelVideoCount {
+    pub channel_id: String,
+    pub video_count: u64,
+}
+
 impl VideoDetails {
     /// A livestream or premiere that has not ended yet. Its duration reads
     /// "PT0S" while live, so persisting it would freeze a lie — callers keep
@@ -129,6 +135,46 @@ pub async fn fetch_video_details(
     );
     let data = get_json_with_retry(http, &url).await?;
     parse_video_details(&data)
+}
+
+pub fn parse_channel_video_counts(data: &Value) -> Result<Vec<ChannelVideoCount>, FetchError> {
+    let items = data["items"]
+        .as_array()
+        .ok_or(FetchError::MalformedResponse)?;
+
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let channel_id = item["id"].as_str().filter(|id| !id.is_empty())?;
+            let video_count = parse_u64(&item["statistics"]["videoCount"])?;
+            Some(ChannelVideoCount {
+                channel_id: channel_id.to_string(),
+                video_count,
+            })
+        })
+        .collect())
+}
+
+/// Fetch statistics.videoCount for up to 50 channels (one channels.list call,
+/// 1 quota unit). The caller owns batching so a failed batch can be attributed
+/// to the exact channel IDs it covered.
+pub async fn fetch_channel_video_counts(
+    http: &reqwest::Client,
+    api_key: &str,
+    channel_ids: &[String],
+) -> Result<Vec<ChannelVideoCount>, FetchError> {
+    debug_assert!(channel_ids.len() <= 50);
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!(
+        "{}/channels?part=statistics&id={}&maxResults=50&key={}",
+        YOUTUBE_API_BASE,
+        channel_ids.join(","),
+        api_key
+    );
+    let data = get_json_with_retry(http, &url).await?;
+    parse_channel_video_counts(&data)
 }
 
 /// Parse a playlistItems.list response into the same entry shape a WebSub Atom
@@ -465,6 +511,51 @@ mod tests {
         // fail the whole channel rather than read as "this channel has no uploads".
         assert_eq!(
             parse_playlist_items(&json!({"error": "x"})).unwrap_err(),
+            FetchError::MalformedResponse
+        );
+    }
+
+    #[test]
+    fn channel_statistics_parse_video_counts_for_every_returned_id() {
+        let counts = parse_channel_video_counts(&json!({"items": [
+            {"id": "UC1", "statistics": {"videoCount": "42"}},
+            {"id": "UC2", "statistics": {"videoCount": 7}}
+        ]}))
+        .unwrap();
+
+        assert_eq!(
+            counts,
+            vec![
+                ChannelVideoCount {
+                    channel_id: "UC1".to_string(),
+                    video_count: 42,
+                },
+                ChannelVideoCount {
+                    channel_id: "UC2".to_string(),
+                    video_count: 7,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn channel_statistics_skip_items_without_an_id_or_count() {
+        let counts = parse_channel_video_counts(&json!({"items": [
+            {"statistics": {"videoCount": "42"}},
+            {"id": "UC2", "statistics": {}},
+            {"id": "UC3", "statistics": {"videoCount": "invalid"}},
+            {"id": "UC4", "statistics": {"videoCount": "9"}}
+        ]}))
+        .unwrap();
+
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].channel_id, "UC4");
+    }
+
+    #[test]
+    fn channel_statistics_without_an_items_array_are_malformed() {
+        assert_eq!(
+            parse_channel_video_counts(&json!({"error": "x"})).unwrap_err(),
             FetchError::MalformedResponse
         );
     }

@@ -113,6 +113,8 @@ For production, place Cloudflare Access in front of the app. See `docs/deploy.md
 | `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub notification endpoint (production requires a public HTTPS URL) |
 | `PUBLIC_BASE_URL` | Request origin | Canonical public origin used by feed links (for example, `https://youtube.example.com`) |
 | `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL (optional) |
+| `YOUTUBE_API_KEY` | — | YouTube Data API key for video enrichment and catch-up scans |
+| `CATCHUP_INTERVAL_MINUTES` | disabled | Interval for batched `videoCount` checks; only increased channels are swept |
 
 ## Commands
 

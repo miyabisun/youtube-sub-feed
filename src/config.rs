@@ -14,8 +14,8 @@ pub struct Config {
     /// YouTube Data API key for video detail enrichment (duration / Shorts /
     /// livestream). API-key-only endpoints — no OAuth involved.
     pub youtube_api_key: Option<String>,
-    /// How often to re-sweep every channel's uploads playlist for videos WebSub
-    /// never delivered. None leaves the sweep to startup and the manual action.
+    /// How often to compare channel videoCount values and sweep only channels
+    /// whose count increased. None leaves full sweeps to startup and manual use.
     pub catchup_interval_minutes: Option<u64>,
     pub is_production: bool,
 }
@@ -70,12 +70,12 @@ impl Config {
 
         match catchup_interval_minutes {
             Some(minutes) => tracing::info!(
-                "CATCHUP_INTERVAL_MINUTES={}. Sweeping every channel for undelivered videos every {} minute(s).",
+                "CATCHUP_INTERVAL_MINUTES={}. Checking channel videoCount values every {} minute(s).",
                 minutes,
                 minutes
             ),
             None => tracing::info!(
-                "CATCHUP_INTERVAL_MINUTES not set to a positive number. The periodic catch-up sweep is disabled; startup and the manual action still sweep."
+                "CATCHUP_INTERVAL_MINUTES not set to a positive number. The periodic videoCount scan is disabled; startup and the manual action still run full sweeps."
             ),
         }
 
@@ -93,9 +93,9 @@ impl Config {
     }
 }
 
-/// Read the periodic sweep interval.
+/// Read the periodic videoCount scan interval.
 ///
-/// Unset, empty, unparseable and zero all mean "no periodic sweep". Empty is
+/// Unset, empty, unparseable and zero all mean "no periodic scan". Empty is
 /// the case that occurs in production: docker compose substitutes an empty
 /// string for a variable its .env does not define, so the variable reaches the
 /// process without a value.
@@ -116,7 +116,7 @@ mod tests {
 
     // Periodic Catch-up Interval Spec
     //
-    // CATCHUP_INTERVAL_MINUTES turns the periodic sweep on. docker compose
+    // CATCHUP_INTERVAL_MINUTES turns the periodic videoCount scan on. docker compose
     // substitutes an empty string for a variable missing from its .env, so the
     // variable can exist while carrying no value — empty means "off", not "0
     // minutes". Minutes rather than hours so the interval can be tuned without

@@ -2,8 +2,8 @@ pub mod atom;
 pub mod hub;
 pub mod signature;
 
-use regex_lite::Regex;
-use std::sync::LazyLock;
+use quick_xml::events::Event;
+use quick_xml::Reader;
 
 pub const HUB_URL: &str = "https://pubsubhubbub.appspot.com/subscribe";
 
@@ -14,28 +14,49 @@ pub fn topic_url(channel_id: &str) -> String {
     )
 }
 
-static FEED_CHANNEL_ID_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<yt:channelId>([^<]+)</yt:channelId>").unwrap());
-static CHANNEL_URI_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<uri>\s*https://www\.youtube\.com/channel/([^<\s]+)\s*</uri>").unwrap()
-});
-
 /// Extract the channel_id from a WebSub push notification (Atom XML).
 ///
 /// The hub signs each push with the per-channel secret, so the channel has to
-/// be named before the signature can be checked — both forms YouTube sends on
-/// one subscription must therefore be recognisable here.
-///
-/// A new-video feed carries `<yt:channelId>` inside each `<entry>`. A deleted
-/// or newly-private video arrives as an `<at:deleted-entry>` tombstone, which
-/// has no `<yt:channelId>` and names its channel by the `<uri>` under
-/// `<at:by>`. Only a `<uri>` element counts: a `<link href>` in a tombstone
-/// points at the video, never at the channel.
+/// be named before the signature can be checked. Element local names are used
+/// because namespace prefixes and attributes are transport details, not part
+/// of the Atom/YouTube field identity.
 pub fn extract_channel_id(xml: &str) -> Option<String> {
-    FEED_CHANNEL_ID_RE
-        .captures(xml)
-        .or_else(|| CHANNEL_URI_RE.captures(xml))
-        .map(|c| c[1].to_string())
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut target = None;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element)) => match element.local_name().as_ref() {
+                b"channelId" => target = Some(false),
+                b"uri" => target = Some(true),
+                _ => {}
+            },
+            Ok(Event::Text(text)) => {
+                let Some(is_uri) = target else {
+                    continue;
+                };
+                let value = String::from_utf8_lossy(text.as_ref());
+                if !is_uri && !value.is_empty() {
+                    return Some(value.into_owned());
+                }
+                if let Some(channel_id) = value
+                    .trim()
+                    .strip_prefix("https://www.youtube.com/channel/")
+                    .filter(|channel_id| !channel_id.is_empty())
+                {
+                    return Some(channel_id.to_string());
+                }
+            }
+            Ok(Event::End(element))
+                if matches!(element.local_name().as_ref(), b"channelId" | b"uri") =>
+            {
+                target = None;
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +95,13 @@ mod tests {
     #[test]
     fn test_extract_channel_id_missing() {
         assert_eq!(extract_channel_id("<feed></feed>"), None);
+    }
+
+    #[test]
+    fn extracts_channel_id_with_attributes_and_an_arbitrary_prefix() {
+        let xml = r#"<feed xmlns:video="urn:youtube"><entry><video:channelId format="text">UC_prefixed</video:channelId></entry></feed>"#;
+
+        assert_eq!(extract_channel_id(xml), Some("UC_prefixed".to_string()));
     }
 
     // YouTube announces a deleted or newly-private video on the same

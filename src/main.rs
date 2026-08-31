@@ -16,7 +16,7 @@ async fn main() {
     let config = Config::from_env();
     let conn = db::open(&config.db_path);
     let cache = Arc::new(cache::Cache::new());
-    let http = reqwest::Client::new();
+    let http = youtube_sub_feed::state::build_http_client();
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),

@@ -6,77 +6,70 @@ use crate::sync::channel_sync;
 use crate::sync::periodic_refresh::{register_new_subscription, subscribe_all};
 use crate::websub::hub;
 use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Re-subscribe every channel with the hub, then sweep every uploads playlist
-/// for videos WebSub never delivered.
+/// Accept a full refresh, then re-subscribe and sweep in the background.
 ///
-/// The operator reaches for this when the feed looks stale, so the two halves
-/// run together: re-subscribing repairs the push path going forward, and the
-/// sweep recovers what was already missed. The result is reported to the caller
-/// and to Discord — the sweep takes long enough that the operator may have left
-/// the page. New videos are NOT reported as a WebSub failure here: the operator
-/// asked for this run, so recovering videos is the expected outcome, not news.
-///
-/// `resubscribe_queued` counts requests the hub accepted, not verified
-/// subscriptions — the hub verifies out-of-band by calling our callback back.
+/// The sweep can take longer than a reverse proxy request budget, while Discord
+/// already owns completion reporting. Reserving the shared sweep slot before
+/// returning 202 preserves the existing 409 behavior for duplicate presses.
 #[utoipa::path(
     post,
     path = "/api/channels/refresh",
     tag = "channels",
     responses(
-        (status = 200, description = "再購読を要求し、取りこぼしを取り込んだ結果"),
+        (status = 202, description = "再購読と全件取得し直しを受け付けた"),
         (status = 409, description = "取りこぼしチェックが既に実行中", body = ErrorResponse),
     )
 )]
-pub async fn refresh_all(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let channel_ids = list_channel_ids(&state)?;
-    let total = channel_ids.len();
-    let (resubscribe_queued, resubscribe_failed) = subscribe_all(&state, channel_ids).await;
-
-    let Some(outcome) = crate::sync::catchup::sweep_missed_videos(&state).await else {
+pub async fn refresh_all(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let Some(guard) = crate::sync::catchup::try_acquire_sweep(&state) else {
         return Err(AppError::Conflict(
             "取りこぼしチェックが既に実行中です".to_string(),
         ));
     };
+    let channel_ids = list_channel_ids(&state)?;
+    let total = channel_ids.len();
 
-    crate::notify::notify_warning(
-        &state.http,
-        &state.config,
-        "全件取得し直し 完了",
-        &format!(
-            "{} チャンネルに再購読を要求しました (受付 {} / 失敗 {})。取り込んだ動画は {} 本です。{}{}",
-            total,
-            resubscribe_queued,
-            resubscribe_failed,
-            outcome.imported,
-            if outcome.failed_channels > 0 {
-                format!(
-                    "{} チャンネルの取りこぼしチェックに失敗しています。",
-                    outcome.failed_channels
-                )
-            } else {
-                String::new()
-            },
-            if outcome.quota_exhausted {
-                "クォータを使い切ったため、途中のチャンネルで中断しています。"
-            } else {
-                ""
-            }
-        ),
-    )
-    .await;
+    tokio::spawn(async move {
+        let (resubscribe_queued, resubscribe_failed) = subscribe_all(&state, channel_ids).await;
+        let outcome = crate::sync::catchup::sweep_missed_videos_with_guard(&state, guard).await;
 
-    Ok(Json(json!({
-        "resubscribe_queued": resubscribe_queued,
-        "resubscribe_failed": resubscribe_failed,
-        "imported": outcome.imported,
-        "failed_channels": outcome.failed_channels,
-        "quota_exhausted": outcome.quota_exhausted,
-    })))
+        crate::notify::notify_warning(
+            &state.http,
+            &state.config,
+            "全件取得し直し 完了",
+            &format!(
+                "{} チャンネルに再購読を要求しました (受付 {} / 失敗 {})。取り込んだ動画は {} 本です。{}{}",
+                total,
+                resubscribe_queued,
+                resubscribe_failed,
+                outcome.imported,
+                if outcome.failed_channels > 0 {
+                    format!(
+                        "{} チャンネルの取りこぼしチェックに失敗しています。",
+                        outcome.failed_channels
+                    )
+                } else {
+                    String::new()
+                },
+                if outcome.quota_exhausted {
+                    "クォータを使い切ったため、途中のチャンネルで中断しています。"
+                } else {
+                    ""
+                }
+            ),
+        )
+        .await;
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
 }
 
 fn list_channel_ids(state: &AppState) -> Result<Vec<String>, AppError> {
@@ -1576,20 +1569,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn refresh_reports_what_it_did() {
+        async fn refresh_is_accepted_without_waiting_for_the_sweep() {
             let state = AppState::test();
             let app = routes().with_state(state);
 
             let resp = app.oneshot(post_refresh()).await.unwrap();
 
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["resubscribe_queued"], 0);
-            assert_eq!(json["resubscribe_failed"], 0);
-            assert_eq!(json["imported"], 0);
-            assert_eq!(json["failed_channels"], 0);
-            assert_eq!(json["quota_exhausted"], false);
+            assert_eq!(json["accepted"], true);
         }
 
         #[tokio::test]
