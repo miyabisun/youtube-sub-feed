@@ -24,6 +24,7 @@ async fn main() {
         config: config.clone(),
         http,
         catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
+        push_alerts: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),
     };
 
     cache::start_sweep(cache);

@@ -178,6 +178,7 @@ pub async fn notification(
             "[websub] push for {} missing X-Hub-Signature header, dropping",
             channel_id
         );
+        warn_bad_push(&state, REASON_MISSING_SIGNATURE, &channel_id, &body, None).await;
         return StatusCode::UNAUTHORIZED;
     };
 
@@ -186,6 +187,7 @@ pub async fn notification(
             "[websub] HMAC mismatch for channel {}, dropping",
             channel_id
         );
+        warn_bad_push(&state, REASON_HMAC_MISMATCH, &channel_id, &body, None).await;
         return StatusCode::UNAUTHORIZED;
     }
 
@@ -205,6 +207,21 @@ pub async fn notification(
             tombstone_count,
             body_preview(&body)
         );
+        warn_bad_push(
+            &state,
+            REASON_UNEXPECTED_BODY,
+            &channel_id,
+            &body,
+            Some(&format!(
+                "malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}",
+                parsed.malformed,
+                parsed.entry_elements,
+                parsed.incomplete_entries,
+                parsed.entries.len(),
+                tombstone_count
+            )),
+        )
+        .await;
     }
 
     // Tombstones retire videos rather than announcing them. The DELETE is scoped
@@ -274,6 +291,49 @@ pub async fn notification(
     });
 
     StatusCode::OK
+}
+
+/// Reasons a push that named a channel we subscribe to was not accepted as
+/// written. Each doubles as its own cooldown key, so one noisy reason cannot
+/// mask a different one.
+const REASON_MISSING_SIGNATURE: &str = "X-Hub-Signature がない";
+const REASON_HMAC_MISMATCH: &str = "HMAC が一致しない";
+const REASON_UNEXPECTED_BODY: &str = "本文が想定外";
+
+/// Report a bad push to Discord.
+///
+/// Only pushes that got past the subscription lookup reach here. Everything
+/// rejected before it — a non-UTF-8 body, a body naming no channel, a channel
+/// we do not subscribe to — is unauthenticated traffic on a public endpoint,
+/// so it stays in the log and out of Discord.
+async fn warn_bad_push(
+    state: &AppState,
+    reason: &'static str,
+    channel_id: &str,
+    body: &[u8],
+    detail: Option<&str>,
+) {
+    if !state.push_alerts.admit(reason, crate::util::now_unix()) {
+        tracing::debug!(
+            "[websub] Discord warning suppressed as a repeat: {}",
+            reason
+        );
+        return;
+    }
+
+    let mut description = format!("channel: {}\nbytes: {}\n", channel_id, body.len());
+    if let Some(detail) = detail {
+        description.push_str(&format!("詳細: {}\n", detail));
+    }
+    description.push_str(&format!("本文: {}", body_preview(body)));
+
+    crate::notify::notify_warning(
+        &state.http,
+        &state.config,
+        &format!("WebSub の不正な push: {reason}"),
+        &description,
+    )
+    .await;
 }
 
 fn body_preview(body: &[u8]) -> String {
@@ -371,6 +431,7 @@ mod tests {
     use crate::websub::signature::generate_secret;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt;
 
     // WebSub Callback Spec
@@ -915,6 +976,277 @@ mod tests {
             .header("x-hub-signature", signature)
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    /// The warnings a stand-in Discord webhook received, newest last.
+    type Deliveries = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// A stand-in Discord webhook that keeps the JSON body of every warning
+    /// posted to it.
+    ///
+    /// It answers with `204` and `Connection: close`, so the client cannot pool
+    /// a connection across calls and each warning arrives on a socket of its
+    /// own.
+    async fn fake_discord() -> (String, Deliveries) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/webhook", listener.local_addr().unwrap());
+        let deliveries: Deliveries = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let deliveries_srv = deliveries.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let deliveries = deliveries_srv.clone();
+                tokio::spawn(async move {
+                    if let Some(body) = read_request_body(&mut socket).await {
+                        deliveries.lock().unwrap().push(body);
+                    }
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        (url, deliveries)
+    }
+
+    /// Read one HTTP request off `socket` and return its body, using
+    /// Content-Length to know when the body is complete.
+    async fn read_request_body(socket: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut raw = Vec::new();
+        let mut scratch = [0u8; 4096];
+        loop {
+            if let Some(head_end) = raw
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|at| at + 4)
+            {
+                let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+                let length: usize = head
+                    .split("content-length:")
+                    .nth(1)?
+                    .split(|c: char| !c.is_ascii_digit())
+                    .find(|part| !part.is_empty())?
+                    .parse()
+                    .ok()?;
+                if raw.len() >= head_end + length {
+                    return Some(String::from_utf8_lossy(&raw[head_end..]).into_owned());
+                }
+            }
+            match socket.read(&mut scratch).await {
+                Ok(0) | Err(_) => return None,
+                Ok(read) => raw.extend_from_slice(&scratch[..read]),
+            }
+        }
+    }
+
+    /// The `(title, description)` of each warning embed Discord received.
+    fn warnings(deliveries: &Deliveries) -> Vec<(String, String)> {
+        deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|payload| {
+                let embed = serde_json::from_str::<serde_json::Value>(payload).unwrap()["embeds"]
+                    [0]
+                .clone();
+                let field = |name: &str| embed[name].as_str().unwrap().to_string();
+                (field("title"), field("description"))
+            })
+            .collect()
+    }
+
+    /// Warnings are fire-and-forget over a socket; give a delivery that is on
+    /// its way the chance to land before counting.
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    fn post_signed(body: &str, secret: &str) -> Request<axum::body::Body> {
+        let sig = sign(secret.as_bytes(), body);
+        post_push(body, &sig)
+    }
+
+    /// A well-formed feed that carries neither an entry nor a tombstone. The
+    /// hub has no reason to send one, so it trips the "unexpected body" branch.
+    fn empty_feed(channel_id: &str) -> String {
+        format!(
+            r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"><yt:channelId>{channel_id}</yt:channelId></feed>"#
+        )
+    }
+
+    #[tokio::test]
+    async fn an_hmac_mismatch_is_reported_to_discord_with_what_to_investigate() {
+        let (mut state, _) = setup_state_with_subscription("UC_warn_hmac", "correct_secret");
+        let (url, deliveries) = fake_discord().await;
+        state.config.discord_webhook_url = Some(url);
+
+        let body = r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"><entry><yt:channelId>UC_warn_hmac</yt:channelId><yt:videoId>v1</yt:videoId><title>t</title></entry></feed>"#;
+        let resp = routes()
+            .with_state(state.clone())
+            .oneshot(post_signed(body, "wrong_secret"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        settle().await;
+
+        let warnings = warnings(&deliveries);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a forged signature is the one rejection worth waking someone for"
+        );
+        let (title, description) = &warnings[0];
+        assert!(
+            title.contains(REASON_HMAC_MISMATCH),
+            "the headline must name what went wrong: {title}"
+        );
+        assert!(
+            description.contains("UC_warn_hmac"),
+            "the warning must name the channel the push claimed: {description}"
+        );
+        assert!(
+            description.contains(&format!("bytes: {}", body.len())),
+            "the warning must size the body that was rejected: {description}"
+        );
+        assert!(
+            description.contains("yt:videoId"),
+            "the warning must preview the body that was rejected: {description}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeated_hmac_mismatch_is_reported_to_discord_only_once() {
+        let (mut state, _) = setup_state_with_subscription("UC_warn_flood", "correct_secret");
+        let (url, deliveries) = fake_discord().await;
+        state.config.discord_webhook_url = Some(url);
+
+        let body = r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"><entry><yt:channelId>UC_warn_flood</yt:channelId><yt:videoId>v1</yt:videoId><title>t</title></entry></feed>"#;
+        for _ in 0..3 {
+            let resp = routes()
+                .with_state(state.clone())
+                .oneshot(post_signed(body, "wrong_secret"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        settle().await;
+        assert_eq!(
+            warnings(&deliveries).len(),
+            1,
+            "a sender retrying a rejected push must not fill the channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_missing_its_signature_header_is_reported_to_discord() {
+        let (mut state, _) = setup_state_with_subscription("UC_warn_nosig", "some_secret");
+        let (url, deliveries) = fake_discord().await;
+        state.config.discord_webhook_url = Some(url);
+
+        let body = r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"><entry><yt:channelId>UC_warn_nosig</yt:channelId><yt:videoId>v1</yt:videoId><title>t</title></entry></feed>"#;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/websub/callback")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = routes()
+            .with_state(state.clone())
+            .oneshot(req)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        settle().await;
+        let warnings = warnings(&deliveries);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].0.contains(REASON_MISSING_SIGNATURE),
+            "the headline must name what went wrong: {}",
+            warnings[0].0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_signed_push_whose_body_makes_no_sense_is_reported_to_discord() {
+        let (mut state, _) = setup_state_with_subscription("UC_warn_body", "s3cret");
+        let (url, deliveries) = fake_discord().await;
+        state.config.discord_webhook_url = Some(url);
+
+        let body = empty_feed("UC_warn_body");
+        let resp = routes()
+            .with_state(state.clone())
+            .oneshot(post_signed(&body, "s3cret"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the hub still gets its 200; only our reading of the body failed"
+        );
+        settle().await;
+        let warnings = warnings(&deliveries);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a body that cleared the HMAC came from the hub, so its shape is news"
+        );
+        let (title, description) = &warnings[0];
+        assert!(
+            title.contains(REASON_UNEXPECTED_BODY),
+            "the headline must name what went wrong: {title}"
+        );
+        assert!(
+            description.contains("entry_elements=0"),
+            "the warning must carry the counters that say how the body disappointed us: {description}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_rejected_before_it_named_a_subscription_stays_out_of_discord() {
+        let (mut state, _) = setup_state_with_subscription("UC_quiet", "s");
+        let (url, deliveries) = fake_discord().await;
+        state.config.discord_webhook_url = Some(url);
+        let app = || routes().with_state(state.clone());
+
+        // Not valid UTF-8.
+        let non_utf8 = Request::builder()
+            .method("POST")
+            .uri("/api/websub/callback")
+            .header("x-hub-signature", "sha1=whatever")
+            .body(axum::body::Body::from(vec![0xffu8, 0xfe, 0xfd]))
+            .unwrap();
+        assert_eq!(
+            app().oneshot(non_utf8).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // Parses, but names no channel.
+        let no_channel = post_push(r#"<feed><entry><title>t</title></entry></feed>"#, "sha1=x");
+        assert_eq!(
+            app().oneshot(no_channel).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // Names a channel we hold no subscription for.
+        let unsubscribed = post_push(
+            r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"><entry><yt:channelId>UC_stranger</yt:channelId><yt:videoId>v</yt:videoId><title>t</title></entry></feed>"#,
+            "sha1=x",
+        );
+        assert_eq!(
+            app().oneshot(unsubscribed).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+
+        settle().await;
+        assert_eq!(
+            warnings(&deliveries),
+            Vec::new(),
+            "the callback is open to the internet, so unauthenticated junk belongs in the log alone"
+        );
     }
 
     #[tokio::test]

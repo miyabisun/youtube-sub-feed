@@ -109,8 +109,10 @@ pub struct SweepOutcome {
 /// Spawn the periodic count scan, if an interval is configured.
 ///
 /// channels.list batches 50 IDs per quota unit. Only channels whose videoCount
-/// increased spend the additional playlistItems.list unit. Finding a new video
-/// here means WebSub did not deliver, so this trigger reports imports to Discord.
+/// increased spend the additional playlistItems.list unit. Imports are the
+/// normal outcome here rather than news — YouTube's hub has largely stopped
+/// pushing — so they are logged and not announced. Only the anomalies
+/// `report_anomalies` covers reach Discord.
 pub fn start(state: AppState) {
     let Some(minutes) = state.config.catchup_interval_minutes else {
         return;
@@ -120,22 +122,7 @@ pub fn start(state: AppState) {
         let interval = Duration::from_secs(minutes * 60);
         loop {
             tokio::time::sleep(interval).await;
-            let Some(outcome) = sweep_changed_videos(&state).await else {
-                continue;
-            };
-            if outcome.imported == 0 {
-                continue;
-            }
-            notify_warning(
-                &state.http,
-                &state.config,
-                "WebSub 未達を検出",
-                &format!(
-                    "定期チェックで {} 本の動画を取り込みました。WebSub の push が届いていません。",
-                    outcome.imported
-                ),
-            )
-            .await;
+            sweep_changed_videos(&state).await;
         }
     });
 }

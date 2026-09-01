@@ -1,5 +1,6 @@
 use crate::cache::Cache;
 use crate::config::Config;
+pub use crate::notify::WarningCooldown;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,6 +25,10 @@ pub struct AppState {
     /// Held for the duration of any catch-up work so startup, the periodic
     /// videoCount scan and the manual full sweep never duplicate quota spend.
     pub catchup_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Thins the Discord copy of WebSub push rejections. The callback is
+    /// publicly reachable, so a hub repeating a broken push must not empty
+    /// itself into the channel.
+    pub push_alerts: Arc<WarningCooldown>,
 }
 
 #[cfg(test)]
@@ -45,6 +50,7 @@ impl AppState {
             },
             http: build_http_client(),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
+            push_alerts: Arc::new(WarningCooldown::default()),
         }
     }
 }
