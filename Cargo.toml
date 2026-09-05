@@ -29,6 +29,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 [profile.release]
-lto = true
+opt-level = 3
+lto = false
 strip = true
-codegen-units = 1
+codegen-units = 16

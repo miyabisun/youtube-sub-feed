@@ -18,6 +18,17 @@ Cloudflare Access は認証済みリクエストに `Cf-Access-Authenticated-Use
 docker build -t youtube-sub-feed .
 ```
 
+タグ `vX.Y.Z` が `Cargo.toml` / `Cargo.lock` の package version と一致する
+commit から、Linux amd64 の image を `ghcr.io/miyabisun/youtube-sub-feed:X.Y.Z`
+と `:latest` に公開します。GitHub Release や native binary は作成しません。
+
+Rust 1.96.0 と cargo-chef 0.1.78 を固定し、依存 build の後に本物の manifest と
+source をコピーして本体を再コンパイルします。release profile は `opt-level=3`、
+`lto=false`、`codegen-units=16`、`strip=true` です。frontend は lockfile に
+従う `npm ci` を使い、成果物を従来どおり `/app/client/build` に配置します。
+CI は製品 image と分けた GHCR の `:build-cache` に中間段階を `mode=max` で保存し、
+次のタグで再利用します。cache が無い初回も通常の build で公開できます。
+
 ## Docker 起動
 
 ```bash
