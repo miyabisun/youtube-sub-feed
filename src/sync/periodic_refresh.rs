@@ -61,7 +61,7 @@ async fn run_once(state: &AppState) {
     crate::sync::video_enrich::backfill_missing_details(state).await;
 }
 
-fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
+pub(crate) fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
     let conn = state.db.lock().unwrap();
     // The `result` binding is load-bearing: it forces the `Result<Statement>`
     // temporary to drop before `conn`, avoiding an E0597 borrow-lifetime error.
@@ -183,15 +183,15 @@ pub(crate) async fn register_new_subscription(
 }
 
 /// Discord notification for persistent subscribe failures, throttled to at most
-/// once per hour (cache key "websub_subscribe_err") so a hub outage doesn't flood
+/// once per hour so a hub outage doesn't flood
 /// the webhook with 200 messages.
 async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &str) {
-    if state.cache.get("websub_subscribe_err").is_some() {
+    if !state
+        .warning_cooldown
+        .admit("websub_subscribe_err", std::time::Instant::now())
+    {
         return;
     }
-    state
-        .cache
-        .set("websub_subscribe_err", serde_json::json!(true), Some(3600));
 
     notify_warning(
         &state.http,
@@ -339,6 +339,37 @@ mod tests {
             status, "pending",
             "Status stays 'pending' until Hub verification GET arrives"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_failures_send_one_warning_across_channels() {
+        use axum::{http::StatusCode, routing::post, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let count = hits.clone();
+        let app = Router::new().route(
+            "/",
+            post(move || {
+                let count = count.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut state = AppState::test();
+        state.config.discord_webhook_url =
+            Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        tokio::join!(
+            notify_subscribe_failure(&state, "UC_first", "unavailable"),
+            notify_subscribe_failure(&state, "UC_second", "unavailable"),
+        );
+        server.abort();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[test]

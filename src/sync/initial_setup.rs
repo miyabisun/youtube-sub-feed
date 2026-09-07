@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::sync::periodic_refresh::subscribe_all;
+use crate::sync::periodic_refresh::{find_channels_missing_subscription, subscribe_all};
 
 /// Run at startup: subscribe all existing channels to WebSub (if not already).
 ///
@@ -25,21 +25,7 @@ pub async fn run_initial_setup(state: &AppState) {
         channel_count
     );
 
-    let unsubscribed = {
-        let conn = state.db.lock().unwrap();
-        let result = match conn.prepare(
-            "SELECT c.id FROM channels c
-             LEFT JOIN channel_subscriptions s ON s.channel_id = c.id
-             WHERE s.channel_id IS NULL",
-        ) {
-            Ok(mut stmt) => stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<String>>())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
-        result
-    };
+    let unsubscribed = find_channels_missing_subscription(state);
 
     if unsubscribed.is_empty() {
         tracing::info!("[setup] All channels already have WebSub subscriptions");

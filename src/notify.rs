@@ -2,9 +2,10 @@ use crate::config::Config;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// How long one warning reason stays quiet after it has been reported once.
-pub const WARNING_COOLDOWN_SECS: i64 = 3600;
+pub const WARNING_COOLDOWN_SECS: u64 = 3600;
 
 /// Lets one warning reason through per window.
 ///
@@ -14,24 +15,25 @@ pub const WARNING_COOLDOWN_SECS: i64 = 3600;
 /// Discord copy is thinned. Reasons are `&'static str`, so the map is bounded
 /// by the call sites rather than by anything an inbound request carries.
 pub struct WarningCooldown {
-    window_secs: i64,
-    last_sent: Mutex<HashMap<&'static str, i64>>,
+    window: Duration,
+    last_sent: Mutex<HashMap<&'static str, Instant>>,
 }
 
 impl WarningCooldown {
-    pub fn new(window_secs: i64) -> Self {
+    pub fn new(window_secs: u64) -> Self {
         Self {
-            window_secs,
+            window: Duration::from_secs(window_secs),
             last_sent: Mutex::new(HashMap::new()),
         }
     }
 
     /// True when `reason` has not been reported within the window ending at
     /// `now`. Admitting records `now` as that reason's latest report.
-    pub fn admit(&self, reason: &'static str, now: i64) -> bool {
+    /// A monotonic clock keeps wall-clock corrections from changing the window.
+    pub fn admit(&self, reason: &'static str, now: Instant) -> bool {
         let mut last_sent = self.last_sent.lock().unwrap();
         match last_sent.get(reason) {
-            Some(&sent_at) if now - sent_at < self.window_secs => false,
+            Some(&sent_at) if now.saturating_duration_since(sent_at) < self.window => false,
             _ => {
                 last_sent.insert(reason, now);
                 true
@@ -83,7 +85,7 @@ mod tests {
     use crate::config::Config;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn config_with_webhook(url: Option<String>) -> Config {
         let mut config = crate::state::AppState::test().config;
@@ -94,14 +96,15 @@ mod tests {
     #[test]
     fn cooldown_reports_a_reason_once_and_stays_quiet_for_the_rest_of_the_window() {
         let cooldown = WarningCooldown::new(3600);
+        let now = Instant::now();
 
-        assert!(cooldown.admit("HMAC mismatch", 1_000));
+        assert!(cooldown.admit("HMAC mismatch", now));
         assert!(
-            !cooldown.admit("HMAC mismatch", 1_001),
+            !cooldown.admit("HMAC mismatch", now + Duration::from_secs(1)),
             "a repeat inside the window must not reach Discord"
         );
         assert!(
-            !cooldown.admit("HMAC mismatch", 1_000 + 3599),
+            !cooldown.admit("HMAC mismatch", now + Duration::from_secs(3599)),
             "the last second of the window is still inside it"
         );
     }
@@ -109,14 +112,15 @@ mod tests {
     #[test]
     fn cooldown_reports_a_reason_again_once_the_window_has_elapsed() {
         let cooldown = WarningCooldown::new(3600);
+        let now = Instant::now();
 
-        assert!(cooldown.admit("HMAC mismatch", 1_000));
+        assert!(cooldown.admit("HMAC mismatch", now));
         assert!(
-            cooldown.admit("HMAC mismatch", 1_000 + 3600),
+            cooldown.admit("HMAC mismatch", now + Duration::from_secs(3600)),
             "the window is exclusive at its far end"
         );
         assert!(
-            !cooldown.admit("HMAC mismatch", 1_000 + 3601),
+            !cooldown.admit("HMAC mismatch", now + Duration::from_secs(3601)),
             "admitting restarts the window from the moment it was admitted"
         );
     }
@@ -124,13 +128,14 @@ mod tests {
     #[test]
     fn cooldown_keeps_a_separate_window_per_reason() {
         let cooldown = WarningCooldown::new(3600);
+        let now = Instant::now();
 
-        assert!(cooldown.admit("HMAC mismatch", 1_000));
+        assert!(cooldown.admit("HMAC mismatch", now));
         assert!(
-            cooldown.admit("missing signature", 1_000),
+            cooldown.admit("missing signature", now),
             "one reason going quiet must not mask a different one"
         );
-        assert!(!cooldown.admit("HMAC mismatch", 1_000));
+        assert!(!cooldown.admit("HMAC mismatch", now));
     }
 
     #[tokio::test]

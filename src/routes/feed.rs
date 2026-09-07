@@ -16,6 +16,46 @@ pub fn routes() -> Router<AppState> {
         .route("/api/videos/{id}/unhide", patch(unhide_video))
 }
 
+/// The fields shared by RSS and JSON Feed, selected with the same visibility rules.
+pub(super) struct FavoriteItem {
+    pub video_id: String,
+    pub title: String,
+    pub published_at: Option<String>,
+    pub channel_title: String,
+}
+
+pub(super) fn favorite_items(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    limit: i64,
+) -> rusqlite::Result<Vec<FavoriteItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.title, v.published_at, c.title as channel_title
+         FROM videos v
+         JOIN channels c ON v.channel_id = c.id
+         JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
+         LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
+         WHERE uc.is_favorite = 1
+           AND COALESCE(uv.is_hidden, 0) = 0
+           AND v.is_members_only = 0
+           AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
+           AND (v.is_short = 0 OR uc.hide_shorts = 0)
+         ORDER BY v.published_at DESC
+         LIMIT ?2",
+    )?;
+    let items = stmt
+        .query_map(rusqlite::params![user_id, limit], |row| {
+            Ok(FavoriteItem {
+                video_id: row.get(0)?,
+                title: row.get(1)?,
+                published_at: crate::util::row_timestamp_to_rfc3339(row, 2)?,
+                channel_title: row.get(3)?,
+            })
+        })?
+        .collect();
+    items
+}
+
 #[derive(Deserialize)]
 struct FeedQuery {
     limit: Option<i64>,

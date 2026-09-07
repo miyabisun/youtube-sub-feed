@@ -1,4 +1,3 @@
-use youtube_sub_feed::cache;
 use youtube_sub_feed::config::Config;
 use youtube_sub_feed::db;
 use youtube_sub_feed::routes;
@@ -15,19 +14,16 @@ async fn main() {
 
     let config = Config::from_env();
     let conn = db::open(&config.db_path);
-    let cache = Arc::new(cache::Cache::new());
     let http = youtube_sub_feed::state::build_http_client();
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
-        cache: cache.clone(),
         config: config.clone(),
         http,
         catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
-        push_alerts: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),
+        warning_cooldown: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),
     };
 
-    cache::start_sweep(cache);
     sync::start_sync(state.clone());
 
     let app = routes::build_router(state);

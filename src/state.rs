@@ -1,4 +1,3 @@
-use crate::cache::Cache;
 use crate::config::Config;
 pub use crate::notify::WarningCooldown;
 use rusqlite::Connection;
@@ -19,16 +18,14 @@ pub fn build_http_client() -> reqwest::Client {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
-    pub cache: Arc<Cache>,
     pub config: Config,
     pub http: reqwest::Client,
     /// Held for the duration of any catch-up work so startup, the periodic
     /// videoCount scan and the manual full sweep never duplicate quota spend.
     pub catchup_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Thins the Discord copy of WebSub push rejections. The callback is
-    /// publicly reachable, so a hub repeating a broken push must not empty
-    /// itself into the channel.
-    pub push_alerts: Arc<WarningCooldown>,
+    /// Thins repeated Discord warnings independently per reason, including
+    /// WebSub push rejections and subscription failures.
+    pub warning_cooldown: Arc<WarningCooldown>,
 }
 
 #[cfg(test)]
@@ -36,7 +33,6 @@ impl AppState {
     pub fn test() -> Self {
         Self {
             db: Arc::new(Mutex::new(crate::db::open_memory())),
-            cache: Arc::new(Cache::new()),
             config: Config {
                 port: 3000,
                 db_path: ":memory:".to_string(),
@@ -50,7 +46,7 @@ impl AppState {
             },
             http: build_http_client(),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
-            push_alerts: Arc::new(WarningCooldown::default()),
+            warning_cooldown: Arc::new(WarningCooldown::default()),
         }
     }
 }

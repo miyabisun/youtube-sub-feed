@@ -1,3 +1,4 @@
+use super::feed::{favorite_items, FavoriteItem};
 use crate::error::AppError;
 use crate::openapi::*;
 use crate::state::AppState;
@@ -10,13 +11,6 @@ use serde::Deserialize;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/rss", get(get_rss_feed))
-}
-
-struct RssItem {
-    video_id: String,
-    title: String,
-    published_at: Option<String>,
-    channel_title: String,
 }
 
 #[derive(Deserialize)]
@@ -63,31 +57,7 @@ async fn get_rss_feed(
                 .map_err(|_| AppError::NotFound("No users found".to_string()))?,
         };
 
-        let mut stmt = conn.prepare(
-            "SELECT v.id, v.title, v.published_at, c.title as channel_title
-             FROM videos v
-             JOIN channels c ON v.channel_id = c.id
-             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-             LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-             WHERE uc.is_favorite = 1
-               AND COALESCE(uv.is_hidden, 0) = 0
-               AND v.is_members_only = 0
-               AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-               AND (v.is_short = 0 OR uc.hide_shorts = 0)
-             ORDER BY v.published_at DESC
-             LIMIT 100",
-        )?;
-        let items = stmt
-            .query_map(rusqlite::params![user_id], |row| {
-                Ok(RssItem {
-                    video_id: row.get(0)?,
-                    title: row.get(1)?,
-                    published_at: crate::util::row_timestamp_to_rfc3339(row, 2)?,
-                    channel_title: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<RssItem>, _>>()?;
-        items
+        favorite_items(&conn, user_id, 100)?
     };
 
     let xml = build_rss_xml(&items);
@@ -98,7 +68,7 @@ async fn get_rss_feed(
     ))
 }
 
-fn build_rss_xml(items: &[RssItem]) -> String {
+fn build_rss_xml(items: &[FavoriteItem]) -> String {
     let mut xml = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
@@ -164,10 +134,10 @@ mod tests {
     //   an unknown token is a 404.
     //
     // These tests drive the real `get_rss_feed` handler over HTTP (oneshot) so the
-    // handler's own SQL — including `AND v.is_members_only = 0` and the token→user
+    // handler's shared query — including `AND v.is_members_only = 0` and the token→user
     // resolution branches — is what is under test, not a re-implementation.
 
-    use super::{build_rss_xml, get_rss_feed, RssItem};
+    use super::{build_rss_xml, get_rss_feed, FavoriteItem};
     use crate::state::AppState;
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
@@ -385,6 +355,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rss_keeps_its_limit_and_newest_videos() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            for i in 0..105 {
+                conn.execute(
+                    "INSERT INTO videos (id, channel_id, title, published_at) VALUES (?1, 'UC_fav', 'Video', ?2)",
+                    params![format!("v{i}"), 1700000000 + i],
+                ).unwrap();
+            }
+        }
+        let (status, body) = get_rss(&state, Some("tok-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected: Vec<String> = (105 - 100..105).rev().map(|i| format!("v{i}")).collect();
+        assert_eq!(rss_video_ids(&body), expected);
+    }
+
+    #[tokio::test]
     async fn rss_sorted_by_published_at_desc() {
         let state = setup_state();
         insert_video(&state, "old", "UC_fav", "2024-01-01T00:00:00Z", 0);
@@ -489,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_rss_xml_structure() {
-        let xml = build_rss_xml(&[RssItem {
+        let xml = build_rss_xml(&[FavoriteItem {
             video_id: "vid1".into(),
             title: "Test <Video>".into(),
             published_at: Some("2024-01-15T10:30:00Z".into()),

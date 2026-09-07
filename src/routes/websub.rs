@@ -313,7 +313,10 @@ async fn warn_bad_push(
     body: &[u8],
     detail: Option<&str>,
 ) {
-    if !state.push_alerts.admit(reason, crate::util::now_unix()) {
+    if !state
+        .warning_cooldown
+        .admit(reason, std::time::Instant::now())
+    {
         tracing::debug!(
             "[websub] Discord warning suppressed as a repeat: {}",
             reason

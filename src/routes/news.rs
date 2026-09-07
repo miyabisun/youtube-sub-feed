@@ -1,3 +1,4 @@
+use super::feed::{favorite_items, FavoriteItem};
 use crate::config::Config;
 use crate::error::AppError;
 use crate::middleware::UserId;
@@ -12,13 +13,6 @@ use serde_json::json;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/news", get(get_news))
-}
-
-struct NewsItem {
-    video_id: String,
-    title: String,
-    published_at: Option<String>,
-    channel_title: String,
 }
 
 #[utoipa::path(
@@ -39,31 +33,7 @@ async fn get_news(
 ) -> Result<impl IntoResponse, AppError> {
     let items = {
         let conn = state.db.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT v.id, v.title, v.published_at, c.title as channel_title
-             FROM videos v
-             JOIN channels c ON v.channel_id = c.id
-             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-             LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-             WHERE uc.is_favorite = 1
-               AND COALESCE(uv.is_hidden, 0) = 0
-               AND v.is_members_only = 0
-               AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-               AND (v.is_short = 0 OR uc.hide_shorts = 0)
-             ORDER BY v.published_at DESC
-             LIMIT 50",
-        )?;
-        let items = stmt
-            .query_map(rusqlite::params![user_id], |row| {
-                Ok(NewsItem {
-                    video_id: row.get(0)?,
-                    title: row.get(1)?,
-                    published_at: crate::util::row_timestamp_to_rfc3339(row, 2)?,
-                    channel_title: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<NewsItem>, _>>()?;
-        items
+        favorite_items(&conn, user_id, 50)?
     };
 
     let base_url = resolve_base_url(&headers, &state.config);
@@ -94,7 +64,7 @@ fn resolve_base_url(headers: &HeaderMap, config: &Config) -> String {
     format!("{proto}://{host}")
 }
 
-fn build_json_feed(items: &[NewsItem], base_url: &str) -> serde_json::Value {
+fn build_json_feed(items: &[FavoriteItem], base_url: &str) -> serde_json::Value {
     json!({
         "version": "https://jsonfeed.org/version/1.1",
         "title": "YouTube Sub Feed",
@@ -137,7 +107,7 @@ mod tests {
     //   (news-server injects Cf-Access-Authenticated-User-Email itself).
     //
     // These tests drive the real `get_news` handler over HTTP (oneshot) with an
-    // injected UserId extension, so the handler's own SQL is under test.
+    // injected UserId extension, so the handler's shared query is under test.
 
     use super::{get_news, resolve_base_url};
     use crate::config::Config;
@@ -343,6 +313,24 @@ mod tests {
 
         let (_, feed) = get_news_feed(&state, 1).await;
         assert_eq!(item_ids(&feed), vec!["v_live"]);
+    }
+
+    #[tokio::test]
+    async fn news_keeps_its_limit_and_newest_videos() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            for i in 0..105 {
+                conn.execute(
+                    "INSERT INTO videos (id, channel_id, title, published_at) VALUES (?1, 'UC_fav', 'Video', ?2)",
+                    params![format!("v{i}"), 1700000000 + i],
+                ).unwrap();
+            }
+        }
+        let (status, body) = get_news_feed(&state, 1).await;
+        assert_eq!(status, StatusCode::OK);
+        let expected: Vec<String> = (105 - 50..105).rev().map(|i| format!("v{i}")).collect();
+        assert_eq!(item_ids(&body), expected);
     }
 
     #[tokio::test]
