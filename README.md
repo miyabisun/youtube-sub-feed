@@ -159,3 +159,23 @@ Sources: [configuration](src/config.rs), [startup](src/main.rs),
 | `./bin/dev` | Start dev server with frontend hot rebuild |
 | `cargo build --release` | Build for production |
 | `cargo test` | Run all tests |
+
+### WebSub subscription checks and retries
+
+Startup, channel additions, daily renewal and manual full refresh check each topic/callback through Google's
+[official Subscriber Diagnostics](https://pubsubhubbub.appspot.com/subscribe) before subscribing.
+This is the HTML `GET /subscription-details` diagnostic, not a JSON or all-subscriptions API.
+Checks use the stored signing secret and skip active subscriptions with more than two days remaining.
+HTTP errors or unknown diagnostic HTML/state/dates are logged and fall back to the callback-confirmed DB lease;
+that fallback does **not** establish the Hub's current state. Diagnostics never replace stored secrets or confirmed leases.
+
+One process-wide gate spaces diagnostic, subscribe and unsubscribe requests at least 10 seconds apart.
+Transient failures (network errors, 408, 429, 500, 502, 503, 504) get at most two retries, at least 30 seconds apart;
+a longer `Retry-After` delay or HTTP date is respected. Permanent errors are not retried.
+After a batch finishes, Discord receives one summary naming only the channels that ultimately failed.
+Only when a failed channel has an empty or ID-placeholder name, its public Atom feed is fetched to resolve and save the name.
+If that also fails, the summary explicitly says the name is unavailable and the ID remains in logs.
+The periodic worker enriches metadata immediately but waits 24 hours before renewing subscriptions, avoiding a second startup failure batch.
+HTTP acceptance remains separate from asynchronous callback confirmation, with a one-hour grace period before
+re-requesting an accepted subscription. Manual full refresh still scans every channel for videos.
+See also the [YouTube push notification guide](https://developers.google.com/youtube/v3/guides/push_notifications).

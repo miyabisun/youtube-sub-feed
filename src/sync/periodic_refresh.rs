@@ -1,451 +1,697 @@
 use crate::notify::notify_warning;
 use crate::state::AppState;
-use crate::websub::{hub, signature};
-use std::sync::Arc;
+use crate::websub::signature;
+use rusqlite::OptionalExtension;
+use std::collections::HashSet;
 use std::time::Duration;
-use tokio::sync::Semaphore;
 
-const REFRESH_INTERVAL_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
-/// Concurrent hub subscribe requests. These are POSTs to the hub and cost no
-/// YouTube quota, so the limit is about not flooding the hub.
-const SUBSCRIBE_CONCURRENCY: usize = 10;
-const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60; // 2 days
+const RENEW_THRESHOLD_SECONDS: i64 = 2 * 24 * 60 * 60;
+// Give an accepted async request time to verify before another batch retries it.
+const VERIFICATION_WAIT_SECONDS: i64 = 60 * 60;
 
-/// Spawn the periodic refresh loop.
-///
-/// Runs once immediately on startup, then every 24 hours:
-///   1. Subscribe new channels (channels without WebSub row) to WebSub hub
-///   2. Renew WebSub subscriptions nearing expiry
-///   3. Backfill video details (duration / Shorts / livestream) for rows the
-///      push-time enrichment missed, via the API-key-only YouTube Data API
-///
-/// New videos arrive exclusively via WebSub push notifications — this loop
-/// never discovers videos, it only maintains subscriptions and repairs
-/// missing metadata.
 pub fn start(state: AppState) {
     tokio::spawn(async move {
-        tracing::info!("[refresh] Starting periodic refresh worker (24h cycle)");
-
+        // Startup already checked every subscription. Enrich immediately, but
+        // do not give startup failures another three attempts in a second batch.
         loop {
-            run_once(&state).await;
-            tokio::time::sleep(Duration::from_millis(REFRESH_INTERVAL_MS)).await;
+            crate::sync::video_enrich::backfill_missing_details(&state).await;
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+            match all_channel_ids(&state) {
+                Ok(ids) => {
+                    subscribe_all(&state, ids).await;
+                }
+                Err(e) => tracing::error!("[refresh] Could not list channels: {}", e),
+            }
         }
     });
 }
 
-async fn run_once(state: &AppState) {
-    let callback = state.config.websub_callback_url.clone();
-
-    // 1. Backfill: subscribe any channel that lives in `channels` but has no
-    //    `channel_subscriptions` row. This recovers from migrations and from any
-    //    drift caused by manual DB edits or past failures where the subscribe
-    //    POST never landed in the DB.
-    let backfill_ids = find_channels_missing_subscription(state);
-    if !backfill_ids.is_empty() {
-        tracing::info!(
-            "[refresh] Backfilling {} unsubscribed channel(s)",
-            backfill_ids.len()
-        );
-    }
-    for ch_id in &backfill_ids {
-        register_new_subscription(state, ch_id, &callback).await;
-    }
-
-    // 2. Renew subscriptions whose expires_at is within RENEW_THRESHOLD_SECONDS
-    renew_expiring_subscriptions(state, &callback).await;
-
-    // 3. Enrich videos still missing details (never attempted, failed on push,
-    //    or livestreams that were still running at the last check). Runs here —
-    //    not as a separate startup task — so push enrichment and backfill never
-    //    race over freshly inserted IDs, and retries ride the same 24h cycle.
-    crate::sync::video_enrich::backfill_missing_details(state).await;
-}
-
-pub(crate) fn find_channels_missing_subscription(state: &AppState) -> Vec<String> {
+pub(crate) fn all_channel_ids(state: &AppState) -> rusqlite::Result<Vec<String>> {
     let conn = state.db.lock().unwrap();
-    // The `result` binding is load-bearing: it forces the `Result<Statement>`
-    // temporary to drop before `conn`, avoiding an E0597 borrow-lifetime error.
-    let result = match conn.prepare(
-        "SELECT c.id FROM channels c
-         LEFT JOIN channel_subscriptions s ON s.channel_id = c.id
-         WHERE s.channel_id IS NULL",
-    ) {
-        Ok(mut stmt) => stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    result
+    let mut stmt = conn.prepare("SELECT id FROM channels ORDER BY id")?;
+    let rows = stmt.query_map([], |row| row.get(0))?.collect();
+    rows
 }
 
-/// Send a subscribe request for every given channel, returning (queued, failed).
-///
-/// "Queued" is as far as this can report: the hub answers 202 and verifies
-/// out-of-band by calling our callback back, so a request accepted here can
-/// still fail verification later. Callers must not present the count as a
-/// completed subscription.
-///
-/// Shared by the startup pass, which passes only the channels missing a
-/// subscription row, and by the manual action, which passes all of them.
+/// Serial batches share the DB check and request pacing across every caller.
+/// Counts HTTP acceptances, never claims callback verification is complete.
 pub(crate) async fn subscribe_all(state: &AppState, channel_ids: Vec<String>) -> (usize, usize) {
-    let callback = state.config.websub_callback_url.clone();
-    let semaphore = Arc::new(Semaphore::new(SUBSCRIBE_CONCURRENCY));
-    let mut handles = Vec::with_capacity(channel_ids.len());
-
-    for channel_id in channel_ids {
-        let state = state.clone();
-        let callback = callback.clone();
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-        handles.push(tokio::spawn(async move {
-            let _permit = permit; // released when task ends
-            register_new_subscription(&state, &channel_id, &callback).await
-        }));
-    }
-
+    let _batch = state.hub.batch.lock().await;
+    let mut seen = HashSet::new();
     let mut queued = 0;
-    let mut failed = 0;
-    for handle in handles {
-        match handle.await {
+    let mut failures = Vec::new();
+    for id in channel_ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        match register_subscription(state, &id).await {
             Ok(true) => queued += 1,
-            _ => failed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(channel_id = id, error = %e, "WebSub final subscription failure");
+                failures.push(failure_channel_title(state, &id).await);
+            }
         }
     }
-    (queued, failed)
+    if let Some(description) = failure_message(&failures) {
+        notify_warning(&state.http, &state.config, "WebSub購読エラー", &description).await;
+    }
+    (queued, failures.len())
 }
 
-/// Send one channel's subscribe request, returning whether the hub accepted it.
-/// Acceptance is not verification — see `subscribe_all`.
-pub(crate) async fn register_new_subscription(
-    state: &AppState,
-    channel_id: &str,
-    callback: &str,
-) -> bool {
-    // If a subscription already exists, preserve its secret: rotating it here creates
-    // a window where hub pushes (still signed with the old secret) fail HMAC verification
-    // until the hub re-verifies with the new secret.
+async fn failure_channel_title(state: &AppState, id: &str) -> String {
+    let title = crate::routes::websub::lookup_channel_title(&state.db.lock().unwrap(), id);
+    if !title.trim().is_empty() && title.trim() != id {
+        return title;
+    }
+    match state.hub.channel_title(&state.http, id).await {
+        Ok(title) if !title.trim().is_empty() && title.trim() != id => {
+            if let Err(e) = state.db.lock().unwrap().execute(
+                "UPDATE channels SET title = ?1 WHERE id = ?2 AND (trim(title) = '' OR trim(title) = id)",
+                rusqlite::params![title, id],
+            ) {
+                tracing::warn!(channel_id = id, error = %e, "Could not save channel title");
+            }
+            title
+        }
+        result => {
+            tracing::warn!(channel_id = id, result = ?result, "Channel name unavailable for final WebSub failure");
+            "名前未取得のチャンネル".into()
+        }
+    }
+}
+
+fn failure_message(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    Some(if names.len() <= 3 {
+        format!("{} の購読に失敗しました", shown)
+    } else {
+        format!(
+            "{} ほか、合計{}個のチャンネルで購読失敗しました",
+            shown,
+            names.len()
+        )
+    })
+}
+
+async fn register_subscription(state: &AppState, channel_id: &str) -> Result<bool, String> {
     let now = crate::util::now_unix();
     let stored = {
         let conn = state.db.lock().unwrap();
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
-                [channel_id],
-                |row| row.get(0),
-            )
-            .ok();
-
-        match existing {
-            Some(s) => conn
-                .execute(
-                    "UPDATE channel_subscriptions
-                     SET subscribed_at = ?1, verification_status = 'pending'
-                     WHERE channel_id = ?2",
-                    rusqlite::params![now, channel_id],
-                )
-                .map(|_| s),
-            None => {
-                let fresh = signature::generate_secret();
-                conn.execute(
-                    "INSERT INTO channel_subscriptions
-                     (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
-                     VALUES (?1, ?2, 0, ?3, ?3, 'pending')",
-                    rusqlite::params![channel_id, fresh, now],
-                )
-                .map(|_| fresh)
-            }
-        }
+        conn.query_row(
+            "SELECT hub_secret, verification_status, expires_at, subscribed_at FROM channel_subscriptions WHERE channel_id = ?1",
+            [channel_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?))
+        ).optional().map_err(|e| e.to_string())?
     };
-
-    // Without the stored row the hub's pushes have no secret to verify against,
-    // so sending the request anyway would produce a subscription we can never
-    // accept a push from.
-    let secret = match stored {
-        Ok(secret) => secret,
+    let secret = stored
+        .as_ref()
+        .map(|row| row.0.clone())
+        .unwrap_or_else(signature::generate_secret);
+    let expiration = state
+        .hub
+        .expiration(channel_id, &state.config.websub_callback_url, &secret)
+        .await;
+    let expiration = match expiration {
+        Ok(expires) => {
+            tracing::info!(channel_id, ?expires, "WebSub Hub diagnostic checked");
+            expires
+        }
         Err(e) => {
-            tracing::error!(
-                "[refresh] could not persist subscription for {}: {}",
-                channel_id,
-                e
-            );
-            return false;
+            tracing::warn!(channel_id, error = %e, "Hub diagnostic unavailable; using callback-confirmed DB lease (not current Hub state)");
+            stored
+                .as_ref()
+                .filter(|row| row.1 == "verified")
+                .and_then(|row| row.2)
         }
     };
-
-    if let Err(e) = hub::subscribe(&state.http, channel_id, callback, &secret).await {
-        tracing::error!("[refresh] subscribe failed for {}: {}", channel_id, e);
-        notify_subscribe_failure(state, channel_id, &e.to_string()).await;
-        return false;
-    }
-    tracing::info!("[refresh] Subscribe queued: {}", channel_id);
-    true
-}
-
-/// Discord notification for persistent subscribe failures, throttled to at most
-/// once per hour so a hub outage doesn't flood
-/// the webhook with 200 messages.
-async fn notify_subscribe_failure(state: &AppState, channel_id: &str, error: &str) {
-    if !state
-        .warning_cooldown
-        .admit("websub_subscribe_err", std::time::Instant::now())
-    {
-        return;
-    }
-
-    notify_warning(
-        &state.http,
-        &state.config,
-        "WebSub購読エラー",
-        &format!(
-            "チャンネル {} の購読リクエストに失敗: {}\n(1時間、以降の同種エラーはサイレント抑制)",
-            channel_id, error
-        ),
-    )
-    .await;
-}
-
-/// Select subscriptions whose lease expires within `RENEW_THRESHOLD_SECONDS` of
-/// now, returning `(channel_id, hub_secret)` pairs to re-subscribe.
-///
-/// Extracted as a pure DB read so the renewal *selection window* — the
-/// combination of `RENEW_THRESHOLD_SECONDS` and the `expires_at < ?` predicate —
-/// can be tested directly, without going through `hub::subscribe`'s network call.
-fn select_subscriptions_due_for_renewal(state: &AppState) -> Vec<(String, String)> {
-    let threshold =
-        (chrono::Utc::now() + chrono::Duration::seconds(RENEW_THRESHOLD_SECONDS)).timestamp();
-
-    let conn = state.db.lock().unwrap();
-    // The `result` binding is load-bearing: it drops the `Statement` temporary
-    // before `conn`, avoiding an E0597 borrow-lifetime error.
-    let result = match conn.prepare(
-        "SELECT channel_id, hub_secret FROM channel_subscriptions
-             WHERE expires_at IS NULL OR expires_at < ?1
-             ORDER BY channel_id",
-    ) {
-        Ok(mut stmt) => stmt
-            .query_map([&threshold], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    result
-}
-
-async fn renew_expiring_subscriptions(state: &AppState, callback: &str) {
-    let to_renew = select_subscriptions_due_for_renewal(state);
-
-    if to_renew.is_empty() {
-        return;
-    }
-
-    tracing::info!("[refresh] Renewing {} subscriptions", to_renew.len());
-
-    for (channel_id, secret) in &to_renew {
-        if let Err(e) = hub::subscribe(&state.http, channel_id, callback, secret).await {
-            tracing::warn!("[refresh] Renewal failed for {}: {}", channel_id, e);
+    if let Some((_, status, _, requested)) = &stored {
+        if status == "pending_unsubscribe" {
+            return Ok(false);
+        }
+        if expiration.is_some_and(|at| at > now + RENEW_THRESHOLD_SECONDS)
+            || requested.is_some_and(|at| at > now - VERIFICATION_WAIT_SECONDS)
+        {
+            return Ok(false);
         }
     }
+    // Store the secret before POST; the callback may arrive before HTTP acceptance.
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT OR IGNORE INTO channel_subscriptions
+         (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
+         VALUES (?1, ?2, 0, 0, 0, 'pending')",
+            rusqlite::params![channel_id, secret],
+        )
+        .map_err(|e| e.to_string())?;
+    state
+        .hub
+        .request(
+            "subscribe",
+            channel_id,
+            &state.config.websub_callback_url,
+            &secret,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    // Never reset verified status or the previous lease on request acceptance/failure.
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE channel_subscriptions SET subscribed_at = ?1 WHERE channel_id = ?2",
+            rusqlite::params![crate::util::now_unix(), channel_id],
+        )
+        .map_err(|e| e.to_string())?;
+    tracing::info!(
+        channel_id,
+        "WebSub request accepted; callback verification is separate"
+    );
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AppState;
+    use axum::{
+        extract::Query,
+        http::StatusCode,
+        routing::{get, post},
+        Form, Json, Router,
+    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::task::JoinHandle;
+    use tokio::time::Instant;
 
-    // Periodic Refresh Spec
-    //
-    // Runs every 24 hours. OAuth-free since the server no longer holds tokens.
-    // Responsibilities:
-    //   1. WebSub backfill: subscribe channels missing a channel_subscriptions row
-    //   2. WebSub renewal: re-subscribe entries within 2 days of expiry
-    //   3. Detail backfill: enrich videos still missing duration/Shorts/livestream
-    //      data via the API-key-only YouTube Data API (see sync::video_enrich)
-    //
-    // New video discovery is entirely WebSub-push driven. is_members_only
-    // remains 0 (its UUMO check was removed with OAuth).
-
-    #[tokio::test]
-    async fn register_new_subscription_preserves_secret_on_reregister() {
-        // Preserves HMAC integrity: rotating the secret while the hub still has the
-        // old subscription would cause pushes signed with the old secret to fail
-        // verification until the hub re-verifies with the new one.
-        let state = AppState::test();
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        {
-            let conn = state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES ('UC_again', 'A', ?1)",
-                [&now],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO channel_subscriptions
-                 (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
-                 VALUES ('UC_again', 'original_secret', 432000, ?1, ?1, 'verified')",
-                [&now],
-            )
-            .unwrap();
-        }
-
-        register_new_subscription(&state, "UC_again", "http://127.0.0.1:1/never").await;
-
-        let (secret, status): (String, String) = {
-            let conn = state.db.lock().unwrap();
-            conn.query_row(
-                "SELECT hub_secret, verification_status FROM channel_subscriptions WHERE channel_id = 'UC_again'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap()
-        };
-        assert_eq!(
-            secret, "original_secret",
-            "Secret must survive re-registration"
-        );
-        assert_eq!(
-            status, "pending",
-            "Status resets to pending until new verification completes"
-        );
+    #[derive(Clone, Debug)]
+    struct Hit {
+        at: Instant,
+        kind: String,
+        id: String,
+        secret: String,
+    }
+    #[derive(Default)]
+    struct Observed {
+        hits: Vec<Hit>,
+        warnings: Vec<(usize, String)>,
+        metadata_requests: Vec<String>,
     }
 
-    #[tokio::test]
-    async fn register_new_subscription_inserts_pending_row() {
-        let state = AppState::test();
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        {
-            let conn = state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES ('UC_new', 'New', ?1)",
-                [now],
-            )
-            .unwrap();
-        }
-
-        // Use an unroutable callback; hub::subscribe will fail but the DB row must still be inserted first.
-        register_new_subscription(&state, "UC_new", "http://127.0.0.1:1/never").await;
-
-        let (secret, status): (String, String) = {
-            let conn = state.db.lock().unwrap();
-            conn.query_row(
-                "SELECT hub_secret, verification_status FROM channel_subscriptions WHERE channel_id = 'UC_new'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap()
-        };
-        assert_eq!(secret.len(), 64, "Secret must be generated before hub call");
-        assert_eq!(
-            status, "pending",
-            "Status stays 'pending' until Hub verification GET arrives"
-        );
+    // An always-ready task prevents Tokio's paused clock from auto-advancing
+    // while the isolated HTTP server/client are waiting for socket readiness.
+    struct Stub {
+        state: AppState,
+        observed: Arc<Mutex<Observed>>,
+        server: JoinHandle<()>,
+        clock_guard: JoinHandle<()>,
     }
-
-    #[tokio::test]
-    async fn subscribe_failures_send_one_warning_across_channels() {
-        use axum::{http::StatusCode, routing::post, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let hits = Arc::new(AtomicUsize::new(0));
-        let count = hits.clone();
-        let app = Router::new().route(
-            "/",
-            post(move || {
-                let count = count.clone();
-                async move {
-                    count.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::NO_CONTENT
+    impl Drop for Stub {
+        fn drop(&mut self) {
+            self.server.abort();
+            self.clock_guard.abort();
+        }
+    }
+    impl Stub {
+        async fn new() -> Self {
+            let observed = Arc::new(Mutex::new(Observed::default()));
+            let diagnostics = observed.clone();
+            let requests = observed.clone();
+            let warnings = observed.clone();
+            let metadata = observed.clone();
+            let app = Router::new()
+                .route("/subscription-details", get(move |Query(form): Query<HashMap<String, String>>| {
+                    let observed = diagnostics.clone();
+                    async move {
+                        let id = crate::routes::websub::channel_id_from_topic(&form["hub.topic"]).unwrap();
+                        observed.lock().unwrap().hits.push(Hit { at: Instant::now(), kind: "check".into(), id: id.clone(), secret: form["hub.secret"].clone() });
+                        let expiration = match id.as_str() {
+                            "UC_valid" => chrono::Utc::now() + chrono::Duration::days(5),
+                            "UC_near" => chrono::Utc::now() + chrono::Duration::hours(12),
+                            _ => chrono::Utc::now() - chrono::Duration::days(1),
+                        };
+                        if id == "UC_fallback" || id == "UC_bad_html" {
+                            return "<html>unknown diagnostic format</html>".to_string();
+                        }
+                        if id == "UC_valid" || id == "UC_near" || id == "UC_expired" {
+                            return format!("<dt>State</dt>\n<dd>verified</dd>\n<dt>Expiration time</dt><dd>{}</dd>", expiration.to_rfc2822());
+                        }
+                        "<dt>State</dt>\n<dd>unverified</dd><dt>Expiration time</dt><dd>n/a</dd>".to_string()
+                    }
+                }))
+                .route("/subscribe", post(move |Form(form): Form<HashMap<String, String>>| {
+                    let observed = requests.clone();
+                    async move {
+                        let id = crate::routes::websub::channel_id_from_topic(&form["hub.topic"]).unwrap();
+                        let mut record = observed.lock().unwrap();
+                        let attempt = record.hits.iter().filter(|hit| hit.id == id && hit.kind == "subscribe").count();
+                        record.hits.push(Hit { at: Instant::now(), kind: form["hub.mode"].clone(), id: id.clone(), secret: form["hub.secret"].clone() });
+                        assert_eq!(form["hub.verify"], "async");
+                        let (code, retry_after) = match id.as_str() {
+                            "UC_recover" if attempt == 0 => (503, "0".to_string()),
+                            "UC_retry_after" if attempt == 0 => (429, "65".to_string()),
+                            "UC_retry_date" if attempt == 0 => (503, (chrono::Utc::now() + chrono::Duration::seconds(90)).to_rfc2822()),
+                            "UC_down" => (503, "0".to_string()),
+                            "UC_permanent" | "UC_second" | "UC_third" | "UC_fourth" => (400, "0".to_string()),
+                            "UC_redirect" => (307, "0".to_string()),
+                            "UC_not_implemented" => (501, "0".to_string()),
+                            "UC_huge" => (503, u64::MAX.to_string()),
+                            _ => (202, "0".to_string()),
+                        };
+                        (StatusCode::from_u16(code).unwrap(), [("retry-after", retry_after), ("location", "/subscribe".into())], "stub response")
+                    }
+                }))
+                .route("/feed", get(move |Query(query): Query<HashMap<String, String>>| {
+                    let metadata = metadata.clone();
+                    async move {
+                        let id = &query["channel_id"];
+                        metadata.lock().unwrap().metadata_requests.push(id.clone());
+                        match id.as_str() {
+                            "UC_permanent" => (StatusCode::OK, format!("<atom:feed xmlns:atom=\"http://www.w3.org/2005/Atom\" xmlns:yt=\"urn:youtube\"><yt:channelId>{id}</yt:channelId><atom:entry><atom:title>video title</atom:title></atom:entry><atom:title>A&amp;B</atom:title></atom:feed>")),
+                            "UC_second" => (StatusCode::OK, format!("<feed><channelId>{id}</channelId><title>第二チャンネル</title></feed>")),
+                            _ => (StatusCode::SERVICE_UNAVAILABLE, "feed unavailable".into()),
+                        }
+                    }
+                }))
+                .route("/discord", post(move |Json(body): Json<serde_json::Value>| {
+                    let observed = warnings.clone();
+                    async move {
+                        let mut record = observed.lock().unwrap();
+                        let hits = record.hits.len();
+                        record.warnings.push((hits, body["embeds"][0]["description"].as_str().unwrap().to_owned()));
+                        StatusCode::NO_CONTENT
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let mut state = AppState::test();
+            state.hub = Arc::new(crate::websub::hub::Hub::at(format!("{base}/subscribe")));
+            state.config.discord_webhook_url = Some(format!("{base}/discord"));
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let clock_guard = tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
                 }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut state = AppState::test();
-        state.config.discord_webhook_url =
-            Some(format!("http://{}", listener.local_addr().unwrap()));
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            });
+            Self {
+                state,
+                observed,
+                server,
+                clock_guard,
+            }
+        }
 
-        tokio::join!(
-            notify_subscribe_failure(&state, "UC_first", "unavailable"),
-            notify_subscribe_failure(&state, "UC_second", "unavailable"),
+        fn channel(&self, id: &str, name: &str, lease: Option<i64>) {
+            let conn = self.state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO channels (id, title, created_at) VALUES (?1, ?2, 0)",
+                [id, name],
+            )
+            .unwrap();
+            if let Some(expires) = lease {
+                conn.execute(
+                    "INSERT INTO channel_subscriptions (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status) VALUES (?1, 'original-secret', 432000, 0, ?2, 'verified')",
+                    rusqlite::params![id, expires],
+                ).unwrap();
+            }
+        }
+
+        async fn finish<T>(&self, task: JoinHandle<T>) -> T {
+            for _ in 0..2000 {
+                // Allow real loopback IO to settle before advancing virtual seconds.
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+                if task.is_finished() {
+                    return task.await.unwrap();
+                }
+                tokio::time::advance(Duration::from_secs(1)).await;
+            }
+            task.abort();
+            panic!("operation did not complete within 2000 virtual seconds");
+        }
+
+        fn assert_paced(&self) {
+            let record = self.observed.lock().unwrap();
+            for pair in record.hits.windows(2) {
+                assert!(
+                    pair[1].at.duration_since(pair[0].at) >= Duration::from_secs(10),
+                    "burst: {pair:?}"
+                );
+            }
+            for request in record.hits.iter().filter(|hit| hit.kind == "subscribe") {
+                assert!(
+                    record.hits.iter().any(|hit| hit.id == request.id
+                        && hit.kind == "check"
+                        && hit.at <= request.at),
+                    "POST before diagnostics: {request:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_and_manual_check_hub_skip_valid_and_preserve_callback_state() {
+        let stub = Stub::new().await;
+        let far = crate::util::now_unix() + 5 * 86400;
+        for id in ["UC_valid", "UC_fallback", "UC_near", "UC_expired"] {
+            stub.channel(id, id, Some(far));
+        }
+        stub.channel("UC_new", "新チャンネル", None);
+        let state = stub.state.clone();
+        stub.finish(tokio::spawn(async move {
+            crate::sync::initial_setup::run_initial_setup(&state).await
+        }))
+        .await;
+        stub.assert_paced();
+        let posts = stub
+            .observed
+            .lock()
+            .unwrap()
+            .hits
+            .iter()
+            .filter(|h| h.kind == "subscribe")
+            .map(|h| h.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(posts, ["UC_expired", "UC_near", "UC_new"]);
+        let before = stub.observed.lock().unwrap().hits.len();
+        let state = stub.state.clone();
+        assert_eq!(
+            stub.finish(tokio::spawn(async move {
+                subscribe_all(&state, all_channel_ids(&state).unwrap()).await
+            }))
+            .await,
+            (0, 0)
         );
-        server.abort();
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(stub.observed.lock().unwrap().hits[before..]
+            .iter()
+            .all(|h| h.kind == "check"));
+        assert!(stub.observed.lock().unwrap().warnings.is_empty());
+        let conn = stub.state.db.lock().unwrap();
+        let (secret, status, expires): (String, String, i64) = conn.query_row("SELECT hub_secret, verification_status, expires_at FROM channel_subscriptions WHERE channel_id = 'UC_near'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(
+            (secret.as_str(), status.as_str(), expires),
+            ("original-secret", "verified", far)
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "pending",
+            "HTTP acceptance must not claim verification"
+        );
+        let observations = stub.observed.lock().unwrap();
+        assert!(observations
+            .hits
+            .iter()
+            .filter(|h| h.id == "UC_near")
+            .all(|h| h.secret == "original-secret"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_finish_before_one_final_named_warning_and_share_pacing() {
+        let stub = Stub::new().await;
+        let channels = [
+            ("UC_recover", "復旧"),
+            ("UC_down", "停止"),
+            ("UC_permanent", "恒久"),
+            ("UC_retry_after", "長時間待機"),
+            ("UC_retry_date", "日時待機"),
+        ];
+        for (id, name) in channels {
+            stub.channel(id, name, (id == "UC_down").then_some(123));
+        }
+        let state = stub.state.clone();
+        let unsubscribe_state = state.clone();
+        let ids = channels
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .chain(std::iter::once("UC_down".to_string()))
+            .collect();
+        let operation = tokio::spawn(async move {
+            tokio::join!(
+                subscribe_all(&state, ids),
+                unsubscribe_state.hub.request(
+                    "unsubscribe",
+                    "UC_orphan",
+                    "http://localhost/callback",
+                    "s"
+                )
+            )
+        });
+        let (counts, unsubscribed) = stub.finish(operation).await;
+        assert_eq!(counts, (3, 2));
+        let retained: (String, String, i64) = stub.state.db.lock().unwrap().query_row(
+            "SELECT hub_secret, verification_status, expires_at FROM channel_subscriptions WHERE channel_id = 'UC_down'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).unwrap();
+        assert_eq!(retained, ("original-secret".into(), "verified".into(), 123));
+        assert!(unsubscribed.is_ok());
+        stub.assert_paced();
+        let observed = stub.observed.lock().unwrap();
+        for (id, count, minimum) in [
+            ("UC_recover", 2, 30),
+            ("UC_down", 3, 30),
+            ("UC_permanent", 1, 0),
+            ("UC_retry_after", 2, 65),
+            ("UC_retry_date", 2, 89),
+        ] {
+            let hits = observed
+                .hits
+                .iter()
+                .filter(|h| h.id == id && h.kind == "subscribe")
+                .collect::<Vec<_>>();
+            assert_eq!(hits.len(), count, "{id}");
+            for pair in hits.windows(2) {
+                assert!(
+                    pair[1].at.duration_since(pair[0].at) >= Duration::from_secs(minimum),
+                    "{id}: {pair:?}"
+                );
+            }
+        }
+        assert_eq!(
+            observed.warnings,
+            vec![(
+                observed.hits.len(),
+                "停止, 恒久 の購読に失敗しました".into()
+            )]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_batches_deduplicate_pending_requests_and_four_failures_show_total() {
+        let stub = Stub::new().await;
+        for (id, name) in [
+            ("UC_new", "新規"),
+            ("UC_permanent", "A"),
+            ("UC_second", "B"),
+            ("UC_third", "C"),
+            ("UC_fourth", "D"),
+        ] {
+            stub.channel(id, name, None);
+        }
+        let state = stub.state.clone();
+        stub.finish(tokio::spawn(async move {
+            tokio::join!(
+                subscribe_all(&state, vec!["UC_new".into()]),
+                subscribe_all(&state, vec!["UC_new".into()])
+            )
+        }))
+        .await;
+        let new_posts = stub
+            .observed
+            .lock()
+            .unwrap()
+            .hits
+            .iter()
+            .filter(|h| h.id == "UC_new" && h.kind == "subscribe")
+            .count();
+        assert_eq!(new_posts, 1);
+        let state = stub.state.clone();
+        assert_eq!(
+            stub.finish(tokio::spawn(async move {
+                subscribe_all(
+                    &state,
+                    vec![
+                        "UC_permanent".into(),
+                        "UC_second".into(),
+                        "UC_third".into(),
+                        "UC_fourth".into(),
+                        "UC_fourth".into(),
+                    ],
+                )
+                .await
+            }))
+            .await,
+            (0, 4)
+        );
+        stub.assert_paced();
+        assert_eq!(
+            stub.observed.lock().unwrap().warnings[0].1,
+            "A, B, C ほか、合計4個のチャンネルで購読失敗しました"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_worker_does_not_repeat_the_startup_failure_batch() {
+        let stub = Stub::new().await;
+        stub.channel("UC_down", "停止", None);
+        let state = stub.state.clone();
+        stub.finish(tokio::spawn(async move {
+            crate::sync::initial_setup::run_initial_setup(&state).await;
+            start(state);
+        }))
+        .await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let before = stub.observed.lock().unwrap().hits.len();
+        tokio::time::advance(Duration::from_secs(23 * 60 * 60)).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(stub.observed.lock().unwrap().hits.len(), before);
+        assert_eq!(stub.observed.lock().unwrap().warnings.len(), 1);
+        assert_eq!(
+            stub.observed
+                .lock()
+                .unwrap()
+                .hits
+                .iter()
+                .filter(|hit| hit.kind == "subscribe")
+                .count(),
+            3
+        );
+        tokio::time::advance(Duration::from_secs(60 * 60)).await;
+        let observed = stub.observed.clone();
+        stub.finish(tokio::spawn(async move {
+            loop {
+                if observed.lock().unwrap().warnings.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }))
+        .await;
+        assert_eq!(
+            stub.observed
+                .lock()
+                .unwrap()
+                .hits
+                .iter()
+                .filter(|hit| hit.kind == "subscribe")
+                .count(),
+            6
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn redirects_permanent_server_errors_and_unrepresentable_retry_delays_do_not_loop() {
+        let stub = Stub::new().await;
+        let ids = ["UC_redirect", "UC_not_implemented", "UC_huge"];
+        for id in ids {
+            stub.channel(id, "失敗", None);
+        }
+        let state = stub.state.clone();
+        let counts = stub
+            .finish(tokio::spawn(async move {
+                subscribe_all(&state, ids.iter().map(|id| id.to_string()).collect()).await
+            }))
+            .await;
+        assert_eq!(counts, (0, 3));
+        stub.assert_paced();
+        let observed = stub.observed.lock().unwrap();
+        assert_eq!(
+            observed
+                .hits
+                .iter()
+                .filter(|hit| hit.kind == "subscribe")
+                .count(),
+            3
+        );
+        assert_eq!(observed.warnings.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_failures_resolve_missing_names_once_and_never_report_id_placeholders() {
+        let stub = Stub::new().await;
+        for (id, title) in [
+            ("UC_permanent", "UC_permanent"),
+            ("UC_second", ""),
+            ("UC_third", "UC_third"),
+            ("UC_fourth", "保存済みの名前"),
+        ] {
+            stub.channel(id, title, None);
+        }
+        let state = stub.state.clone();
+        assert_eq!(
+            stub.finish(tokio::spawn(async move {
+                subscribe_all(
+                    &state,
+                    vec![
+                        "UC_permanent".into(),
+                        "UC_second".into(),
+                        "UC_third".into(),
+                        "UC_fourth".into(),
+                    ],
+                )
+                .await
+            }))
+            .await,
+            (0, 4)
+        );
+        {
+            let observed = stub.observed.lock().unwrap();
+            assert_eq!(
+                observed.metadata_requests,
+                ["UC_permanent", "UC_second", "UC_third"]
+            );
+            assert_eq!(observed.warnings, vec![(observed.hits.len(), "A&B, 第二チャンネル, 名前未取得のチャンネル ほか、合計4個のチャンネルで購読失敗しました".into())]);
+        }
+        let saved = crate::routes::websub::lookup_channel_title(
+            &stub.state.db.lock().unwrap(),
+            "UC_permanent",
+        );
+        assert_eq!(saved, "A&B");
+        let state = stub.state.clone();
+        stub.finish(tokio::spawn(async move {
+            subscribe_all(&state, vec!["UC_permanent".into()]).await
+        }))
+        .await;
+        assert_eq!(
+            stub.observed.lock().unwrap().metadata_requests.len(),
+            3,
+            "stored names avoid another fetch"
+        );
+        stub.assert_paced();
     }
 
     #[test]
-    fn find_channels_missing_subscription_returns_only_unsubscribed_channels() {
-        // Regression guard for the migration bug: channels carried over from the
-        // RSS-pull era have rows in `channels` but none in `channel_subscriptions`,
-        // so they would otherwise be silently skipped by run_once forever.
-        let state = AppState::test();
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        {
-            let conn = state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES
-                   ('UC_subbed', 'Subbed', ?1),
-                   ('UC_orphan_1', 'Orphan1', ?1),
-                   ('UC_orphan_2', 'Orphan2', ?1)",
-                [&now],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO channel_subscriptions
-                   (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
-                 VALUES ('UC_subbed', 's', 432000, ?1, ?1, 'verified')",
-                [&now],
-            )
-            .unwrap();
-        }
-
-        let mut ids = find_channels_missing_subscription(&state);
-        ids.sort();
+    fn final_failure_message_boundaries() {
+        assert_eq!(failure_message(&[]), None);
         assert_eq!(
-            ids,
-            vec!["UC_orphan_1".to_string(), "UC_orphan_2".to_string()]
+            failure_message(&["A".into()]),
+            Some("A の購読に失敗しました".into())
         );
-    }
-
-    #[test]
-    fn renewal_selection_picks_only_subscriptions_within_the_threshold() {
-        // Drives the *actual* selection function used by renew_expiring_subscriptions,
-        // so RENEW_THRESHOLD_SECONDS and the `expires_at < ?` predicate are what is
-        // under test (not a re-implemented copy of the query).
-        //   UC_near expires in 12h  (< 2-day threshold) → selected
-        //   UC_far  expires in 10d  (> 2-day threshold) → skipped
-        //   UC_null has an unrepairable legacy timestamp → selected
-        let state = AppState::test();
-        let far_future = (chrono::Utc::now() + chrono::Duration::days(10)).timestamp();
-        let near_future = (chrono::Utc::now() + chrono::Duration::hours(12)).timestamp();
-        let now = chrono::Utc::now().timestamp();
-
-        {
-            let conn = state.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO channels (id, title, created_at) VALUES
-                 ('UC_far', 'F', ?1), ('UC_near', 'N', ?1), ('UC_null', 'N', ?1)",
-                [now],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO channel_subscriptions (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at)
-                 VALUES ('UC_far', 's1', 864000, ?1, ?2),
-                        ('UC_near', 's2', 86400, ?1, ?3),
-                        ('UC_null', 's3', 0, ?1, NULL)",
-                rusqlite::params![now, far_future, near_future],
-            )
-            .unwrap();
-        }
-
-        let selected = select_subscriptions_due_for_renewal(&state);
-
         assert_eq!(
-            selected,
-            vec![
-                ("UC_near".to_string(), "s2".to_string()),
-                ("UC_null".to_string(), "s3".to_string()),
-            ],
-            "Near-expiry and unknown-expiry subscriptions must be renewed"
+            failure_message(&["A".into(), "B".into(), "C".into()]),
+            Some("A, B, C の購読に失敗しました".into())
+        );
+        assert_eq!(
+            failure_message(&vec!["同名".into(); 17]),
+            Some("同名, 同名, 同名 ほか、合計17個のチャンネルで購読失敗しました".into())
         );
     }
 }

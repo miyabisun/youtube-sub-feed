@@ -20,11 +20,12 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub config: Config,
     pub http: reqwest::Client,
+    pub hub: Arc<crate::websub::hub::Hub>,
     /// Held for the duration of any catch-up work so startup, the periodic
     /// videoCount scan and the manual full sweep never duplicate quota spend.
     pub catchup_lock: Arc<tokio::sync::Mutex<()>>,
     /// Thins repeated Discord warnings independently per reason, including
-    /// WebSub push rejections and subscription failures.
+    /// WebSub push rejections.
     pub warning_cooldown: Arc<WarningCooldown>,
 }
 
@@ -45,6 +46,9 @@ impl AppState {
                 is_production: false,
             },
             http: build_http_client(),
+            hub: Arc::new(crate::websub::hub::Hub::at(
+                "http://127.0.0.1:1/subscribe".into(),
+            )),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
             warning_cooldown: Arc::new(WarningCooldown::default()),
         }

@@ -3,8 +3,7 @@ use crate::middleware::UserId;
 use crate::openapi::*;
 use crate::state::AppState;
 use crate::sync::channel_sync;
-use crate::sync::periodic_refresh::{register_new_subscription, subscribe_all};
-use crate::websub::hub;
+use crate::sync::periodic_refresh::subscribe_all;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
@@ -12,7 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Accept a full refresh, then re-subscribe and sweep in the background.
+/// Accept a full refresh, then check subscriptions and sweep in the background.
 ///
 /// The sweep can take longer than a reverse proxy request budget, while Discord
 /// already owns completion reporting. Reserving the shared sweep slot before
@@ -35,10 +34,9 @@ pub async fn refresh_all(
         ));
     };
     let channel_ids = list_channel_ids(&state)?;
-    let total = channel_ids.len();
 
     tokio::spawn(async move {
-        let (resubscribe_queued, resubscribe_failed) = subscribe_all(&state, channel_ids).await;
+        let (resubscribe_queued, _) = subscribe_all(&state, channel_ids).await;
         let outcome = crate::sync::catchup::sweep_missed_videos_with_guard(&state, guard).await;
 
         crate::notify::notify_warning(
@@ -46,10 +44,8 @@ pub async fn refresh_all(
             &state.config,
             "全件取得し直し 完了",
             &format!(
-                "{} チャンネルに再購読を要求しました (受付 {} / 失敗 {})。取り込んだ動画は {} 本です。{}{}",
-                total,
+                "必要な購読申請の受付は {} 件です (購読確認は別途)。取り込んだ動画は {} 本です。{}{}",
                 resubscribe_queued,
-                resubscribe_failed,
                 outcome.imported,
                 if outcome.failed_channels > 0 {
                     format!(
@@ -298,10 +294,7 @@ async fn sync_channels(
     let added = result.added.clone();
     let state_clone = state.clone();
     tokio::spawn(async move {
-        let callback = state_clone.config.websub_callback_url.clone();
-        for ch_id in added {
-            register_new_subscription(&state_clone, &ch_id, &callback).await;
-        }
+        subscribe_all(&state_clone, added).await;
     });
 
     // Unsubscribe orphaned channels from WebSub hub (fire and forget).
@@ -314,8 +307,10 @@ async fn sync_channels(
         tokio::spawn(async move {
             let callback = state_clone2.config.websub_callback_url.clone();
             for (ch_id, secret) in orphans {
-                if let Err(e) =
-                    hub::unsubscribe(&state_clone2.http, &ch_id, &callback, &secret).await
+                if let Err(e) = state_clone2
+                    .hub
+                    .request("unsubscribe", &ch_id, &callback, &secret)
+                    .await
                 {
                     tracing::warn!("[sync] WebSub unsubscribe failed for {}: {}", ch_id, e);
                 } else {
@@ -386,8 +381,7 @@ async fn add_channel(
     let state_clone = state.clone();
     let ch_id_clone = channel_id.clone();
     tokio::spawn(async move {
-        let callback = state_clone.config.websub_callback_url.clone();
-        register_new_subscription(&state_clone, &ch_id_clone, &callback).await;
+        subscribe_all(&state_clone, vec![ch_id_clone]).await;
     });
 
     Ok(Json(json!({"ok": true, "channel_id": channel_id})))
@@ -505,8 +499,10 @@ async fn remove_channel(
         let channel_id = id.clone();
         tokio::spawn(async move {
             let callback = state_clone.config.websub_callback_url.clone();
-            if let Err(e) =
-                hub::unsubscribe(&state_clone.http, &channel_id, &callback, &secret).await
+            if let Err(e) = state_clone
+                .hub
+                .request("unsubscribe", &channel_id, &callback, &secret)
+                .await
             {
                 tracing::warn!(
                     "[channels] WebSub unsubscribe failed for {}: {}",
@@ -1519,7 +1515,7 @@ mod tests {
     // Manual full-refresh Spec
     //
     // One action, run from the header menu when the feed looks stale: every
-    // channel is re-subscribed with the hub (no YouTube quota) and then every
+    // channel is checked for a needed Hub subscription (no YouTube quota), then every
     // uploads playlist is swept for videos WebSub never delivered (1 quota unit
     // per channel). It reports what it did so the operator does not have to
     // read the server log.
@@ -1540,10 +1536,9 @@ mod tests {
         }
 
         #[test]
-        fn every_channel_is_re_subscribed_not_just_the_unsubscribed_ones() {
-            // The startup pass deliberately skips channels that already hold a
-            // subscription row. This action exists because those rows can be
-            // present while the hub has stopped delivering, so it must cover them.
+        fn manual_refresh_checks_every_channel_not_just_missing_rows() {
+            // A DB row alone cannot establish the Hub's current state. Both
+            // startup and manual refresh must check every channel's diagnostics.
             let state = AppState::test();
             {
                 let conn = state.db.lock().unwrap();

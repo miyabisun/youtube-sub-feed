@@ -74,6 +74,56 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Read only the feed's own title, never a video's nested entry title.
+pub fn parse_channel_title(xml: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut title = None::<String>;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(element) => {
+                if depth == 0 && element.local_name().as_ref() != b"feed" {
+                    return None;
+                }
+                depth += 1;
+                if depth == 2 && element.local_name().as_ref() == b"title" {
+                    title = Some(String::new());
+                }
+            }
+            Event::End(element) => {
+                if depth == 2 && element.local_name().as_ref() == b"title" {
+                    return title
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
+                }
+                depth = depth.checked_sub(1)?;
+            }
+            Event::Text(text) if depth == 2 => {
+                if let Some(title) = title.as_mut() {
+                    title.push_str(&decode_xml_entities(&String::from_utf8_lossy(
+                        text.as_ref(),
+                    )));
+                }
+            }
+            Event::CData(text) if depth == 2 => {
+                if let Some(title) = title.as_mut() {
+                    title.push_str(&String::from_utf8_lossy(text.as_ref()));
+                }
+            }
+            Event::GeneralRef(reference) if depth == 2 => {
+                if let Some(title) = title.as_mut() {
+                    title.push_str(&decode_xml_entities(&format!(
+                        "&{};",
+                        String::from_utf8_lossy(reference.as_ref())
+                    )));
+                }
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
 pub fn parse_atom_document(xml: &str) -> ParsedAtomDocument {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -203,6 +253,21 @@ pub fn parse_deleted_video_ids(xml: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_title_is_feed_scoped_and_decodes_xml_text() {
+        let xml = r#"<a:feed xmlns:a="http://www.w3.org/2005/Atom"><a:entry><a:title>video title</a:title></a:entry><a:title> A&amp;B &#x65E5; <![CDATA[<live>]]> </a:title></a:feed>"#;
+        assert_eq!(parse_channel_title(xml).as_deref(), Some("A&B 日 <live>"));
+        assert_eq!(
+            parse_channel_title("<feed><entry><title>video only</title></entry></feed>"),
+            None
+        );
+        assert_eq!(
+            parse_channel_title("<html><title>not a feed</title></html>"),
+            None
+        );
+        assert_eq!(parse_channel_title("<feed><title></feed>"), None);
+    }
 
     // Atom Feed Parser Spec
     //

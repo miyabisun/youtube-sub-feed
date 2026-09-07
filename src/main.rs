@@ -20,6 +20,7 @@ async fn main() {
         db: Arc::new(Mutex::new(conn)),
         config: config.clone(),
         http,
+        hub: Arc::new(youtube_sub_feed::websub::hub::Hub::default()),
         catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
         warning_cooldown: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),
     };
