@@ -36,6 +36,7 @@ docker run -d \
   --name youtube-sub-feed \
   -p 3000:3000 \
   -v /path/to/data:/data \
+  -e NODE_ENV=production \
   -e DATABASE_PATH=/data/feed.db \
   -e GIS_CLIENT_ID=xxx.apps.googleusercontent.com \
   -e YOUTUBE_API_KEY=AIzaXXXX \
@@ -121,16 +122,9 @@ server {
 
 ## 環境変数
 
-| 変数 | 説明 |
-|------|------|
-| `PORT` | サーバーポート (デフォルト: 3000) |
-| `DATABASE_PATH` | SQLite DBファイルパス |
-| `GIS_CLIENT_ID` | Google Identity Services クライアント ID（ブラウザ側チャンネル同期に使用） |
-| `YOUTUBE_API_KEY` | YouTube Data API v3 の API キー（動画詳細と取りこぼし検出に使用、省略可） |
-| `CATCHUP_INTERVAL_MINUTES` | `videoCount` を確認する間隔。未設定・空・0 は定期確認を無効化 |
-| `WEBSUB_CALLBACK_URL` | WebSub 通知受信エンドポイント（例: `https://feed.sis.jp/api/websub/callback`）。公開 HTTPS URL 必須 |
-| `PUBLIC_BASE_URL` | JSON Feedなどのフィード内リンクに使う公開オリジン（例: `https://feed.sis.jp`） |
-| `DISCORD_WEBHOOK_URL` | Discord Webhook URL（省略可） |
+一覧と不正値の扱いは [README.md](../README.md#environment-variables) を正本とします。
+本番では `NODE_ENV=production` を明示してください。Dockerfile や release build は
+この値を設定しません。上記起動例では `-e NODE_ENV=production` で渡します。
 
 ## 削除された環境変数（旧 Google OAuth）
 

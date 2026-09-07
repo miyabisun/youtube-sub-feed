@@ -61,7 +61,7 @@ PUBLIC_BASE_URL=https://youtube.example.com
 # Production
 cd client && npm install && npx vite build && cd ..
 cargo build --release
-./target/release/youtube-sub-feed
+NODE_ENV=production ./target/release/youtube-sub-feed
 ```
 
 Open `http://localhost:3000`. In development, the first DB user is automatically authenticated (devbypass). In production, Cloudflare Access handles authentication.
@@ -91,6 +91,7 @@ docker run -d \
   -p 3000:3000 \
   -v ytfeed-data:/app \
   --env-file .env \
+  -e NODE_ENV=production \
   youtube-sub-feed
 ```
 
@@ -105,16 +106,51 @@ For production, place Cloudflare Access in front of the app. See `docs/deploy.md
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | Server port |
-| `DATABASE_PATH` | `./feed.db` | SQLite database file path |
-| `GIS_CLIENT_ID` | — | Google Identity Services client ID (for channel sync button; public value, no secret required) |
-| `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub notification endpoint (production requires a public HTTPS URL) |
-| `PUBLIC_BASE_URL` | Request origin | Canonical public origin used by feed links (for example, `https://youtube.example.com`) |
-| `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL (optional) |
-| `YOUTUBE_API_KEY` | — | YouTube Data API key for video enrichment and catch-up scans |
-| `CATCHUP_INTERVAL_MINUTES` | disabled | Interval for batched `videoCount` checks; only increased channels are swept |
+The server loads `.env` at startup; existing process environment values take precedence.
+All variables can be omitted for startup. Feature-specific requirements and application defaults
+are listed below; a release build does not automatically set `NODE_ENV=production`.
+
+| Variable | Required | Unset default | Purpose and invalid/empty values |
+| --- | --- | --- | --- |
+| `PORT` | No | `3000` | Listen port. Values that cannot parse as `u16` (including empty, negative, or above 65535) fall back to 3000. `0` lets the OS choose a port; bind failure stops startup. |
+| `DATABASE_PATH` | No | `./feed.db` | SQLite file. Its parent directory must exist and be writable; failure to open the DB stops startup. Empty is passed directly to SQLite. |
+| `GIS_CLIENT_ID` | For browser channel sync unless supplied at build time | Empty (use build-time fallback) | Public Google Identity Services client ID, injected at runtime. Empty falls back to the bundled `VITE_GIS_CLIENT_ID`; sync is unavailable only when both are empty. Nonempty values take precedence without client-ID validation and may fail at Google authorization. |
+| `WEBSUB_CALLBACK_URL` | Public HTTPS URL for WebSub delivery | `http://localhost:3000/api/websub/callback` | Callback supplied to the hub. The default does not follow `PORT`. Empty or malformed values are passed through without URL validation and may cause subscription or delivery failures. |
+| `PUBLIC_BASE_URL` | No | Request origin | Public origin for feed links, e.g. `https://youtube.example.com`. Surrounding whitespace and trailing `/` are removed; empty falls back to the request. Other values are used without URL validation and can produce malformed links. |
+| `DISCORD_WEBHOOK_URL` | For Discord notifications | Disabled | Empty disables notifications; other values are used without trimming or URL validation. Invalid values fail when sending a notification. |
+| `YOUTUBE_API_KEY` | For video enrichment and catch-up scans | Disabled | YouTube Data API key. Surrounding whitespace is removed; empty disables those features. Other values are not validated at startup; invalid keys fail at the API. WebSub push can still work without a key. |
+| `CATCHUP_INTERVAL_MINUTES` | For periodic catch-up checks | Disabled | Positive integer minutes between `videoCount` checks. Whitespace is trimmed; empty, zero, negative, unparseable, or values exceeding `u64::MAX / 60` disable periodic checks. Requires `YOUTUBE_API_KEY`; startup and manual full sweeps remain available when periodic checks are disabled. |
+| `NODE_ENV` | Set `production` for production user handling | Development mode | Exactly `production` disables the first-DB-user fallback for requests without the Access email header and keeps cached SPA HTML. Every other value, including empty or misspelled values, enables development behavior. This does not configure Cloudflare Access itself. |
+| `RUST_LOG` | No | `info` | Log level or target filter, e.g. `debug` or `youtube_sub_feed=debug`. Empty selects `error`. Invalid filter syntax prints a warning to stderr and disables logs. `LOG_LEVEL` is not read. |
+
+Without `PUBLIC_BASE_URL`, feed links use `X-Forwarded-Proto` (default `http`),
+then `X-Forwarded-Host` or `Host` (default `localhost:<PORT>`).
+The listener binds to `0.0.0.0`. Dockerfile sets only `PORT=3000`, not production mode.
+Set `NODE_ENV=production` in the server environment (for example, `docker run -e NODE_ENV=production`).
+See [deployment instructions](docs/deploy.md) for provider configuration and the
+[home-server README](https://github.com/miyabisun/home-server/blob/main/README.md) and
+[sis/compose.yaml](https://github.com/miyabisun/home-server/blob/main/sis/compose.yaml)
+for shared environment names, mounts, and explicitly injected values. For example,
+`YOUTUBE_GIS_CLIENT_ID` and `YOUTUBE_DISCORD_WEBHOOK_URL` are Compose identifiers;
+the application reads `GIS_CLIENT_ID` and `DISCORD_WEBHOOK_URL`. The current Compose
+file does not set `NODE_ENV`; production mode must be supplied by the deployment environment.
+
+Old server-side OAuth variables `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and
+`GOOGLE_REDIRECT_URI` are no longer read. Browser sync uses `GIS_CLIENT_ID`;
+there is no replacement server-side client secret or redirect variable.
+
+### Frontend build setting
+
+`VITE_GIS_CLIENT_ID` is optional and is read by Vite when building the frontend,
+not by the running server. It defaults to empty and embeds a public GIS client ID
+as the fallback when runtime `GIS_CLIENT_ID` is empty. There is no client-ID
+validation; an invalid value may fail at Google authorization. Changing this
+fallback requires rebuilding the frontend. A nonempty runtime `GIS_CLIENT_ID`
+overrides it without rebuilding.
+
+Sources: [configuration](src/config.rs), [startup](src/main.rs),
+[user handling](src/middleware.rs), [SPA cache](src/spa.rs), [feed URLs](src/routes/news.rs),
+[frontend configuration](client/src/lib/config.js).
 
 ## Commands
 

@@ -61,7 +61,7 @@ PUBLIC_BASE_URL=https://youtube.example.com
 # 本番
 cd client && npm install && npx vite build && cd ..
 cargo build --release
-./target/release/youtube-sub-feed
+NODE_ENV=production ./target/release/youtube-sub-feed
 ```
 
 `http://localhost:3000` を開きます。開発環境では最初の DB ユーザーが自動的に認証されます（devbypass）。本番では Cloudflare Access が入口を担当します。
@@ -91,6 +91,7 @@ docker run -d \
   -p 3000:3000 \
   -v ytfeed-data:/app \
   --env-file .env \
+  -e NODE_ENV=production \
   youtube-sub-feed
 ```
 
@@ -105,14 +106,15 @@ docker run -d \
 
 ## 環境変数
 
-| 変数 | デフォルト値 | 説明 |
-|------|-------------|------|
-| `PORT` | `3000` | サーバーのポート番号 |
-| `DATABASE_PATH` | `./feed.db` | SQLite データベースファイルのパス |
-| `GIS_CLIENT_ID` | — | Google Identity Services クライアント ID（チャンネル同期ボタン用。公開値、シークレット不要） |
-| `WEBSUB_CALLBACK_URL` | `http://localhost:3000/api/websub/callback` | WebSub 通知受信エンドポイント（本番は公開 HTTPS URL 必須） |
-| `PUBLIC_BASE_URL` | リクエスト元 | フィード内リンクに使う公開オリジン（例: `https://youtube.example.com`） |
-| `DISCORD_WEBHOOK_URL` | — | Discord Webhook URL（オプション） |
+現行名・必須/任意・既定値・不正値の扱いは
+[README.md の Environment Variables](README.md#environment-variables) を正本とします。
+`PORT`、`DATABASE_PATH`、`GIS_CLIENT_ID`、`WEBSUB_CALLBACK_URL`、`PUBLIC_BASE_URL`、
+`DISCORD_WEBHOOK_URL`、`YOUTUBE_API_KEY`、`CATCHUP_INTERVAL_MINUTES`、`NODE_ENV`、`RUST_LOG` を扱います。
+
+本番では `NODE_ENV=production` をサーバーの環境に明示してください。release build や
+Docker イメージだけでは本番モードにならず、未設定・誤記時は開発用のユーザー fallback が有効です。
+旧 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` は参照しません。
+ブラウザ側の同期には `GIS_CLIENT_ID` を使い、サーバー側 secret や redirect の代替変数はありません。
 
 ## コマンド
 
