@@ -1,127 +1,88 @@
 use crate::notify::notify_warning;
-use crate::routes::websub::{lookup_channel_title, partition_new_entries};
+use crate::routes::websub::partition_new_entries;
 use crate::state::AppState;
 use crate::youtube::derive_upload_playlist_id;
 use crate::youtube::videos::{
-    fetch_channel_video_counts, fetch_playlist_items, ChannelVideoCount, FetchError,
+    fetch_channel_video_counts, fetch_playlist_items, FetchError, PlaylistPage,
 };
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::OwnedMutexGuard;
-use tokio::task::JoinSet;
 
-const SWEEP_CONCURRENCY: usize = 10;
+const CHANGED_PAGES: usize = 4;
+const REPAIR_PAGES: usize = 2;
+const BACKFILL_PAGES: usize = 2;
+const REPAIR_SECONDS: i64 = 86400;
+const BACKFILL_SECONDS: i64 = 7 * 86400;
 
 #[derive(Clone, Debug)]
 struct ChannelTarget {
     channel_id: String,
     playlist_id: String,
     previous_video_count: Option<u64>,
+    page_token: Option<String>,
+    repair_after: i64,
+    head_attempted_at: i64,
+    backfill_after: i64,
+    backfill_attempted_at: i64,
 }
 
-#[derive(Clone, Debug)]
-struct SweepTarget {
-    channel_id: String,
-    playlist_id: String,
-    observed_video_count: Option<u64>,
+fn channel_targets(conn: &Connection) -> rusqlite::Result<Vec<ChannelTarget>> {
+    conn.execute(
+        "INSERT OR IGNORE INTO channel_catchup (channel_id) SELECT id FROM channels",
+        [],
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.upload_playlist_id, c.video_count, p.page_token,
+                p.repair_after, p.head_attempted_at, p.backfill_after, p.backfill_attempted_at
+         FROM channels c JOIN channel_catchup p ON p.channel_id = c.id ORDER BY c.id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let channel_id: String = row.get(0)?;
+        let stored: Option<String> = row.get(1)?;
+        let count: Option<i64> = row.get(2)?;
+        Ok(ChannelTarget {
+            playlist_id: stored.unwrap_or_else(|| derive_upload_playlist_id(&channel_id)),
+            channel_id,
+            previous_video_count: count.and_then(|n| n.try_into().ok()),
+            page_token: row.get(3)?,
+            repair_after: row.get(4)?,
+            head_attempted_at: row.get(5)?,
+            backfill_after: row.get(6)?,
+            backfill_attempted_at: row.get(7)?,
+        })
+    })?;
+    rows.collect()
 }
 
-/// Every channel paired with the playlist that holds its uploads.
-///
-/// `channels.upload_playlist_id` is only populated for channels added through
-/// the browser sync, so rows carrying NULL fall back to the "UC" → "UU"
-/// derivation rather than dropping out of a full sweep.
-pub(crate) fn channels_to_sweep(conn: &Connection) -> Vec<(String, String)> {
-    channel_targets(conn)
-        .into_iter()
-        .map(|target| (target.channel_id, target.playlist_id))
-        .collect()
+fn video_count_changed(previous: Option<u64>, current: u64) -> bool {
+    previous != Some(current)
 }
 
-fn channel_targets(conn: &Connection) -> Vec<ChannelTarget> {
-    let result = match conn
-        .prepare("SELECT id, upload_playlist_id, video_count FROM channels ORDER BY id")
-    {
-        Ok(mut stmt) => stmt
-            .query_map([], |row| {
-                let channel_id: String = row.get(0)?;
-                let stored: Option<String> = row.get(1)?;
-                let previous_video_count: Option<i64> = row.get(2)?;
-                let playlist_id = stored.unwrap_or_else(|| derive_upload_playlist_id(&channel_id));
-                Ok(ChannelTarget {
-                    channel_id,
-                    playlist_id,
-                    previous_video_count: previous_video_count
-                        .and_then(|count| count.try_into().ok()),
-                })
-            })
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!("[catchup] channel query failed: {}", e);
-            Vec::new()
-        }
-    };
-    result
-}
-
-fn video_count_increased(previous: Option<u64>, current: u64) -> bool {
-    previous.is_some_and(|previous| current > previous)
-}
-
-fn update_video_count(conn: &Connection, channel_id: &str, video_count: u64) -> bool {
-    let Ok(video_count) = i64::try_from(video_count) else {
-        tracing::warn!(
-            "[catchup] videoCount for {} exceeds SQLite INTEGER range",
-            channel_id
-        );
-        return false;
-    };
-    match conn.execute(
-        "UPDATE channels SET video_count = ?1 WHERE id = ?2",
-        rusqlite::params![video_count, channel_id],
-    ) {
-        Ok(1) => true,
-        Ok(_) => {
-            tracing::warn!("[catchup] could not persist videoCount for {}", channel_id);
-            false
-        }
-        Err(e) => {
-            tracing::warn!(
-                "[catchup] persisting videoCount for {} failed: {}",
-                channel_id,
-                e
-            );
-            false
-        }
-    }
-}
-
-/// What one sweep did, for the caller to report on.
 #[derive(Debug, Default, PartialEq)]
 pub struct SweepOutcome {
     pub imported: usize,
     pub quota_exhausted: bool,
     pub failed_channels: usize,
+    pub head_pages: usize,
+    pub repair_pages: usize,
+    pub backfill_pages: usize,
+    pub deferred: bool,
 }
 
-/// Spawn the periodic count scan, if an interval is configured.
-///
-/// channels.list batches 50 IDs per quota unit. Only channels whose videoCount
-/// increased spend the additional playlistItems.list unit. Imports are the
-/// normal outcome here rather than news — YouTube's hub has largely stopped
-/// pushing — so they are logged and not announced. Only the anomalies
-/// `report_anomalies` covers reach Discord.
+/// Initial and periodic scans use the same bounded queues; restarting does not
+/// reset the repair schedule, playlist cursor, API budget or quota pause.
 pub fn start(state: AppState) {
-    let Some(minutes) = state.config.catchup_interval_minutes else {
-        return;
-    };
-
     tokio::spawn(async move {
-        let interval = Duration::from_secs(minutes * 60);
+        let Some(minutes) = state.config.catchup_interval_minutes else {
+            sweep_changed_videos(&state).await;
+            return;
+        };
+        let mut interval = tokio::time::interval(Duration::from_secs(minutes * 60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tokio::time::sleep(interval).await;
+            interval.tick().await;
             sweep_changed_videos(&state).await;
         }
     });
@@ -131,12 +92,10 @@ pub(crate) fn try_acquire_sweep(state: &AppState) -> Option<OwnedMutexGuard<()>>
     state.catchup_lock.clone().try_lock_owned().ok()
 }
 
-/// Full sweep used at startup and by the manual action.
+/// Manual refresh marks all heads due, while preserving any deeper cursor.
+/// Work beyond this bounded pass is drained by subsequent periodic scans.
 pub async fn sweep_missed_videos(state: &AppState) -> Option<SweepOutcome> {
-    let Some(guard) = try_acquire_sweep(state) else {
-        tracing::warn!("[catchup] a sweep is already running, refusing to start another");
-        return None;
-    };
+    let guard = try_acquire_sweep(state)?;
     Some(sweep_missed_videos_with_guard(state, guard).await)
 }
 
@@ -144,369 +103,265 @@ pub(crate) async fn sweep_missed_videos_with_guard(
     state: &AppState,
     _guard: OwnedMutexGuard<()>,
 ) -> SweepOutcome {
-    let outcome = run_full_sweep(state).await;
+    let outcome = run_sweep(state, true).await;
     report_anomalies(state, &outcome).await;
     outcome
 }
 
 async fn sweep_changed_videos(state: &AppState) -> Option<SweepOutcome> {
     let Some(_guard) = try_acquire_sweep(state) else {
-        tracing::warn!("[catchup] a sweep is already running, skipping the periodic scan");
+        tracing::info!("[catchup] scan skipped: another sweep owns the slot");
         return None;
     };
-    let outcome = run_changed_sweep(state).await;
+    let outcome = run_sweep(state, false).await;
     report_anomalies(state, &outcome).await;
     Some(outcome)
 }
 
-async fn run_full_sweep(state: &AppState) -> SweepOutcome {
-    let targets = {
-        let conn = state.db.lock().unwrap();
-        channels_to_sweep(&conn)
-            .into_iter()
-            .map(|(channel_id, playlist_id)| SweepTarget {
-                channel_id,
-                playlist_id,
-                observed_video_count: None,
-            })
-            .collect::<Vec<_>>()
-    };
-    if targets.is_empty() {
-        return SweepOutcome::default();
-    }
-
-    let Some(api_key) = state.config.youtube_api_key.clone() else {
-        tracing::warn!("[catchup] YOUTUBE_API_KEY not set, cannot sweep");
-        return SweepOutcome {
-            failed_channels: targets.len(),
-            ..SweepOutcome::default()
-        };
-    };
-
-    tracing::info!(
-        "[catchup] Sweeping {} channel(s) with concurrency {}",
-        targets.len(),
-        SWEEP_CONCURRENCY
-    );
-    let outcome = run_targets(state, &api_key, targets).await;
-    log_completion(&outcome);
-    outcome
-}
-
-async fn run_changed_sweep(state: &AppState) -> SweepOutcome {
-    let targets = {
-        let conn = state.db.lock().unwrap();
-        channel_targets(&conn)
-    };
-    if targets.is_empty() {
-        return SweepOutcome::default();
-    }
-
-    let Some(api_key) = state.config.youtube_api_key.clone() else {
-        tracing::warn!("[catchup] YOUTUBE_API_KEY not set, cannot scan videoCount");
-        return SweepOutcome {
-            failed_channels: targets.len(),
-            ..SweepOutcome::default()
-        };
-    };
-
-    tracing::info!(
-        "[catchup] Checking videoCount for {} channel(s) in {} batch(es)",
-        targets.len(),
-        targets.len().div_ceil(50)
-    );
-
-    let mut selected = Vec::new();
-    let mut failed_channels = 0usize;
-    for batch in targets.chunks(50) {
-        let channel_ids = batch
-            .iter()
-            .map(|target| target.channel_id.clone())
-            .collect::<Vec<_>>();
-        let counts = match fetch_channel_video_counts(&state.http, &api_key, &channel_ids).await {
-            Ok(counts) => counts,
-            Err(FetchError::QuotaExceeded) => {
-                return SweepOutcome {
-                    quota_exhausted: true,
-                    failed_channels,
-                    ..SweepOutcome::default()
-                };
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[catchup] videoCount batch of {} channel(s) failed: {}",
-                    batch.len(),
-                    e
-                );
-                failed_channels += batch.len();
-                continue;
-            }
-        };
-
-        let counts = counts
-            .into_iter()
-            .map(|count| (count.channel_id.clone(), count))
-            .collect::<HashMap<String, ChannelVideoCount>>();
-        let conn = state.db.lock().unwrap();
-        for target in batch {
-            let Some(count) = counts.get(&target.channel_id) else {
-                tracing::warn!(
-                    "[catchup] channels.list omitted {} from its response",
-                    target.channel_id
-                );
-                failed_channels += 1;
-                continue;
-            };
-            if video_count_increased(target.previous_video_count, count.video_count) {
-                selected.push(SweepTarget {
-                    channel_id: target.channel_id.clone(),
-                    playlist_id: target.playlist_id.clone(),
-                    observed_video_count: Some(count.video_count),
-                });
-            } else if target.previous_video_count != Some(count.video_count)
-                && !update_video_count(&conn, &target.channel_id, count.video_count)
-            {
-                failed_channels += 1;
-            }
-        }
-    }
-
-    tracing::info!(
-        "[catchup] videoCount increased for {} channel(s)",
-        selected.len()
-    );
-    let mut outcome = run_targets(state, &api_key, selected).await;
-    outcome.failed_channels += failed_channels;
-    log_completion(&outcome);
-    outcome
-}
-
-async fn run_targets(state: &AppState, api_key: &str, targets: Vec<SweepTarget>) -> SweepOutcome {
-    let mut pending = targets.into_iter();
-    let mut tasks = JoinSet::new();
-    for _ in 0..SWEEP_CONCURRENCY {
-        let Some(target) = pending.next() else {
-            break;
-        };
-        spawn_channel_sweep(&mut tasks, state.clone(), api_key.to_string(), target);
-    }
-
+async fn run_sweep(state: &AppState, force: bool) -> SweepOutcome {
     let mut outcome = SweepOutcome::default();
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(channel) => {
-                outcome.imported += channel.imported;
-                outcome.failed_channels += usize::from(channel.failed);
-                outcome.quota_exhausted |= channel.quota_exhausted;
-            }
-            Err(e) => {
-                tracing::warn!("[catchup] channel task failed to join: {}", e);
-                outcome.failed_channels += 1;
-            }
-        }
-
-        if !outcome.quota_exhausted {
-            if let Some(target) = pending.next() {
-                spawn_channel_sweep(&mut tasks, state.clone(), api_key.to_string(), target);
-            }
+    tracing::info!(force, "[catchup] Scan started");
+    if state.config.youtube_api_key.is_none() {
+        tracing::warn!("[catchup] YOUTUBE_API_KEY not set");
+        return outcome;
+    }
+    if let Err(error) = scan_channels(state, force, &mut outcome).await {
+        record_error(&mut outcome, &error);
+    }
+    if !outcome.quota_exhausted && !outcome.deferred {
+        if let Err(error) = crate::sync::video_enrich::backfill_missing_details(state).await {
+            record_error(&mut outcome, &error);
         }
     }
-
+    tracing::info!(
+        imported = outcome.imported,
+        failed_channels = outcome.failed_channels,
+        head_pages = outcome.head_pages,
+        repair_pages = outcome.repair_pages,
+        backfill_pages = outcome.backfill_pages,
+        quota_exhausted = outcome.quota_exhausted,
+        deferred = outcome.deferred,
+        "[catchup] Scan complete"
+    );
     outcome
 }
 
-fn spawn_channel_sweep(
-    tasks: &mut JoinSet<ChannelSweepOutcome>,
-    state: AppState,
-    api_key: String,
-    target: SweepTarget,
-) {
-    tasks.spawn(async move { sweep_channel(&state, &api_key, target).await });
-}
-
-#[derive(Default)]
-struct ChannelSweepOutcome {
-    imported: usize,
-    quota_exhausted: bool,
-    failed: bool,
-}
-
-async fn sweep_channel(
+async fn scan_channels(
     state: &AppState,
-    api_key: &str,
-    target: SweepTarget,
-) -> ChannelSweepOutcome {
-    let entries = match fetch_playlist_items(&state.http, api_key, &target.playlist_id).await {
-        Ok(entries) => entries,
-        Err(FetchError::QuotaExceeded) => {
-            return ChannelSweepOutcome {
-                quota_exhausted: true,
-                ..ChannelSweepOutcome::default()
-            };
-        }
-        Err(e) => {
-            tracing::warn!("[catchup] listing {} failed: {}", target.channel_id, e);
-            return ChannelSweepOutcome {
-                failed: true,
-                ..ChannelSweepOutcome::default()
-            };
-        }
-    };
-
-    let (new_video_ids, count_update_failed) = {
+    force: bool,
+    outcome: &mut SweepOutcome,
+) -> Result<(), FetchError> {
+    let now = state.youtube_api.now();
+    let mut targets = {
         let conn = state.db.lock().unwrap();
-        let channel_title = lookup_channel_title(&conn, &target.channel_id);
-        let newly_inserted =
-            partition_new_entries(&conn, &target.channel_id, &entries, crate::util::now_unix());
-        for entry in &newly_inserted {
-            tracing::info!(
-                "[catchup] imported video: {} ({}) — \"{}\" https://www.youtube.com/watch?v={}",
-                channel_title,
-                target.channel_id,
-                entry.title,
-                entry.video_id
-            );
+        let targets = channel_targets(&conn)?;
+        if force {
+            conn.execute("UPDATE channel_catchup SET repair_after = 0", [])?;
         }
-        let update_failed = target
-            .observed_video_count
-            .is_some_and(|count| !update_video_count(&conn, &target.channel_id, count));
-        (
-            newly_inserted
-                .iter()
-                .map(|entry| entry.video_id.clone())
-                .collect::<Vec<_>>(),
-            update_failed,
-        )
+        targets
     };
-
-    let imported = new_video_ids.len();
-    if new_video_ids.is_empty() {
-        return ChannelSweepOutcome {
-            imported,
-            failed: count_update_failed,
-            ..ChannelSweepOutcome::default()
-        };
+    if force {
+        for target in &mut targets {
+            target.repair_after = 0;
+        }
     }
-
-    match crate::sync::video_enrich::enrich_videos(state, &target.channel_id, &new_video_ids).await
-    {
-        Ok(()) => ChannelSweepOutcome {
-            imported,
-            failed: count_update_failed,
-            ..ChannelSweepOutcome::default()
-        },
-        Err(FetchError::QuotaExceeded) => ChannelSweepOutcome {
-            imported,
-            quota_exhausted: true,
-            failed: count_update_failed,
-        },
-        Err(e) => {
-            tracing::warn!(
-                "[catchup] enrichment failed for {}: {}",
-                target.channel_id,
-                e
-            );
-            ChannelSweepOutcome {
-                imported,
-                failed: true,
-                ..ChannelSweepOutcome::default()
+    let mut counts = HashMap::new();
+    for batch in targets.chunks(50) {
+        let ids = batch
+            .iter()
+            .map(|t| t.channel_id.clone())
+            .collect::<Vec<_>>();
+        match fetch_channel_video_counts(state, &ids).await {
+            Ok(result) => {
+                for count in result {
+                    counts.insert(count.channel_id, count.video_count);
+                }
+                outcome.failed_channels +=
+                    ids.iter().filter(|id| !counts.contains_key(*id)).count();
+            }
+            Err(
+                error @ (FetchError::QuotaExceeded | FetchError::Deferred | FetchError::Database),
+            ) => return Err(error),
+            Err(error) => {
+                tracing::warn!(%error, channels = ids.len(), "[catchup] statistics batch failed");
+                outcome.failed_channels += ids.len();
             }
         }
     }
+
+    targets.sort_by_key(|t| (t.head_attempted_at, t.channel_id.clone()));
+    let changed = targets
+        .iter()
+        .filter(|t| {
+            counts
+                .get(&t.channel_id)
+                .is_some_and(|count| video_count_changed(t.previous_video_count, *count))
+        })
+        .take(CHANGED_PAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut used = changed
+        .iter()
+        .map(|t| t.channel_id.clone())
+        .collect::<HashSet<_>>();
+    let repairs = targets
+        .iter()
+        .filter(|t| t.repair_after <= now && !used.contains(&t.channel_id))
+        .take(REPAIR_PAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    used.extend(repairs.iter().map(|t| t.channel_id.clone()));
+    targets.sort_by_key(|t| (t.backfill_attempted_at, t.channel_id.clone()));
+    // Busy heads must not starve an active history cursor. A nonempty token
+    // identifies a distinct page, so this does not duplicate the head request.
+    let backfills = targets
+        .into_iter()
+        .filter(|t| {
+            t.backfill_after <= now && (!used.contains(&t.channel_id) || t.page_token.is_some())
+        })
+        .take(BACKFILL_PAGES)
+        .collect::<Vec<_>>();
+
+    let mut new_ids = Vec::new();
+    for (kind, selected) in [
+        ("changed", changed),
+        ("repair", repairs),
+        ("backfill", backfills),
+    ] {
+        for target in selected {
+            // Persist attempts before IO so a bad channel rotates behind healthy
+            // channels, including after a restart. Successful progress is separate.
+            let head = kind != "backfill" || target.page_token.is_none();
+            state.db.lock().unwrap().execute(
+                if kind == "backfill" {
+                    "UPDATE channel_catchup SET backfill_attempted_at = ?1 WHERE channel_id = ?2"
+                } else {
+                    "UPDATE channel_catchup SET head_attempted_at = ?1 WHERE channel_id = ?2"
+                },
+                rusqlite::params![now, target.channel_id],
+            )?;
+            match kind {
+                "changed" => outcome.head_pages += 1,
+                "repair" => outcome.repair_pages += 1,
+                _ => outcome.backfill_pages += 1,
+            }
+            let token = if head {
+                None
+            } else {
+                target.page_token.as_deref()
+            };
+            let page = fetch_playlist_items(state, &target.playlist_id, token).await;
+            let saved = match page {
+                Ok(page) => save_page(
+                    state,
+                    &target,
+                    page,
+                    head,
+                    counts.get(&target.channel_id).copied(),
+                    now,
+                ),
+                Err(error) => Err(error),
+            };
+            match saved {
+                Ok(ids) => {
+                    tracing::info!(
+                        channel_id = target.channel_id,
+                        kind,
+                        imported = ids.len(),
+                        "[catchup] page saved"
+                    );
+                    outcome.imported += ids.len();
+                    new_ids.extend(ids);
+                }
+                Err(error @ (FetchError::QuotaExceeded | FetchError::Deferred)) => {
+                    return Err(error)
+                }
+                Err(error) => {
+                    if error == FetchError::InvalidPageToken && !head {
+                        state.db.lock().unwrap().execute(
+                            "UPDATE channel_catchup SET page_token = NULL, backfill_after = 0 WHERE channel_id = ?1", [&target.channel_id],
+                        )?;
+                    }
+                    tracing::warn!(channel_id = target.channel_id, kind, %error, "[catchup] page failed; progress retained");
+                    outcome.failed_channels += 1;
+                }
+            }
+        }
+    }
+    crate::sync::video_enrich::enrich_videos(state, &new_ids).await?;
+    Ok(())
 }
 
-fn log_completion(outcome: &SweepOutcome) {
-    tracing::info!(
-        "[catchup] Sweep complete: {} video(s) imported, {} channel(s) failed",
-        outcome.imported,
-        outcome.failed_channels
-    );
+fn save_page(
+    state: &AppState,
+    target: &ChannelTarget,
+    page: PlaylistPage,
+    head: bool,
+    observed_count: Option<u64>,
+    now: i64,
+) -> Result<Vec<String>, FetchError> {
+    let conn = state.db.lock().unwrap();
+    let tx = conn.unchecked_transaction()?;
+    let entries = partition_new_entries(&tx, &target.channel_id, &page.entries, now)?;
+    let ids = entries.iter().map(|entry| entry.video_id.clone()).collect();
+    if head {
+        if let Some(count) = observed_count {
+            let count = i64::try_from(count).map_err(|_| FetchError::MalformedResponse)?;
+            tx.execute(
+                "UPDATE channels SET video_count = ?1 WHERE id = ?2",
+                rusqlite::params![count, target.channel_id],
+            )?;
+        }
+        tx.execute("UPDATE channel_catchup SET repair_after = ?1, head_attempted_at = ?2 WHERE channel_id = ?3",
+            rusqlite::params![now + REPAIR_SECONDS, now, target.channel_id])?;
+    }
+    // A head refresh must not rewind an active history cursor. Its independent
+    // daily deadline still repairs replacements while a large history drains.
+    if !head || (target.page_token.is_none() && target.backfill_after <= now) {
+        tx.execute(
+            "UPDATE channel_catchup SET page_token = ?1, backfill_after = ?2, backfill_attempted_at = ?3 WHERE channel_id = ?4",
+            rusqlite::params![page.next_page, if page.next_page.is_some() { 0 } else { now + BACKFILL_SECONDS }, now, target.channel_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(ids)
 }
 
-/// Report states that mean a sweep did not do its job. Called for every trigger.
+fn record_error(outcome: &mut SweepOutcome, error: &FetchError) {
+    match error {
+        FetchError::QuotaExceeded => outcome.quota_exhausted = true,
+        FetchError::Deferred => outcome.deferred = true,
+        _ => outcome.failed_channels += 1,
+    }
+    tracing::warn!(%error, "[catchup] scan incomplete; next tick resumes");
+}
+
 async fn report_anomalies(state: &AppState, outcome: &SweepOutcome) {
-    if outcome.quota_exhausted {
-        tracing::warn!("[catchup] YouTube API quota exhausted, abandoned the rest of the sweep");
-        notify_warning(
-            &state.http,
-            &state.config,
-            "YouTube API クォータ枯渇",
-            &format!(
-                "取りこぼしチェックの途中でクォータを使い切りました。{} 本を取り込んだ時点で残りのチャンネルを中断しています。次の太平洋時間 0 時まで復旧しません。",
-                outcome.imported
-            ),
-        )
-        .await;
+    let (reason, title) = if outcome.quota_exhausted {
+        ("catchup quota", "YouTube API クォータ休止")
+    } else if outcome.failed_channels > 0 {
+        ("catchup failure", "取りこぼしチェックの一部が失敗")
+    } else {
+        return;
+    };
+    if !state
+        .warning_cooldown
+        .admit(reason, std::time::Instant::now())
+    {
         return;
     }
-
-    if outcome.failed_channels > 0 {
-        notify_warning(
-            &state.http,
-            &state.config,
-            "取りこぼしチェックの一部が失敗",
-            &format!(
-                "{} チャンネルを処理できませんでした。取り込めたのは {} 本です。",
-                outcome.failed_channels, outcome.imported
-            ),
-        )
-        .await;
-    }
+    notify_warning(
+        &state.http,
+        &state.config,
+        title,
+        &format!(
+            "取り込み {} 本、失敗 {} 件。未完了の進捗は保持され、API休止期限後の巡回で再開します。",
+            outcome.imported, outcome.failed_channels
+        ),
+    )
+    .await;
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::AppState;
-
-    // Catch-up Spec
-    //
-    // Startup and manual runs sweep every uploads playlist. The periodic run
-    // first checks channels.list statistics.videoCount and lists only channels
-    // whose count increased since the previous scan.
-
-    fn insert_channel(state: &AppState, id: &str, upload_playlist_id: Option<&str>) {
-        let conn = state.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO channels (id, title, upload_playlist_id, created_at)
-             VALUES (?1, ?1, ?2, ?3)",
-            rusqlite::params![id, upload_playlist_id, crate::util::now_unix()],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn sweep_covers_every_channel_and_derives_a_missing_playlist_id() {
-        let state = AppState::test();
-        insert_channel(&state, "UCstored", Some("UUcustom"));
-        insert_channel(&state, "UCderived", None);
-
-        let conn = state.db.lock().unwrap();
-        let targets = channels_to_sweep(&conn);
-
-        assert_eq!(
-            targets,
-            vec![
-                ("UCderived".to_string(), "UUderived".to_string()),
-                ("UCstored".to_string(), "UUcustom".to_string()),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_sweep_is_refused_while_another_one_is_running() {
-        let state = AppState::test();
-        let held = state.catchup_lock.clone();
-        let _guard = held.lock().await;
-
-        assert!(sweep_missed_videos(&state).await.is_none());
-    }
-
-    #[test]
-    fn only_an_increased_video_count_needs_a_playlist_lookup() {
-        assert!(!video_count_increased(None, 10));
-        assert!(!video_count_increased(Some(10), 10));
-        assert!(!video_count_increased(Some(10), 9));
-        assert!(video_count_increased(Some(10), 11));
-    }
-}
+#[path = "catchup_tests.rs"]
+mod tests;

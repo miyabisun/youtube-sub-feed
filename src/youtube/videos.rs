@@ -1,13 +1,52 @@
 use crate::duration::is_short_duration;
+use crate::state::AppState;
 use crate::websub::atom::AtomEntry;
 use serde_json::Value;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ATTEMPTS: u32 = 3;
 /// Increment when persisted Shorts classifications must be recomputed.
 pub const SHORTS_CLASSIFIER_VERSION: i64 = 1;
+
+/// Shared by API polling, push enrichment and manual sync. The request lock also
+/// makes a quota rejection visible before any sibling can spend another unit.
+/// ponytail: serial API requests; only add concurrency if measured latency needs it.
+pub struct Api {
+    base: String,
+    request: Mutex<()>,
+    epoch: i64,
+    started: Instant,
+}
+
+impl Default for Api {
+    fn default() -> Self {
+        Self {
+            base: YOUTUBE_API_BASE.into(),
+            request: Mutex::new(()),
+            epoch: crate::util::now_unix(),
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Api {
+    pub(crate) fn now(&self) -> i64 {
+        self.epoch
+            .saturating_add(self.started.elapsed().as_secs() as i64)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(base: String) -> Self {
+        Self {
+            base,
+            ..Self::default()
+        }
+    }
+}
 
 /// Per-video metadata the WebSub Atom payload does not carry.
 #[derive(Debug)]
@@ -64,6 +103,9 @@ pub enum FetchError {
     Transport(String),
     /// Response body was not the expected videos.list shape.
     MalformedResponse,
+    Deferred,
+    InvalidPageToken,
+    Database,
 }
 
 impl std::fmt::Display for FetchError {
@@ -73,6 +115,9 @@ impl std::fmt::Display for FetchError {
             FetchError::Http(status) => write!(f, "YouTube API HTTP {}", status),
             FetchError::Transport(msg) => write!(f, "YouTube API transport error: {}", msg),
             FetchError::MalformedResponse => write!(f, "YouTube API malformed response"),
+            FetchError::Deferred => write!(f, "YouTube API waiting for Retry-After"),
+            FetchError::InvalidPageToken => write!(f, "YouTube API invalid page token"),
+            FetchError::Database => write!(f, "YouTube API progress could not be saved"),
         }
     }
 }
@@ -119,21 +164,24 @@ fn parse_u64(value: &Value) -> Option<u64> {
 
 /// Fetch details for up to 50 video IDs (one videos.list call, 1 quota unit).
 pub async fn fetch_video_details(
-    http: &reqwest::Client,
-    api_key: &str,
+    state: &AppState,
     video_ids: &[String],
 ) -> Result<Vec<VideoDetails>, FetchError> {
     debug_assert!(video_ids.len() <= 50);
     if video_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let url = format!(
-        "{}/videos?part=contentDetails,liveStreamingDetails,player&id={}&maxWidth=1000&maxHeight=1000&key={}",
-        YOUTUBE_API_BASE,
-        video_ids.join(","),
-        api_key
-    );
-    let data = get_json_with_retry(http, &url).await?;
+    let data = get_json_with_retry(
+        state,
+        "videos",
+        &[
+            ("part", "contentDetails,liveStreamingDetails,player"),
+            ("id", &video_ids.join(",")),
+            ("maxWidth", "1000"),
+            ("maxHeight", "1000"),
+        ],
+    )
+    .await?;
     parse_video_details(&data)
 }
 
@@ -159,21 +207,23 @@ pub fn parse_channel_video_counts(data: &Value) -> Result<Vec<ChannelVideoCount>
 /// 1 quota unit). The caller owns batching so a failed batch can be attributed
 /// to the exact channel IDs it covered.
 pub async fn fetch_channel_video_counts(
-    http: &reqwest::Client,
-    api_key: &str,
+    state: &AppState,
     channel_ids: &[String],
 ) -> Result<Vec<ChannelVideoCount>, FetchError> {
     debug_assert!(channel_ids.len() <= 50);
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let url = format!(
-        "{}/channels?part=statistics&id={}&maxResults=50&key={}",
-        YOUTUBE_API_BASE,
-        channel_ids.join(","),
-        api_key
-    );
-    let data = get_json_with_retry(http, &url).await?;
+    let data = get_json_with_retry(
+        state,
+        "channels",
+        &[
+            ("part", "statistics"),
+            ("id", &channel_ids.join(",")),
+            ("maxResults", "50"),
+        ],
+    )
+    .await?;
     parse_channel_video_counts(&data)
 }
 
@@ -210,80 +260,214 @@ pub fn parse_playlist_items(data: &Value) -> Result<Vec<AtomEntry>, FetchError> 
         .collect())
 }
 
-/// List the newest uploads of one channel (one playlistItems.list call,
-/// 1 quota unit). 50 is the per-call maximum, and costs the same as fewer.
-///
-/// Deliberately one page. This exists to recover videos the hub failed to push,
-/// and a channel does not publish 50 videos between two sweeps — anything older
-/// than the first page is therefore already stored. Paging further would spend
-/// quota walking uploads we already hold.
-pub async fn fetch_playlist_items(
-    http: &reqwest::Client,
-    api_key: &str,
-    playlist_id: &str,
-) -> Result<Vec<AtomEntry>, FetchError> {
-    let url = format!(
-        "{}/playlistItems?part=snippet,contentDetails&playlistId={}&maxResults=50&key={}",
-        YOUTUBE_API_BASE, playlist_id, api_key
-    );
-    let data = get_json_with_retry(http, &url).await?;
-    parse_playlist_items(&data)
+#[derive(Debug)]
+pub struct PlaylistPage {
+    pub entries: Vec<AtomEntry>,
+    pub next_page: Option<String>,
 }
 
-/// GET with a bounded retry policy:
-/// - 429 / 5xx / transport errors: retry up to MAX_ATTEMPTS with backoff,
-///   honoring Retry-After when present (capped at 30s).
-/// - 403 with reason "quotaExceeded"/"rateLimitExceeded": QuotaExceeded, no retry.
-/// - other 4xx: fail immediately.
-///
-/// The URL carries the API key, so errors log status/reason only — never the URL.
-async fn get_json_with_retry(http: &reqwest::Client, url: &str) -> Result<Value, FetchError> {
-    let mut last_error = FetchError::Transport("unreachable".to_string());
+/// One bounded page. The caller commits its continuation only after saving rows.
+pub async fn fetch_playlist_items(
+    state: &AppState,
+    playlist_id: &str,
+    page_token: Option<&str>,
+) -> Result<PlaylistPage, FetchError> {
+    let mut query = vec![
+        ("part", "snippet,contentDetails"),
+        ("playlistId", playlist_id),
+        ("maxResults", "50"),
+    ];
+    if let Some(token) = page_token {
+        query.push(("pageToken", token));
+    }
+    let data = get_json_with_retry(state, "playlistItems", &query).await?;
+    let next_page = match data.get("nextPageToken") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
+        _ => return Err(FetchError::MalformedResponse),
+    };
+    if next_page
+        .as_deref()
+        .is_some_and(|token| Some(token) == page_token)
+    {
+        return Err(FetchError::InvalidPageToken);
+    }
+    Ok(PlaylistPage {
+        entries: parse_playlist_items(&data)?,
+        next_page,
+    })
+}
 
+impl From<rusqlite::Error> for FetchError {
+    fn from(_: rusqlite::Error) -> Self {
+        Self::Database
+    }
+}
+
+/// Persist before sending: even failed requests can cost quota. This ledger is
+/// this server's estimate, not the Google project's authoritative usage counter.
+fn reserve_request(state: &AppState, now: i64) -> Result<i64, FetchError> {
+    let conn = state.db.lock().unwrap();
+    // A fixed UTC day is inspectable and restart-safe. A Pacific quota day
+    // spans two UTC dates, so deployment allocates against that upper bound.
+    let utc_midnight = now.div_euclid(86400) * 86400;
+    conn.execute(
+        "UPDATE youtube_api_state SET window_started = ?1, requests = 0
+         WHERE id = 1 AND window_started < ?1",
+        [utc_midnight],
+    )?;
+    let (window, requests, quota_until, retry_until): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT window_started, requests, quota_until, retry_until FROM youtube_api_state WHERE id = 1",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if quota_until > now {
+        return Err(FetchError::QuotaExceeded);
+    }
+    if retry_until > now {
+        return Err(FetchError::Deferred);
+    }
+    if state
+        .config
+        .youtube_api_daily_budget
+        .is_some_and(|budget| requests as u64 >= budget)
+    {
+        conn.execute(
+            "UPDATE youtube_api_state SET quota_until = ?1 WHERE id = 1",
+            [window + 86400],
+        )?;
+        return Err(FetchError::QuotaExceeded);
+    }
+    conn.execute(
+        "UPDATE youtube_api_state SET requests = requests + 1 WHERE id = 1",
+        [],
+    )?;
+    Ok(requests + 1)
+}
+
+fn retry_after_seconds(value: Option<&str>, now: i64) -> u64 {
+    value
+        .and_then(|value| {
+            value.parse().ok().or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(|at| at.timestamp().saturating_sub(now).max(0) as u64)
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Three attempts at most, with bounded local backoff. Long Retry-After releases
+/// the worker and persists a shared pause instead of sleeping through many ticks.
+/// URLs and response bodies can carry credentials: never log either of them.
+async fn get_json_with_retry(
+    state: &AppState,
+    endpoint: &str,
+    query: &[(&str, &str)],
+) -> Result<Value, FetchError> {
+    let api_key = state
+        .config
+        .youtube_api_key
+        .as_deref()
+        .ok_or(FetchError::Http(401))?;
+    let _request = state.youtube_api.request.lock().await;
+    let mut last_error = FetchError::Transport("request failed".into());
+    let mut delay = 0;
     for attempt in 1..=MAX_ATTEMPTS {
-        if attempt > 1 {
-            tokio::time::sleep(Duration::from_secs(2 * attempt as u64)).await;
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
-
-        let response = match http.get(url).timeout(REQUEST_TIMEOUT).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                // reqwest error Display can embed the URL (and thus the key).
-                last_error =
-                    FetchError::Transport(format!("request failed (timeout: {})", e.is_timeout()));
+        let now = state.youtube_api.now();
+        let units = reserve_request(state, now)?;
+        tracing::info!(
+            endpoint,
+            attempt,
+            estimated_units = 1,
+            window_units = units,
+            "[youtube-api] request"
+        );
+        let response = match state
+            .http
+            .get(format!("{}/{}", state.youtube_api.base, endpoint))
+            .query(query)
+            .query(&[("key", api_key)])
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = FetchError::Transport(format!(
+                    "request failed (timeout: {})",
+                    error.is_timeout()
+                ));
+                delay = 2_u64.pow(attempt);
                 continue;
             }
         };
-
         let status = response.status();
+        tracing::info!(
+            endpoint,
+            attempt,
+            status = status.as_u16(),
+            "[youtube-api] response"
+        );
         if status.is_success() {
             return response
-                .json::<Value>()
+                .json()
                 .await
                 .map_err(|_| FetchError::MalformedResponse);
         }
-
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok());
+        let retry_after = retry_after_seconds(
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            now,
+        );
         let body: Value = response.json().await.unwrap_or(Value::Null);
         let reason = body["error"]["errors"][0]["reason"].as_str().unwrap_or("");
-
-        if status.as_u16() == 403 && (reason == "quotaExceeded" || reason == "rateLimitExceeded") {
+        if status.as_u16() == 403 && matches!(reason, "quotaExceeded" | "dailyLimitExceeded") {
+            // Conservative: crosses the next Pacific midnight even on a 25-hour
+            // DST day, without adding a timezone database dependency.
+            let until = state.youtube_api.now() + 25 * 3600;
+            state.db.lock().unwrap().execute(
+                "UPDATE youtube_api_state SET quota_until = ?1 WHERE id = 1",
+                [until],
+            )?;
+            tracing::warn!(until, "[youtube-api] quota pause");
             return Err(FetchError::QuotaExceeded);
         }
-        if status.as_u16() == 429 || status.is_server_error() {
-            if let Some(secs) = retry_after {
-                tokio::time::sleep(Duration::from_secs(secs.min(30))).await;
+        if status.as_u16() == 400 && reason == "invalidPageToken" {
+            return Err(FetchError::InvalidPageToken);
+        }
+        if status.as_u16() == 429
+            || status.is_server_error()
+            || (status.as_u16() == 403
+                && matches!(reason, "rateLimitExceeded" | "userRateLimitExceeded"))
+        {
+            delay = retry_after.max(2_u64.pow(attempt));
+            if delay > 30 {
+                let until = state
+                    .youtube_api
+                    .now()
+                    .saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
+                state.db.lock().unwrap().execute(
+                    "UPDATE youtube_api_state SET retry_until = ?1 WHERE id = 1",
+                    [until],
+                )?;
+                tracing::warn!(until, "[youtube-api] Retry-After pause");
+                return Err(FetchError::Deferred);
             }
-            last_error = FetchError::Transport(format!("HTTP {} ({})", status.as_u16(), reason));
+            if attempt == MAX_ATTEMPTS && retry_after > 0 {
+                // Keep the shared gate through the final short Retry-After too;
+                // another channel must not immediately send a fourth request.
+                tokio::time::sleep(Duration::from_secs(retry_after)).await;
+            }
+            last_error = FetchError::Transport(format!("HTTP {}", status.as_u16()));
             continue;
         }
         return Err(FetchError::Http(status.as_u16()));
     }
-
     Err(last_error)
 }
 
@@ -297,6 +481,29 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn local_budget_resets_at_utc_midnight_without_waiting_for_the_first_request_anniversary() {
+        let mut state = AppState::test();
+        state.config.youtube_api_daily_budget = Some(2);
+        let midnight = 10 * 86400;
+        assert_eq!(reserve_request(&state, midnight + 43200), Ok(1));
+        assert_eq!(reserve_request(&state, midnight + 43201), Ok(2));
+        assert_eq!(
+            reserve_request(&state, midnight + 86399),
+            Err(FetchError::QuotaExceeded)
+        );
+        assert_eq!(reserve_request(&state, midnight + 86400), Ok(1));
+        let window: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT window_started FROM youtube_api_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(window, midnight + 86400);
+    }
 
     fn item(id: &str, duration: &str) -> Value {
         json!({"id": id, "contentDetails": {"duration": duration}})

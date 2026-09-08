@@ -1,5 +1,6 @@
 use crate::config::Config;
 pub use crate::notify::WarningCooldown;
+pub use crate::youtube::videos::Api;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
     pub hub: Arc<crate::websub::hub::Hub>,
+    pub youtube_api: Arc<crate::youtube::videos::Api>,
+    pub enrichment_lock: Arc<tokio::sync::Mutex<()>>,
     /// Held for the duration of any catch-up work so startup, the periodic
     /// videoCount scan and the manual full sweep never duplicate quota spend.
     pub catchup_lock: Arc<tokio::sync::Mutex<()>>,
@@ -42,6 +45,7 @@ impl AppState {
                 discord_webhook_url: None,
                 websub_callback_url: "http://localhost:3000/api/websub/callback".to_string(),
                 youtube_api_key: None,
+                youtube_api_daily_budget: None,
                 catchup_interval_minutes: None,
                 is_production: false,
             },
@@ -49,6 +53,8 @@ impl AppState {
             hub: Arc::new(crate::websub::hub::Hub::at(
                 "http://127.0.0.1:1/subscribe".into(),
             )),
+            youtube_api: Arc::new(crate::youtube::videos::Api::at("http://127.0.0.1:1".into())),
+            enrichment_lock: Arc::new(tokio::sync::Mutex::new(())),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
             warning_cooldown: Arc::new(WarningCooldown::default()),
         }

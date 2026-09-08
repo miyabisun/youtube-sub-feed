@@ -101,7 +101,7 @@ docker run -d \
 
 - チャンネルは手動登録（チャンネル ID 直接入力）またはヘッダーメニューの「チャンネル同期 (YouTube)」で一括取込
 - 登録時に WebSub (PubSubHubbub) サブスクリプションを自動設定し、新着動画をプッシュ通知で受信
-- バックグラウンドで WebSub push を主軸に動作：新着検知は Google API 呼び出しゼロ
+- WebSub push と上限付きAPI取得が独立して動作し、Hubが受付済みでもpushが届かないときはAPI取得を継続
 - 動画はグループで整理、スワイプで非表示、種別（ショート・ライブ配信）でフィルタ可能
 
 ## 環境変数
@@ -109,7 +109,7 @@ docker run -d \
 現行名・必須/任意・既定値・不正値の扱いは
 [README.md の Environment Variables](README.md#environment-variables) を正本とします。
 `PORT`、`DATABASE_PATH`、`GIS_CLIENT_ID`、`WEBSUB_CALLBACK_URL`、`PUBLIC_BASE_URL`、
-`DISCORD_WEBHOOK_URL`、`YOUTUBE_API_KEY`、`CATCHUP_INTERVAL_MINUTES`、`NODE_ENV`、`RUST_LOG` を扱います。
+`DISCORD_WEBHOOK_URL`、`YOUTUBE_API_KEY`、`YOUTUBE_API_DAILY_BUDGET`、`CATCHUP_INTERVAL_MINUTES`、`NODE_ENV`、`RUST_LOG` を扱います。
 
 本番では `NODE_ENV=production` をサーバーの環境に明示してください。release build や
 Docker イメージだけでは本番モードにならず、未設定・誤記時は開発用のユーザー fallback が有効です。
@@ -138,7 +138,8 @@ Docker イメージだけでは本番モードにならず、未設定・誤記�
 `Retry-After` の秒数・HTTP日時がさらに先ならその時刻まで待ちます。恒久エラーは再試行しません。
 全対象の処理後、最終失敗だけをチャンネル名でDiscordへ1回通知します。
 名前が未入力・ID代用の場合だけ公開Atomフィードからチャンネル名を取得して保存し、取得不能時は「名前未取得のチャンネル」と表示します（IDはログに残します）。
-起動直後の同じ失敗を定期処理で繰り返さないよう、次の購読更新は24時間後です。動画情報の補完は即時に行います。
+起動直後の同じ失敗を定期処理で繰り返さないよう、次の購読更新は24時間後です。動画情報の補完はHubから独立したAPI巡回で行います。
 HTTP受付は非同期確認の完了を意味せず、受付後1時間は同じチャンネルの再申請を待ちます。
-購読状態にかかわらず、手動全件取得の動画スキャンは維持されます。
+手動全件取得は全チャンネルをAPIの修復対象に戻し、上限付きの巡回で継続します。
+費用・最大遅延・休止と復旧・本番確認は [デプロイ手順](docs/deploy.md#websub-に依存しない-api-巡回) を参照してください。
 [YouTube の公式プッシュ通知手順](https://developers.google.com/youtube/v3/guides/push_notifications) も参照してください。

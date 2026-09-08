@@ -11,10 +11,9 @@ const VERIFICATION_WAIT_SECONDS: i64 = 60 * 60;
 
 pub fn start(state: AppState) {
     tokio::spawn(async move {
-        // Startup already checked every subscription. Enrich immediately, but
-        // do not give startup failures another three attempts in a second batch.
+        // Startup already checked every subscription. API enrichment is owned
+        // by catchup, so a slow Hub cannot hold that queue.
         loop {
-            crate::sync::video_enrich::backfill_missing_details(&state).await;
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
             match all_channel_ids(&state) {
                 Ok(ids) => {
@@ -258,6 +257,7 @@ mod tests {
                             "UC_retry_after" if attempt == 0 => (429, "65".to_string()),
                             "UC_retry_date" if attempt == 0 => (503, (chrono::Utc::now() + chrono::Duration::seconds(90)).to_rfc2822()),
                             "UC_down" => (503, "0".to_string()),
+                            "UC_final_backoff" => (503, "65".to_string()),
                             "UC_permanent" | "UC_second" | "UC_third" | "UC_fourth" => (400, "0".to_string()),
                             "UC_redirect" => (307, "0".to_string()),
                             "UC_not_implemented" => (501, "0".to_string()),
@@ -488,6 +488,26 @@ mod tests {
                 "停止, 恒久 の購読に失敗しました".into()
             )]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_failure_retry_after_also_delays_the_next_channel() {
+        let stub = Stub::new().await;
+        stub.channel("UC_final_backoff", "停止", None);
+        stub.channel("UC_new", "新規", None);
+        let state = stub.state.clone();
+        stub.finish(tokio::spawn(async move {
+            subscribe_all(&state, vec!["UC_final_backoff".into(), "UC_new".into()]).await
+        }))
+        .await;
+        let record = stub.observed.lock().unwrap();
+        let last = record
+            .hits
+            .iter()
+            .rfind(|h| h.id == "UC_final_backoff" && h.kind == "subscribe")
+            .unwrap();
+        let next = record.hits.iter().find(|h| h.id == "UC_new").unwrap();
+        assert!(next.at.duration_since(last.at) >= Duration::from_secs(65));
     }
 
     #[tokio::test(start_paused = true)]

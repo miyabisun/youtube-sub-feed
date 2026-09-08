@@ -21,6 +21,8 @@ async fn main() {
         config: config.clone(),
         http,
         hub: Arc::new(youtube_sub_feed::websub::hub::Hub::default()),
+        youtube_api: Arc::new(youtube_sub_feed::state::Api::default()),
+        enrichment_lock: Arc::new(tokio::sync::Mutex::new(())),
         catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
         warning_cooldown: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),
     };

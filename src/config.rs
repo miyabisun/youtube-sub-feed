@@ -14,8 +14,10 @@ pub struct Config {
     /// YouTube Data API key for video detail enrichment (duration / Shorts /
     /// livestream). API-key-only endpoints — no OAuth involved.
     pub youtube_api_key: Option<String>,
-    /// How often to compare channel videoCount values and sweep only channels
-    /// whose count increased. None leaves full sweeps to startup and manual use.
+    /// This server's optional UTC-day request budget, allocated from the actual project quota.
+    pub youtube_api_daily_budget: Option<u64>,
+    /// Interval for bounded count, head repair and history scans.
+    /// None leaves only one bounded startup pass and manual passes.
     pub catchup_interval_minutes: Option<u64>,
     pub is_production: bool,
 }
@@ -75,7 +77,7 @@ impl Config {
                 minutes
             ),
             None => tracing::info!(
-                "CATCHUP_INTERVAL_MINUTES not set to a positive number. The periodic videoCount scan is disabled; startup and the manual action still run full sweeps."
+                "CATCHUP_INTERVAL_MINUTES not set to a positive number. Periodic API work is disabled; startup/manual each run only one bounded pass. Unfinished history needs periodic scans."
             ),
         }
 
@@ -87,6 +89,14 @@ impl Config {
             discord_webhook_url,
             websub_callback_url,
             youtube_api_key,
+            youtube_api_daily_budget: env::var("YOUTUBE_API_DAILY_BUDGET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| {
+                    s.trim()
+                        .parse::<u64>()
+                        .expect("YOUTUBE_API_DAILY_BUDGET must be a nonnegative integer")
+                }),
             catchup_interval_minutes,
             is_production,
         }

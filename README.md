@@ -101,7 +101,7 @@ For production, place Cloudflare Access in front of the app. See `docs/deploy.md
 
 - Channels are registered manually (by channel ID) or bulk-imported via the "Channel Sync (YouTube)" button in the header menu
 - On registration, a WebSub (PubSubHubbub) subscription is automatically set up to receive push notifications for new videos
-- New video detection runs via WebSub push as the primary mechanism — zero Google API calls required
+- WebSub push and bounded API catch-up run independently; API polling keeps discovering uploads even when the Hub accepts subscriptions but sends no pushes
 - Videos can be organized into groups, hidden via swipe, and filtered by type (Shorts, livestreams)
 
 ## Environment Variables
@@ -119,7 +119,8 @@ are listed below; a release build does not automatically set `NODE_ENV=productio
 | `PUBLIC_BASE_URL` | No | Request origin | Public origin for feed links, e.g. `https://youtube.example.com`. Surrounding whitespace and trailing `/` are removed; empty falls back to the request. Other values are used without URL validation and can produce malformed links. |
 | `DISCORD_WEBHOOK_URL` | For Discord notifications | Disabled | Empty disables notifications; other values are used without trimming or URL validation. Invalid values fail when sending a notification. |
 | `YOUTUBE_API_KEY` | For video enrichment and catch-up scans | Disabled | YouTube Data API key. Surrounding whitespace is removed; empty disables those features. Other values are not validated at startup; invalid keys fail at the API. WebSub push can still work without a key. |
-| `CATCHUP_INTERVAL_MINUTES` | For periodic catch-up checks | Disabled | Positive integer minutes between `videoCount` checks. Whitespace is trimmed; empty, zero, negative, unparseable, or values exceeding `u64::MAX / 60` disable periodic checks. Requires `YOUTUBE_API_KEY`; startup and manual full sweeps remain available when periodic checks are disabled. |
+| `YOUTUBE_API_DAILY_BUDGET` | No | No local cap | This server's request budget in a persistent UTC-day window, not the Google project's quota. Empty disables the cap; 0 stops API requests; an invalid nonnegative integer fails startup. Allocate against the actual project quota and other uses; see [quota operation](docs/deploy.md#実project予算との照合と休止). |
+| `CATCHUP_INTERVAL_MINUTES` | For periodic catch-up checks | Disabled | Positive integer minutes between `videoCount` checks. Whitespace is trimmed; empty, zero, negative, unparseable, or values exceeding `u64::MAX / 60` disable periodic checks. Requires `YOUTUBE_API_KEY`; startup/manual each run one bounded pass when periodic checks are disabled. Enable periodic checks to drain the remaining work. |
 | `NODE_ENV` | Set `production` for production user handling | Development mode | Exactly `production` disables the first-DB-user fallback for requests without the Access email header and keeps cached SPA HTML. Every other value, including empty or misspelled values, enables development behavior. This does not configure Cloudflare Access itself. |
 | `RUST_LOG` | No | `info` | Log level or target filter, e.g. `debug` or `youtube_sub_feed=debug`. Empty selects `error`. Invalid filter syntax prints a warning to stderr and disables logs. `LOG_LEVEL` is not read. |
 
@@ -175,7 +176,7 @@ a longer `Retry-After` delay or HTTP date is respected. Permanent errors are not
 After a batch finishes, Discord receives one summary naming only the channels that ultimately failed.
 Only when a failed channel has an empty or ID-placeholder name, its public Atom feed is fetched to resolve and save the name.
 If that also fails, the summary explicitly says the name is unavailable and the ID remains in logs.
-The periodic worker enriches metadata immediately but waits 24 hours before renewing subscriptions, avoiding a second startup failure batch.
+API startup, metadata backfill and periodic scans run independently of Hub work. The Hub worker waits 24 hours after its initial pass before renewing subscriptions, avoiding a second startup failure batch.
 HTTP acceptance remains separate from asynchronous callback confirmation, with a one-hour grace period before
-re-requesting an accepted subscription. Manual full refresh still scans every channel for videos.
+re-requesting an accepted subscription. Manual refresh queues every channel for bounded API repair, independently of Hub renewal. See [API scheduling, quota costs, recovery limits and production checks](docs/deploy.md#websub-に依存しない-api-巡回).
 See also the [YouTube push notification guide](https://developers.google.com/youtube/v3/guides/push_notifications).

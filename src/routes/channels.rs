@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Accept a full refresh, then check subscriptions and sweep in the background.
+/// Queue every channel for repair; run bounded API and WebSub work independently.
 ///
 /// The sweep can take longer than a reverse proxy request budget, while Discord
 /// already owns completion reporting. Reserving the shared sweep slot before
@@ -35,17 +35,20 @@ pub async fn refresh_all(
     };
     let channel_ids = list_channel_ids(&state)?;
 
+    let subscription_state = state.clone();
     tokio::spawn(async move {
-        let (resubscribe_queued, _) = subscribe_all(&state, channel_ids).await;
+        let (queued, failed) = subscribe_all(&subscription_state, channel_ids).await;
+        tracing::info!(queued, failed, "[refresh] Manual WebSub pass complete");
+    });
+    tokio::spawn(async move {
         let outcome = crate::sync::catchup::sweep_missed_videos_with_guard(&state, guard).await;
 
         crate::notify::notify_warning(
             &state.http,
             &state.config,
-            "全件取得し直し 完了",
+            "API再照合 初回巡回完了",
             &format!(
-                "必要な購読申請の受付は {} 件です (購読確認は別途)。取り込んだ動画は {} 本です。{}{}",
-                resubscribe_queued,
+                "取り込んだ動画は {} 本です。残りは定期巡回へ引き継ぎます（無効の場合は次の手動実行時）。WebSub購読は独立して実行中です。{}{}",
                 outcome.imported,
                 if outcome.failed_channels > 0 {
                     format!(
@@ -1515,10 +1518,8 @@ mod tests {
     // Manual full-refresh Spec
     //
     // One action, run from the header menu when the feed looks stale: every
-    // channel is checked for a needed Hub subscription (no YouTube quota), then every
-    // uploads playlist is swept for videos WebSub never delivered (1 quota unit
-    // per channel). It reports what it did so the operator does not have to
-    // read the server log.
+    // channel is checked for a needed Hub subscription (no YouTube quota), while
+    // the independent API queue repairs uploads in bounded periodic passes.
 
     mod refresh {
         use crate::routes::channels::routes;

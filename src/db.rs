@@ -20,6 +20,7 @@ pub fn open(path: &str) -> Connection {
     add_videos_is_members_only(&conn);
     migrate_timestamps_to_unix(&conn);
     add_videos_details_checked_at(&conn);
+    add_videos_details_attempted_at(&conn);
     add_videos_shorts_classifier_version(&conn);
     add_channels_video_count(&conn);
     decode_video_titles_xml_entities(&conn);
@@ -46,6 +47,16 @@ fn add_user_channels_hide_shorts(conn: &Connection) {
             "[migrate] Failed to add user_channels.hide_shorts column: {}",
             e
         ),
+    }
+}
+
+fn add_videos_details_attempted_at(conn: &Connection) {
+    if !column_exists(conn, "videos", "details_attempted_at") {
+        conn.execute(
+            "ALTER TABLE videos ADD COLUMN details_attempted_at INTEGER",
+            [],
+        )
+        .expect("Failed to add video enrichment progress");
     }
 }
 
@@ -306,9 +317,28 @@ fn create_tables(conn: &Connection) {
             livestream_ended_at INTEGER,
             fetched_at INTEGER,
             details_checked_at INTEGER,
+            details_attempted_at INTEGER,
             shorts_classifier_version INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS channel_catchup (
+            channel_id TEXT PRIMARY KEY REFERENCES channels(id) ON DELETE CASCADE,
+            page_token TEXT,
+            repair_after INTEGER NOT NULL DEFAULT 0,
+            head_attempted_at INTEGER NOT NULL DEFAULT 0,
+            backfill_after INTEGER NOT NULL DEFAULT 0,
+            backfill_attempted_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS youtube_api_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            window_started INTEGER NOT NULL DEFAULT 0,
+            requests INTEGER NOT NULL DEFAULT 0,
+            quota_until INTEGER NOT NULL DEFAULT 0,
+            retry_until INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO youtube_api_state (id) VALUES (1);
 
         CREATE TABLE IF NOT EXISTS user_channels (
             user_id INTEGER NOT NULL,

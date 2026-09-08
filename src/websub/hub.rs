@@ -99,7 +99,16 @@ impl Hub {
             ])
             .send()
             .await;
-        *next = Some(Instant::now() + Duration::from_secs(10));
+        let wait = result
+            .as_ref()
+            .ok()
+            .and_then(|response| response.headers().get(reqwest::header::RETRY_AFTER))
+            .and_then(|value| value.to_str().ok())
+            .map(retry_after)
+            .unwrap_or_default();
+        *next = Instant::now()
+            .checked_add(wait.max(Duration::from_secs(10)))
+            .or_else(|| Some(Instant::now() + Duration::from_secs(10)));
         drop(next);
         let response = result.map_err(|e| e.without_url().to_string())?;
         if !response.status().is_success() {
@@ -136,7 +145,6 @@ impl Hub {
             }
             let response = self.http.post(&self.url).form(&body).send().await;
             *next = Some(Instant::now() + Duration::from_secs(10));
-            drop(next);
             let (error, wait) = match response {
                 Ok(res) => {
                     let status = res.status().as_u16();
@@ -166,15 +174,18 @@ impl Hub {
                 ),
             };
             tracing::warn!(channel_id, attempt = attempt + 1, error = %error, "WebSub request failed");
-            if attempt == 2 || !matches!(error.status, 0 | 408 | 429 | 500 | 502 | 503 | 504) {
-                return Err(error);
-            }
-            let Some(retry_at) = Instant::now().checked_add(wait.max(Duration::from_secs(30)))
-            else {
-                // An unrepresentable Retry-After must not panic or retry too early.
+            let retryable = matches!(error.status, 0 | 408 | 429 | 500 | 502 | 503 | 504);
+            let minimum = Duration::from_secs(if retryable { 30 } else { 10 });
+            let Some(retry_at) = Instant::now().checked_add(wait.max(minimum)) else {
                 return Err(error);
             };
-            tokio::time::sleep_until(retry_at).await;
+            // Apply Retry-After to the shared gate even on the final attempt:
+            // a different channel or concurrent unsubscribe must also wait.
+            *next = Some(retry_at);
+            drop(next);
+            if attempt == 2 || !retryable {
+                return Err(error);
+            }
         }
         unreachable!()
     }

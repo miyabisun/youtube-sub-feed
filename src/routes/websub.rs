@@ -253,7 +253,13 @@ pub async fn notification(
     let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
         let channel_title = lookup_channel_title(&conn, &channel_id);
-        let newly_inserted = partition_new_entries(&conn, &channel_id, &parsed.entries, now);
+        let newly_inserted = match partition_new_entries(&conn, &channel_id, &parsed.entries, now) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(%error, "[websub] video save failed; asking Hub to retry");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        };
         log_new_videos(&channel_title, &channel_id, &newly_inserted);
         newly_inserted.iter().map(|e| e.video_id.clone()).collect()
     };
@@ -276,15 +282,13 @@ pub async fn notification(
 
     // Enrich the new rows (duration / Shorts / livestream) via the API-key-only
     // YouTube Data API, spawned so the hub gets its 200 OK without waiting.
-    // A failed or skipped run is caught by the daily backfill
+    // A failed or skipped run is caught by the bounded API-tick backfill
     // (video_enrich::backfill_missing_details) — rows stay details_checked_at
     // NULL until a batch succeeds. is_members_only is out of scope (needs the
     // removed OAuth-based UUMO check) and remains 0.
     let state_clone = state.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            crate::sync::video_enrich::enrich_videos(&state_clone, &channel_id, &new_video_ids)
-                .await
+        if let Err(e) = crate::sync::video_enrich::enrich_videos(&state_clone, &new_video_ids).await
         {
             tracing::warn!("[websub] enrichment failed for {}: {}", channel_id, e);
         }
@@ -358,16 +362,15 @@ pub(crate) fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str
 
 /// Insert each entry into `videos` and return references to the entries that
 /// represent newly published videos (no prior row existed for that video_id).
-/// Existing rows have their title refreshed only when it differs.
+/// Existing rows in this channel have metadata refreshed; storage failures stay retryable.
 ///
-/// Pulled out as a pure function so the new-video detection logic can be tested
-/// directly without going through HTTP/HMAC plumbing.
+/// Shared by push and polling so insertion and duplicate handling have one owner.
 pub(crate) fn partition_new_entries<'a>(
     conn: &rusqlite::Connection,
     channel_id: &str,
     entries: &'a [AtomEntry],
     now: i64,
-) -> Vec<&'a AtomEntry> {
+) -> rusqlite::Result<Vec<&'a AtomEntry>> {
     let mut newly_inserted = Vec::new();
     for entry in entries {
         // RETURNING distinguishes INSERT from ON CONFLICT in a single round-trip:
@@ -392,28 +395,21 @@ pub(crate) fn partition_new_entries<'a>(
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Repair an unknown or legacy publication timestamp when a
                 // valid Atom timestamp is redelivered.
-                let _ = conn.execute(
+                conn.execute(
                     "UPDATE videos
                      SET title = ?1,
                          published_at = CASE
                              WHEN ?3 IS NOT NULL AND (published_at IS NULL OR typeof(published_at) != 'integer')
                              THEN ?3 ELSE published_at END,
                          fetched_at = ?4
-                     WHERE id = ?2",
-                    rusqlite::params![entry.title, entry.video_id, entry.published, now],
-                );
+                     WHERE id = ?2 AND channel_id = ?5",
+                    rusqlite::params![entry.title, entry.video_id, entry.published, now, channel_id],
+                )?;
             }
-            Err(e) => {
-                tracing::warn!(
-                    "[websub] video insert failed for {} on {}: {}",
-                    entry.video_id,
-                    channel_id,
-                    e
-                );
-            }
+            Err(error) => return Err(error),
         }
     }
-    newly_inserted
+    Ok(newly_inserted)
 }
 
 fn log_new_videos(channel_title: &str, channel_id: &str, entries: &[&AtomEntry]) {
@@ -750,7 +746,7 @@ mod tests {
             },
         ];
 
-        let new = partition_new_entries(&conn, "UC_x", &entries, 1777161600);
+        let new = partition_new_entries(&conn, "UC_x", &entries, 1777161600).unwrap();
 
         let new_ids: Vec<&str> = new.iter().map(|e| e.video_id.as_str()).collect();
         assert_eq!(new_ids.len(), 2);
@@ -787,9 +783,33 @@ mod tests {
     }
 
     #[test]
-    fn partition_new_entries_drops_rows_with_unknown_channel() {
+    fn a_duplicate_id_cannot_rewrite_another_channels_video() {
+        let conn = crate::db::open_memory();
+        conn.execute_batch(
+            "INSERT INTO channels (id, title) VALUES ('UCowner', 'Owner'), ('UCother', 'Other');
+            INSERT INTO videos (id, channel_id, title) VALUES ('existing', 'UCowner', 'Original');",
+        )
+        .unwrap();
+        let entries = vec![AtomEntry {
+            video_id: "existing".into(),
+            title: "Wrong channel".into(),
+            published: Some(1),
+        }];
+        assert!(partition_new_entries(&conn, "UCother", &entries, 2)
+            .unwrap()
+            .is_empty());
+        let title: String = conn
+            .query_row("SELECT title FROM videos WHERE id = 'existing'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Original");
+    }
+
+    #[test]
+    fn partition_new_entries_keeps_unknown_channel_failures_retryable() {
         // Pushes for a channel that's no longer in the channels table (CASCADE race)
-        // should not crash; the FK violation gets logged and the entry is skipped.
+        // remain a storage error, so callers cannot advance their progress.
         let conn = crate::db::open_memory();
         let entries = vec![AtomEntry {
             video_id: "v1".to_string(),
@@ -798,10 +818,7 @@ mod tests {
         }];
 
         let new = partition_new_entries(&conn, "UC_ghost", &entries, 1777161600);
-        assert!(
-            new.is_empty(),
-            "FK violation must not be reported as new video"
-        );
+        assert!(new.is_err(), "FK violation must remain retryable");
     }
 
     #[tokio::test]

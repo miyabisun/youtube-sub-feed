@@ -5,31 +5,61 @@ use crate::youtube::videos::{
 use rusqlite::Connection;
 use std::collections::HashSet;
 
-/// Enrich the given videos of one channel with details from the YouTube Data
+const NEEDS_DETAILS: &str = "(details_attempted_at IS NULL OR details_attempted_at <= ?2 - 600)
+    AND (details_checked_at IS NULL OR shorts_classifier_version < ?1
+         OR (is_livestream = 1 AND livestream_ended_at IS NULL AND details_checked_at <= ?2 - 86400))";
+
+/// Enrich the given videos with details from the YouTube Data
 /// API (duration / Shorts / livestream). No-op without an API key.
 ///
 /// Works in batches of 50 (one quota unit each): fetch → apply → mark checked,
 /// so a failure in a later batch never discards earlier results. Any fetch
-/// error aborts the remaining batches and leaves them unchecked — the daily
-/// backfill retries them.
-pub async fn enrich_videos(
-    state: &AppState,
-    channel_id: &str,
-    video_ids: &[String],
-) -> Result<(), FetchError> {
-    let Some(api_key) = state.config.youtube_api_key.clone() else {
-        tracing::debug!(
-            "[enrich] YOUTUBE_API_KEY not set, skipping enrichment for {}",
-            channel_id
-        );
+/// error aborts the remaining batches and leaves them unchecked. Later API
+/// ticks retry them, after at least ten minutes between attempts.
+pub async fn enrich_videos(state: &AppState, video_ids: &[String]) -> Result<(), FetchError> {
+    if state.config.youtube_api_key.is_none() || video_ids.is_empty() {
         return Ok(());
-    };
-
-    for chunk in video_ids.chunks(50) {
-        let details = fetch_video_details(&state.http, &api_key, chunk).await?;
-        let now = crate::util::now_unix();
+    }
+    let _guard = state.enrichment_lock.lock().await;
+    // Push, poll and backfill may have queued the same ID before this lock.
+    // Re-read eligibility now, not before waiting for the current owner.
+    let now = state.youtube_api.now();
+    let ids = {
         let conn = state.db.lock().unwrap();
-        apply_video_details(&conn, &details, chunk, now);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT EXISTS(SELECT 1 FROM videos WHERE id = ?3 AND {NEEDS_DETAILS})"
+        ))?;
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        for id in video_ids {
+            if seen.insert(id)
+                && stmt.query_row(rusqlite::params![SHORTS_CLASSIFIER_VERSION, now, id], |r| {
+                    r.get::<_, bool>(0)
+                })?
+            {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    };
+    for chunk in ids.chunks(50) {
+        {
+            let conn = state.db.lock().unwrap();
+            for id in chunk {
+                conn.execute(
+                    "UPDATE videos SET details_attempted_at = ?1 WHERE id = ?2",
+                    rusqlite::params![now, id],
+                )?;
+            }
+        }
+        let details = fetch_video_details(state, chunk).await?;
+        apply_video_details(
+            &state.db.lock().unwrap(),
+            &details,
+            chunk,
+            state.youtube_api.now(),
+        )?;
+        tracing::info!(videos = chunk.len(), "[enrich] batch saved");
     }
     Ok(())
 }
@@ -49,8 +79,11 @@ pub fn apply_video_details(
     details: &[VideoDetails],
     requested_ids: &[String],
     now: i64,
-) {
-    for d in details {
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let conn = &tx;
+    let requested: HashSet<&str> = requested_ids.iter().map(String::as_str).collect();
+    for d in details.iter().filter(|d| requested.contains(d.id.as_str())) {
         let result = if d.is_ongoing_live() {
             conn.execute(
                 "UPDATE videos SET is_livestream = 1, details_checked_at = ?1,
@@ -87,96 +120,45 @@ pub fn apply_video_details(
                 ],
             )
         };
-        if let Err(e) = result {
-            tracing::warn!("[enrich] failed to update video {}: {}", d.id, e);
-        }
+        result?;
     }
 
     let returned: HashSet<&str> = details.iter().map(|d| d.id.as_str()).collect();
     for id in requested_ids {
         if !returned.contains(id.as_str()) {
-            let _ = conn.execute(
+            conn.execute(
                 "UPDATE videos SET details_checked_at = ?1,
                         shorts_classifier_version = ?2
                  WHERE id = ?3 AND
                        (details_checked_at IS NULL OR shorts_classifier_version < ?2)",
                 rusqlite::params![now, SHORTS_CLASSIFIER_VERSION, id],
-            );
+            )?;
         }
     }
+    tx.commit()
 }
 
-/// Videos still owing an enrichment attempt, grouped by channel:
-/// - never checked (details_checked_at IS NULL), or
-/// - checked by an older Shorts classifier version, or
-/// - a livestream that hadn't ended at the last check.
-pub fn pending_enrichment(conn: &Connection) -> Vec<(String, Vec<String>)> {
-    let result = conn.prepare(
-        "SELECT channel_id, id FROM videos
-         WHERE details_checked_at IS NULL
-            OR shorts_classifier_version < ?1
-            OR (is_livestream = 1 AND livestream_ended_at IS NULL)
-         ORDER BY channel_id",
-    );
-    let mut stmt = match result {
-        Ok(stmt) => stmt,
-        Err(e) => {
-            tracing::warn!("[enrich] pending query failed: {}", e);
-            return Vec::new();
-        }
-    };
-    let rows = stmt
-        .query_map([SHORTS_CLASSIFIER_VERSION], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
-    for (channel_id, video_id) in rows {
-        match grouped.last_mut() {
-            Some((ch, ids)) if *ch == channel_id => ids.push(video_id),
-            _ => grouped.push((channel_id, vec![video_id])),
-        }
-    }
-    grouped
+/// At most two detail batches, oldest attempt first. Failed and malformed
+/// responses rotate instead of starving the rest of the backlog.
+pub fn pending_enrichment(conn: &Connection, now: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM videos WHERE {NEEDS_DETAILS}
+         ORDER BY details_attempted_at, id LIMIT 100"
+    ))?;
+    let rows = stmt.query_map([SHORTS_CLASSIFIER_VERSION, now], |row| row.get(0))?;
+    rows.collect()
 }
 
-/// Daily catch-all run from the periodic refresh worker (which also fires once
-/// at startup): enriches every pending video, including the pre-API-key backlog
-/// and any batch that failed transiently on push.
-pub async fn backfill_missing_details(state: &AppState) {
+/// Bounded catch-all on each API tick; independent of WebSub lease renewal.
+pub async fn backfill_missing_details(state: &AppState) -> Result<(), FetchError> {
     if state.config.youtube_api_key.is_none() {
-        return;
+        return Ok(());
     }
-
-    let pending = {
+    let ids = {
         let conn = state.db.lock().unwrap();
-        pending_enrichment(&conn)
+        pending_enrichment(&conn, state.youtube_api.now())?
     };
-    if pending.is_empty() {
-        return;
-    }
-
-    let total: usize = pending.iter().map(|(_, ids)| ids.len()).sum();
-    tracing::info!(
-        "[enrich] Backfilling details for {} video(s) across {} channel(s)",
-        total,
-        pending.len()
-    );
-
-    for (channel_id, ids) in pending {
-        match enrich_videos(state, &channel_id, &ids).await {
-            Ok(()) => {}
-            Err(FetchError::QuotaExceeded) => {
-                tracing::warn!("[enrich] Quota exceeded, aborting backfill until next cycle");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("[enrich] Backfill failed for {}: {}", channel_id, e);
-            }
-        }
-    }
+    enrich_videos(state, &ids).await
 }
 
 #[cfg(test)]
@@ -243,7 +225,7 @@ mod tests {
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(&conn, &details, &["v_short".to_string()], 1000);
+            apply_video_details(&conn, &details, &["v_short".to_string()], 1000).unwrap();
         }
         let (duration, is_short, _, _, checked) = video_row(&state, "v_short");
         assert_eq!(duration.as_deref(), Some("PT3M"));
@@ -275,7 +257,7 @@ mod tests {
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000);
+            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000).unwrap();
         }
         let (_, is_short, _, _, checked) = video_row(&state, "v_normal");
         assert_eq!(is_short, 0);
@@ -298,15 +280,15 @@ mod tests {
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000);
+            apply_video_details(&conn, &details, &["v_normal".to_string()], 1000).unwrap();
         }
         let (duration, _, _, _, checked) = video_row(&state, "v_normal");
         assert_eq!(duration, None);
         assert_eq!(checked, None);
 
         let conn = state.db.lock().unwrap();
-        let pending = pending_enrichment(&conn);
-        assert!(pending[0].1.contains(&"v_normal".to_string()));
+        let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
+        assert!(pending.contains(&"v_normal".to_string()));
     }
 
     #[test]
@@ -325,7 +307,7 @@ mod tests {
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(&conn, &details, &["v_live".to_string()], 1000);
+            apply_video_details(&conn, &details, &["v_live".to_string()], 1000).unwrap();
         }
         let (duration, is_short, is_livestream, ended_at, checked) = video_row(&state, "v_live");
         assert_eq!(duration, None);
@@ -335,9 +317,8 @@ mod tests {
         assert_eq!(checked, Some(1000));
 
         let conn = state.db.lock().unwrap();
-        let pending = pending_enrichment(&conn);
-        assert_eq!(pending.len(), 1);
-        assert!(pending[0].1.contains(&"v_live".to_string()));
+        let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
+        assert!(pending.contains(&"v_live".to_string()));
     }
 
     #[test]
@@ -353,7 +334,7 @@ mod tests {
         }];
         {
             let conn = state.db.lock().unwrap();
-            apply_video_details(&conn, &details, &["v_live".to_string()], 2000);
+            apply_video_details(&conn, &details, &["v_live".to_string()], 2000).unwrap();
         }
         let (duration, _, is_livestream, ended_at, checked) = video_row(&state, "v_live");
         assert_eq!(duration.as_deref(), Some("PT1H2M"));
@@ -377,7 +358,7 @@ mod tests {
                 [SHORTS_CLASSIFIER_VERSION - 1],
             )
             .unwrap();
-            apply_video_details(&conn, &[], &["v_deleted".to_string()], 3000);
+            apply_video_details(&conn, &[], &["v_deleted".to_string()], 3000).unwrap();
         }
         let (duration, _, _, _, checked) = video_row(&state, "v_deleted");
         assert_eq!(duration, None);
@@ -391,11 +372,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, SHORTS_CLASSIFIER_VERSION);
-        let pending = pending_enrichment(&conn);
+        let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
         assert!(
-            pending
-                .iter()
-                .all(|(_, ids)| !ids.iter().any(|id| id == "v_deleted")),
+            pending.iter().all(|id| id != "v_deleted"),
             "an absent video must converge after its classifier version advances"
         );
     }
@@ -419,11 +398,8 @@ mod tests {
         .unwrap();
         // v_normal, v_deleted: never checked → pending
 
-        let pending = pending_enrichment(&conn);
-        assert_eq!(pending.len(), 1);
-        let (channel, ids) = &pending[0];
-        assert_eq!(channel, "UC1");
-        let ids: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
+        let ids: HashSet<&str> = pending.iter().map(|s| s.as_str()).collect();
         assert_eq!(ids, HashSet::from(["v_normal", "v_deleted", "v_live"]));
     }
 
@@ -439,8 +415,8 @@ mod tests {
         )
         .unwrap();
 
-        let pending = pending_enrichment(&conn);
-        let ids: HashSet<&str> = pending[0].1.iter().map(|s| s.as_str()).collect();
+        let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
+        let ids: HashSet<&str> = pending.iter().map(|s| s.as_str()).collect();
         assert!(ids.contains("v_short"));
     }
 }
