@@ -4,13 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vp dev --port 5173 --host",
-    "build": "vp build",
-    "preview": "vp preview --port 5173 --host",
-    "test": "vp test",
-    "fmt": "vp fmt && prettier --write \"src/**/*.svelte\"",
-    "lint": "vp lint",
-    "check": "vp check && prettier --check \"src/**/*.svelte\""
+    "dev": "vite --port 5173 --host",
+    "build": "vite build",
+    "preview": "vite preview --port 5173 --host",
+    "test": "vitest",
+    "fmt": "oxfmt && prettier --write \"src/**/*.svelte\"",
+    "lint": "oxlint",
+    "check": "oxfmt --check && oxlint && prettier --check \"src/**/*.svelte\""
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
@@ -20,9 +20,8 @@
     "prettier": "^3.9.6",
     "prettier-plugin-svelte": "^4.1.1",
     "sass": "^1.60.0",
-    "svelte": "^5.54.0",
-    "vite": "^8.0.0",
-    "vite-plus": "^0.1.12",
+    "svelte": "^5.55.7",
+    "vite": "^8.0.16",
     "vitest": "^4.1.0"
   }
 }
