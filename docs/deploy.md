@@ -2,6 +2,9 @@
 
 ## 前提: Cloudflare Access の設定
 
+[Cloudflareの公開アプリ設定](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)に従い、
+自分のドメインからアプリへTunnelで転送し、許可するメールアドレスをAccessのポリシーへ指定します。
+
 このアプリは認証に **Cloudflare Access** を使用します。
 Cloudflare Zero Trust でアプリケーションを作成し、アクセスポリシーを設定してください。
 Cloudflare Access は認証済みリクエストに `Cf-Access-Authenticated-User-Email` ヘッダーを付与します。
@@ -12,15 +15,26 @@ Cloudflare Access は認証済みリクエストに `Cf-Access-Authenticated-Use
 > `Cf-Access-Authenticated-User-Email` ヘッダーはアプリ側で無検証で信頼するため、
 > ポートが直接公開されるとヘッダー偽装で任意ユーザーになりすませます。
 
+## WebSub callback
+
+`/api/websub/callback`の正確なパスだけに、AccessのBypassポリシーを設定します。
+Google Hubは対話ログインできないため、このパスのGETによる購読確認とPOST通知を通す必要があります。
+アプリは保存した購読secretでPOSTの署名を検証します。
+画面や他のAPIまで認証を除外せず、callbackの公開とoriginポートの公開を区別してください。
+詳細は[Accessのパス設定](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)と
+[YouTubeのpush通知](https://developers.google.com/youtube/v3/guides/push_notifications)を参照してください。
+
 ## Docker ビルド
+
+ソースを取得したcheckoutのルートで実行します。公開イメージからの起動は[README](../README.md#run-with-docker)を参照してください。
 
 ```bash
 docker build -t youtube-sub-feed .
 ```
 
-タグ `vX.Y.Z` が `Cargo.toml` / `Cargo.lock` の package version と一致する
-commit から、Linux amd64 の image を `ghcr.io/miyabisun/youtube-sub-feed:X.Y.Z`
-と `:latest` に公開します。GitHub Release や native binary は作成しません。
+タグ`vX.Y.Z`は`Cargo.toml`と`Cargo.lock`のpackage versionに一致させます。
+そのcommitからLinux amd64のimageを公開します。
+公開先は`ghcr.io/miyabisun/youtube-sub-feed:X.Y.Z`と`:latest`です。GitHub Release や native binary は作成しません。
 
 Rust 1.96.0 と cargo-chef 0.1.78 を固定し、依存 build の後に本物の manifest と
 source をコピーして本体を再コンパイルします。release profile は `opt-level=3`、
@@ -31,38 +45,47 @@ CI は製品 image と分けた GHCR の `:build-cache` に中間段階を `mode
 
 ## Docker 起動
 
+データ用ディレクトリを事前に作り、`/path/to/data`を置き換えます。
+APIキーとDiscord URLを使う場合は、実行するシェルに同名の環境変数を設定してください。
+
 ```bash
 docker run -d \
   --name youtube-sub-feed \
-  -p 3000:3000 \
+  -p 127.0.0.1:3000:3000 \
   -v /path/to/data:/data \
   -e NODE_ENV=production \
   -e DATABASE_PATH=/data/feed.db \
   -e GIS_CLIENT_ID=xxx.apps.googleusercontent.com \
-  -e YOUTUBE_API_KEY=AIzaXXXX \
+  -e YOUTUBE_API_KEY \
   -e CATCHUP_INTERVAL_MINUTES=10 \
-  -e WEBSUB_CALLBACK_URL=https://feed.sis.jp/api/websub/callback \
-  -e PUBLIC_BASE_URL=https://feed.sis.jp \
-  -e DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx \
+  -e WEBSUB_CALLBACK_URL=https://youtube.example.com/api/websub/callback \
+  -e PUBLIC_BASE_URL=https://youtube.example.com \
+  -e DISCORD_WEBHOOK_URL \
   youtube-sub-feed
 ```
 
-WebSub (PubSubHubbub) 経由で YouTube から新着動画のプッシュ通知を受信するため、`WEBSUB_CALLBACK_URL` には **公開 HTTPS URL** を指定する必要があります。
+WebSubで新着動画を受信するため、`WEBSUB_CALLBACK_URL`へ公開HTTPS URLを指定してください。
 
 ## GIS_CLIENT_ID の設定
 
-`GIS_CLIENT_ID` は Google Identity Services (GIS) のクライアント ID です。
-ブラウザのチャンネル同期機能で使用します（サーバーからの YouTube API 呼び出しには
-`YOUTUBE_API_KEY` を使用し、OAuth トークンは扱いません）。
+ブラウザの「チャンネル同期 (YouTube)」を使う場合だけ設定します。
+手動でチャンネルIDを登録するなら不要です。
+[GoogleのクライアントID設定](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid)も参照してください。
 
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
-2. 「APIとサービス」→「認証情報」→「OAuth 2.0 クライアントID」を作成
-   - アプリケーションの種類: **ウェブアプリケーション**
-   - 承認済みの JavaScript 生成元: `https://feed.sis.jp` など
-3. 作成したクライアント ID を `GIS_CLIENT_ID` に設定
+1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
+2. 新しいプロジェクトを作成（または既存のプロジェクトを選択）
+3. **API とサービス > ライブラリ** に移動し、**YouTube Data API v3** を有効にする
+4. 左メニューの **Google Auth platform** を開き、OAuth 同意画面を設定
+   - 対象: **外部** を選択 → テストユーザーに自分の Google メールアドレスを追加
+   - データアクセス: `https://www.googleapis.com/auth/youtube.readonly` を追加
+5. 左メニューの **API とサービス > 認証情報** に移動
+6. **認証情報を作成 > OAuth クライアント ID** をクリック
+   - アプリケーションの種類: **ウェブ アプリケーション**
+   - 承認済みの JavaScript 生成元: `https://youtube.example.com`（自分の公開originへ置換）
+7. 作成した **クライアント ID** を `GIS_CLIENT_ID` に設定する
 
-注意: このクライアント ID はブラウザの JS に埋め込まれる公開値です（シークレットではありません）。
-サーバー側にアクセストークンは送信・保存されません。
+クライアントシークレットは不要です。ブラウザのGISが短命トークンを取得します。
+このサーバーへトークンを送信・保存しません。テストユーザーに自分を追加すれば「未確認アプリ」警告を経由して利用できます。
 
 ## YOUTUBE_API_KEY の設定
 
@@ -81,8 +104,9 @@ Shorts フィルタ、ライブ判定、取りこぼし検出は機能しませ�
 API巡回します。Hubの503・長いRetry-After・応答遅延・購読確認成功なのにpushが無い場合も
 同じ処理を継続します。WebSub購読更新は別workerで動き、APIの排他を保持しません。
 
-1巡回の上限は、count未設定・増減を検出した先頭 **4チャンネル**、24時間経過した先頭の
-修復 **2チャンネル**、履歴cursorの継続 **2チャンネル**、それぞれ1ページ（最大50件）です。
+1巡回では、count未設定・増減を検出した先頭4チャンネルを確認します。
+さらに24時間経過した先頭の修復2チャンネル、履歴cursorの継続2チャンネルを処理します。
+それぞれ1ページ（最大50件）が上限です。
 同じ先頭ページを複数の枠で取りません。先頭が毎回変わるチャンネルも、別ページの履歴cursorは進めます。
 先頭の修復は履歴の深さから独立し、同数入替・統計の反映遅延・統計からの欠落も後から照合します。
 履歴はAPIで公開取得できるuploads全体が対象で、一周完了から7日後に次の一周を始めます。
@@ -98,9 +122,9 @@ videoCount、次のcursorは同じtransactionで保存します。どれかの�
 補完し、試行時刻で分散、失敗からの再試行は10分以上空けます。ライブの再確認は成功から24時間後です。
 push・poll・補完は同じ保存処理と詳細の排他を使い、既に補完済みのIDを再取得しません。
 
-手動の「全件取得し直し」は全チャンネルの先頭を修復対象へ戻し、まず上限付きの1巡回を実行します。
+手動の「全件取得し直し」は全チャンネルの先頭を修復対象へ戻し、まず上限付きで1巡回します。
 残りと履歴は定期巡回で続けます。`CATCHUP_INTERVAL_MINUTES` が未設定・無効なら起動/手動の
-1巡回だけで止まり、残りを継続するには定期巡回を有効にするか手動で再実行する必要があります。
+1巡回だけで止まり、残りを継続するには定期巡回を有効にするか、手動で再実行してください。
 HTTP 202や初回巡回の完了通知は、履歴全部の回収完了を意味しません。
 
 ### 費用と取得遅延
@@ -128,8 +152,8 @@ HTTP 202や初回巡回の完了通知は、履歴全部の回収完了を意味
 
 ### 実project予算との照合と休止
 
-運用前にGoogle Cloud Consoleで **APIキーのprojectの実際の日次quota、当日の利用量、
-GIS_CLIENT_IDや他アプリと共有する用途**を確認します。一般の既定値を実機の上限として扱いません。
+運用前にGoogle Cloud Consoleで、APIキーのprojectの日次quotaと当日の利用量を確認します。
+GIS_CLIENT_IDや他アプリと共有する用途も照合してください。一般の既定値を実機の上限として扱いません。
 [公式quota説明](https://developers.google.com/youtube/v3/determine_quota_cost) にも、無効な要求の
 課金単位とPacific Timeの午前0時リセットが記載されています。
 
@@ -150,89 +174,58 @@ UTCの2日分にまたがります。DSTの25時間の日も含め、PT日ごと
 共有の休止期限として保存し、workerを長時間sleepさせません。短い指定も次の試行まで待ちます。
 
 WebSubの診断・購読・解除は従来の10秒以上のpacingを使い、Retry-Afterは最後の失敗後の
-次チャンネルにも適用します。WebSub失敗通知はbatchで集約し、API失敗通知は理由ごとに1時間に1回まで。
+次チャンネルにも適用します。WebSub失敗通知はbatchで集約し、API失敗通知は理由ごとに、1時間あたり1回までです。
 少数のpush成功やHub受付だけでAPIを止めません。
 
-### リリース後の確認（home-server/sis）
+### 配備後の確認
 
-以下は本番接続元でのread-only確認です。実装テストはlocalhost stubと一時SQLiteだけを使います。
-imageのrevisionを今回のrelease commitと照合し、起動直後から少なくとも35分（複数巡回）を観測します。
-
-```bash
-docker --context conoha inspect --format '{{.Image}} {{.State.StartedAt}} {{.RestartCount}}' sis-youtube-1
-image_id=$(docker --context conoha inspect --format '{{.Image}}' sis-youtube-1)
-docker --context conoha image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id"
-docker --context conoha logs --since 35m sis-youtube-1 2>&1 | rg '\[catchup\] (Scan started|Scan complete|page saved)|\[youtube-api\] (quota pause|Retry-After pause)'
-```
-
-推計unitsは `[youtube-api] request` をendpoint別に数えます。APIキーやURL、環境変数全体を出力しません。
+以下は起動したホスト上での確認例です。コンテナ名は起動時に指定した名前へ合わせます。
 
 ```bash
-docker --context conoha logs --since 24h sis-youtube-1 2>&1 | python3 -c '
-import collections, json, re, sys
-counts = collections.Counter()
-for line in sys.stdin:
-    line = re.sub(r"\x1b\[[0-9;]*m", "", line)
-    if "[youtube-api] request" in line:
-        match = re.search(r"endpoint=\"?(\w+)", line)
-        if match:
-            counts[match[1]] += 1
-print(json.dumps({"requests": dict(counts), "estimated_units": sum(counts.values())}))
-'
-docker --context conoha exec sis-sqlite-backup-1 sqlite3 -readonly /dbs/youtube/feed.db 'SELECT requests, datetime(window_started,"unixepoch"), datetime(quota_until,"unixepoch"), datetime(retry_until,"unixepoch") FROM youtube_api_state; SELECT count(*) AS pending_heads FROM channel_catchup WHERE repair_after <= unixepoch(); SELECT count(*) AS active_cursors FROM channel_catchup WHERE page_token IS NOT NULL; SELECT count(*) AS unchecked_details FROM videos WHERE details_checked_at IS NULL;'
+docker inspect --format '{{.Image}} {{.State.StartedAt}} {{.RestartCount}}' youtube-sub-feed
+image_id=$(docker inspect --format '{{.Image}}' youtube-sub-feed)
+docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id"
+docker logs --since 35m youtube-sub-feed 2>&1 | rg '\[catchup\] (Scan started|Scan complete|page saved)|\[youtube-api\] (quota pause|Retry-After pause)'
 ```
 
-Google Consoleの日次使用量とも照合します。ログはコンテナ再作成で失われ、DBの`requests`はUTC日次窓で
-リセットされます。いずれも他アプリ/ブラウザの要求は含まず、実project全体の残quotaではありません。
-`page saved imported=N` が実際の新規登録数です。`fetched_at`は既存行の照合でも更新するため、
-その件数だけで新着の回収成功とはしません。
+公開imageのrevisionを対象tagのcommitと照合します。
+10分間隔なら少なくとも35分観測し、複数巡回の継続と`page saved imported=N`の新規登録数を確認します。
+`fetched_at`は既存行の照合でも更新するため、その件数だけで回収成功とはしません。
+Google Cloud Consoleで同じprojectの日次使用量と残quotaも確認してください。
+アプリのログやUTC日次予算だけでは、ブラウザや他アプリも含むproject全体の利用量は分かりません。
+ログはコンテナ再作成で失われます。APIキーやURL、環境変数全体を診断出力に含めないでください。
 
-最後に通常の認証済みブラウザで `/api/feed` と画面を確認し、APIで取り込んだ動画IDが表示されることを
-照合します。内部Docker networkからAPIを確認する場合の例（既存backupコンテナに`wget`がある場合）:
-
-```bash
-docker --context conoha exec sis-sqlite-backup-1 sh -eu -c '
-email=$(sqlite3 -readonly /dbs/youtube/feed.db "SELECT email FROM users ORDER BY id LIMIT 1")
-test -n "$email"
-wget -qO- --header="Cf-Access-Authenticated-User-Email: $email" http://youtube:3000/api/feed
-' | python3 -c 'import json, sys; rows=json.load(sys.stdin); assert isinstance(rows, list); print({"feed_count": len(rows), "video_ids": [v["id"] for v in rows[:10]]})'
-```
-
-このコマンドはemailや認証情報を表示しません。内部経路だけの成功はCloudflare経由の画面確認を代替しません。
-Hub障害の残存や全チャンネル購読成功を待たず、API巡回継続・取り込み・通常feed・費用の4点で確認します。
+認証済みブラウザからフィードを開き、取り込んだ動画が表示されることを確認します。
+内部経路のAPI応答だけではCloudflare経由の利用確認になりません。
+Hubの全購読成功だけに依存せず、API巡回・取り込み・通常のフィード・API予算を照合します。
 
 ## 初回セットアップ
 
 1. コンテナ起動後、Cloudflare Access 経由で最初にアクセスしたユーザーが **マスターユーザー** として自動登録されます。
-2. ヘッダーメニューの「チャンネル同期 (YouTube)」から Google アカウントを認可してチャンネルを同期、
-   または「チャンネル」ページから UC で始まるチャンネル ID を直接入力して手動追加できます。
+2. ヘッダーメニューの「チャンネル同期 (YouTube)」でGoogleアカウントを認可し、購読一覧を取り込みます。
+   手動追加は「チャンネル」でUCから始まるチャンネルIDを入力します。
 3. チャンネルを追加すると WebSub サブスクリプションが自動的に登録され、新着動画がプッシュ通知されます。
 
-## nginx 設定例
+## ローカル開発
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name feed.sis.jp;
+本番と別のDBを使い、開発サーバーへ他の端末から到達できない環境で実行します。
+listenerは`0.0.0.0`なので、開発モードを公開ネットワークへ露出しないでください。
+`.env`で開発用DBを選び、`NODE_ENV`を`development`にして、READMEの手順で画面をビルドします。
+`./bin/dev`で起動した後、空のDBへローカル検証用ユーザーを作る場合だけ次を実行します。
 
-    ssl_certificate /etc/letsencrypt/live/feed.sis.jp/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/feed.sis.jp/privkey.pem;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-server {
-    listen 80;
-    server_name feed.sis.jp;
-    return 301 https://$host$request_uri;
-}
+```bash
+curl --fail http://localhost:3000/api/auth/me \
+  -H 'Cf-Access-Authenticated-User-Email: dev@example.com'
 ```
+
+ブラウザで`http://localhost:3000`を開くと、このDBの最初のユーザーを使います。
+これは自分の隔離環境での初期化です。本番はヘッダーを手動で作らず、Accessによる認証を使ってください。
+
+## Discord通知
+
+Discordのサーバー設定から連携サービスのWebhookを作り、通知先チャンネルを選びます。
+コピーしたURLを`DISCORD_WEBHOOK_URL`に設定してアプリを再起動してください。
+WebSubの不正なpush、購読・API取得の失敗通知に使います。URLは秘密値として扱ってください。
 
 ## Volume マウント
 
@@ -252,3 +245,23 @@ server {
 - `GOOGLE_CLIENT_ID` — Google OAuth2 クライアントID（不要）
 - `GOOGLE_CLIENT_SECRET` — Google OAuth2 クライアントシークレット（不要）
 - `GOOGLE_REDIRECT_URI` — OAuth2 コールバックURL（不要）
+
+## WebSub の購読確認と再試行
+
+起動・チャンネル追加・24時間ごとの更新・手動全件取得では、申請前に購読状態を照会します。
+各topicとcallbackをGoogle Hubの[公式Subscriber Diagnostics](https://pubsubhubbub.appspot.com/subscribe)で確認します。
+全購読一覧の JSON API ではなく、`GET /subscription-details` の HTML 診断です。
+既存の署名 secret を使い、購読が有効で期限まで2日を超えるものは再申請しません。
+診断のHTTPエラー・未知のHTML・状態・日時はログに残し、コールバックで確認済みのDB期限へフォールバックします。
+その場合、Hubの現在状態を直接確認できたとは扱いません。診断結果でDBの署名secretや確認済み期限を書き換えることもありません。
+
+全経路で同じ送信制御を使い、診断・購読・解除を10秒以上空けて送ります。
+一時エラー（通信失敗、408、429、500、502、503、504）は30秒以上空けて2回まで再試行します。
+`Retry-After`の秒数・HTTP日時がさらに先なら、その時刻まで待ちます。恒久エラーは再試行しません。
+全対象の処理後、最終失敗だけをチャンネル名でDiscordへ1回通知します。
+名前が未入力・ID代用の場合だけ公開Atomフィードからチャンネル名を取得して保存し、取得不能時は「名前未取得のチャンネル」と表示します（IDはログに残します）。
+起動直後の同じ失敗を定期処理で繰り返さないよう、次の購読更新は24時間後です。動画情報の補完はHubから独立したAPI巡回で行います。
+HTTP受付は非同期確認の完了を意味せず、受付後1時間は同じチャンネルの再申請を待ちます。
+手動全件取得は全チャンネルをAPIの修復対象に戻し、上限付きの巡回で継続します。
+費用・最大遅延・休止と復旧・本番確認は [デプロイ手順](#websub-に依存しない-api-巡回) を参照してください。
+[YouTube の公式プッシュ通知手順](https://developers.google.com/youtube/v3/guides/push_notifications) も参照してください。

@@ -1,114 +1,105 @@
 # youtube-sub-feed
 
-> 日本語ドキュメントは [README.ja.md](./README.ja.md) を参照してください。
+[日本語](README.ja.md)
 
-A personal web app for browsing your YouTube subscriptions chronologically, without the recommendation algorithm.
+A self-hosted web app for viewing YouTube subscriptions in chronological order.
+Add channels manually or import your subscriptions.
+Organize videos into groups, hide watched items, and filter Shorts or livestreams.
 
-## Tech Stack
+## Run with Docker
 
-- **Backend**: Rust (axum + tokio)
-- **Database**: SQLite (rusqlite)
-- **Frontend**: Svelte 5 + Vite
-- **Notifications**: Discord Webhook
+You need Docker on a Linux amd64 host, a domain, and Cloudflare Access for sign-in.
+The app trusts the email header supplied by Access; it does not verify that header itself.
+Keep the origin port private and route users through Access.
+Use [Cloudflare’s guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) to configure the hostname and Access policy.
+App-specific setup is in the [deployment guide (Japanese)](docs/deploy.md).
 
-## Prerequisites
-
-- [Rust](https://rustup.rs/) (stable)
-- [Node.js](https://nodejs.org/) v22+ (for frontend build)
-- A Cloudflare account (Cloudflare Access is used for authentication)
-
-## Setup
-
-### 1. Google Cloud Project (only if using the channel sync button)
-
-If you want to use the "Channel Sync (YouTube)" button in the header menu, you need a GIS client ID.
-You can skip this step if you only add channels manually by channel ID.
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select an existing one)
-3. Navigate to **APIs & Services > Library** and enable **YouTube Data API v3**
-4. Open **Google Auth platform** from the left menu and configure the OAuth consent screen
-   - **Audience**: select **External** → add your own Google email address as a test user
-   - **Data Access**: add `https://www.googleapis.com/auth/youtube.readonly`
-5. Navigate to **APIs & Services > Credentials** from the left menu
-6. Click **Create Credentials > OAuth client ID**
-   - Application type: **Web application**
-   - Authorized JavaScript origins: `http://localhost:3000` (for development)
-7. Copy the **Client ID** and set it as `GIS_CLIENT_ID`
-
-> **Note:** No client secret is required. The browser-side GIS (Google Identity Services) obtains a short-lived token and never sends or stores it on the server. Adding yourself as a test user allows usage via the "unverified app" warning screen.
-
-### 2. Configure
-
-Copy `.env.example` to `.env` and fill in your settings:
+Create a `.env` file. Replace the example origin with your domain:
 
 ```env
-PORT=3000
-DATABASE_PATH=./feed.db
-GIS_CLIENT_ID=your-client-id.apps.googleusercontent.com
-WEBSUB_CALLBACK_URL=http://localhost:3000/api/websub/callback
+NODE_ENV=production
+DATABASE_PATH=/data/feed.db
 PUBLIC_BASE_URL=https://youtube.example.com
+WEBSUB_CALLBACK_URL=https://youtube.example.com/api/websub/callback
 ```
 
-### 3. Start the Server
+```bash
+docker pull ghcr.io/miyabisun/youtube-sub-feed:latest
+docker run -d \
+  --name youtube-sub-feed \
+  -p 127.0.0.1:3000:3000 \
+  -v ytfeed-data:/data \
+  --env-file .env \
+  ghcr.io/miyabisun/youtube-sub-feed:latest
+```
+
+Run the tunnel connector on this host, forwarding to `http://localhost:3000`. For a containerized connector, use a private Docker network.
+Allow public GET/POST requests to the exact WebSub callback path, without Access login.
+Keep the rest of the app protected; see [callback setup](docs/deploy.md#websub-callback).
+
+Open your public URL and sign in with an email allowed by your Access policy.
+The first authenticated user becomes the master user. An empty database has no default account.
+Setting `NODE_ENV=production` is required even with a release image.
+
+## Add channels and read videos
+
+1. Open **チャンネル** (Channels) and add a channel ID beginning with `UC`.
+   Alternatively, configure `GIS_CLIENT_ID` and use **チャンネル同期 (YouTube)** in the header menu.
+2. Return to the feed to see imported videos ordered by publication time.
+3. Use groups and the Shorts/live filters to narrow the feed; swipe a video to hide it.
+
+Sync matches your channel list to your Google subscriptions, including removals.
+Check the Google account before syncing.
+
+WebSub receives new uploads through the public callback. Set `YOUTUBE_API_KEY` for API catch-up and video details.
+For periodic checks, set `CATCHUP_INTERVAL_MINUTES` to positive minutes, such as `10`.
+Without the key, API catch-up and detail-based classification are unavailable.
+Without periodic catch-up, startup/manual refresh runs only one bounded pass.
+A new channel may show no videos until push delivery or API retrieval.
+
+For sync, [create a Google web client ID](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid).
+Use your app’s public origin. Allow the `https://www.googleapis.com/auth/youtube.readonly` scope.
+Set the resulting ID as `GIS_CLIENT_ID`; enable YouTube Data API v3 in the Google project.
+API catch-up uses a separate API key from that project, set as `YOUTUBE_API_KEY`.
+See the [deployment guide (Japanese)](docs/deploy.md) for quota planning and Discord alerts. Browser sync uses a public GIS client ID, with no client secret.
+It does not send its OAuth token to this server.
+
+## Data and updates
+
+The named volume stores the SQLite database. Keep it when replacing the container.
+Back up with SQLite's backup facility, or stop the app and copy the entire data directory.
+After pulling an updated image, stop and remove only the container.
+Then run the same command again.
+Keep the same volume and environment file. Do not publish `.env` or its secrets.
+
+## Build from source
+
+The backend uses Rust and SQLite; the frontend uses Svelte 5 and Vite.
+Install Git, Rust 1.96+, Node.js 22+ and npm.
+You also need pkg-config and OpenSSL development libraries.
+Then run:
 
 ```bash
-# Development (with frontend hot rebuild)
-./bin/dev
-
-# — or —
-
-# Production
-cd client && npm install && npx vite build && cd ..
-cargo build --release
+git clone https://github.com/miyabisun/youtube-sub-feed.git
+cd youtube-sub-feed
+cp .env.example .env
+npm --prefix client ci
+npm --prefix client run build
+cargo build --release --locked
 NODE_ENV=production ./target/release/youtube-sub-feed
 ```
 
-Open `http://localhost:3000`. In development, the first DB user is automatically authenticated (devbypass). In production, Cloudflare Access handles authentication.
-
-### 4. Discord Notifications (Optional)
-
-To receive Discord notifications when new videos are detected:
-
-1. In your Discord server, open **Server Settings > Integrations > Webhooks**
-2. Click **New Webhook**, choose a channel, and copy the **Webhook URL**
-
-Add to `.env`:
-
-```env
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/xxx/xxx
-```
-
-Restart the server. An embed will be sent for each new video detected via WebSub push.
-
-## Docker
-
-```bash
-docker build -t youtube-sub-feed .
-
-docker run -d \
-  --name youtube-sub-feed \
-  -p 3000:3000 \
-  -v ytfeed-data:/app \
-  --env-file .env \
-  -e NODE_ENV=production \
-  youtube-sub-feed
-```
-
-For production, place Cloudflare Access in front of the app. See `docs/deploy.md` for details.
-
-## How It Works
-
-- Channels are registered manually (by channel ID) or bulk-imported via the "Channel Sync (YouTube)" button in the header menu
-- On registration, a WebSub (PubSubHubbub) subscription is automatically set up to receive push notifications for new videos
-- WebSub push and bounded API catch-up run independently; API polling keeps discovering uploads even when the Hub accepts subscriptions but sends no pushes
-- Videos can be organized into groups, hidden via swipe, and filtered by type (Shorts, livestreams)
+Edit `.env` before starting; the default database path is `./feed.db`.
+Production uses the same Access setup as Docker. For local development, `./bin/dev` watches the frontend and starts the Rust server.
+Development mode reuses the first existing DB user; it does not create one automatically.
+See [local development](docs/deploy.md#ローカル開発) for initial setup and isolation.
+Run `cargo test --locked` after building the frontend to check the backend.
 
 ## Environment Variables
 
 The server loads `.env` at startup; existing process environment values take precedence.
-All variables can be omitted for startup. Feature-specific requirements and application defaults
-are listed below; a release build does not automatically set `NODE_ENV=production`.
+All variables can be omitted for startup. Feature requirements and defaults are listed below.
+A release build does not automatically set `NODE_ENV=production`.
 
 | Variable | Required | Unset default | Purpose and invalid/empty values |
 | --- | --- | --- | --- |
@@ -124,59 +115,31 @@ are listed below; a release build does not automatically set `NODE_ENV=productio
 | `NODE_ENV` | Set `production` for production user handling | Development mode | Exactly `production` disables the first-DB-user fallback for requests without the Access email header and keeps cached SPA HTML. Every other value, including empty or misspelled values, enables development behavior. This does not configure Cloudflare Access itself. |
 | `RUST_LOG` | No | `info` | Log level or target filter, e.g. `debug` or `youtube_sub_feed=debug`. Empty selects `error`. Invalid filter syntax prints a warning to stderr and disables logs. `LOG_LEVEL` is not read. |
 
-Without `PUBLIC_BASE_URL`, feed links use `X-Forwarded-Proto` (default `http`),
-then `X-Forwarded-Host` or `Host` (default `localhost:<PORT>`).
+Without `PUBLIC_BASE_URL`, feed links take the protocol from `X-Forwarded-Proto`.
+It defaults to `http`. The host comes from `X-Forwarded-Host`, then `Host`.
+The host fallback is `localhost:<PORT>`.
 The listener binds to `0.0.0.0`. Dockerfile sets only `PORT=3000`, not production mode.
-Set `NODE_ENV=production` in the server environment (for example, `docker run -e NODE_ENV=production`).
-See [deployment instructions](docs/deploy.md) for provider configuration and the
-[home-server README](https://github.com/miyabisun/home-server/blob/main/README.md) and
-[sis/compose.yaml](https://github.com/miyabisun/home-server/blob/main/sis/compose.yaml)
-for shared environment names, mounts, and explicitly injected values. For example,
-`YOUTUBE_GIS_CLIENT_ID` and `YOUTUBE_DISCORD_WEBHOOK_URL` are Compose identifiers;
-the application reads `GIS_CLIENT_ID` and `DISCORD_WEBHOOK_URL`. The current Compose
-file does not set `NODE_ENV`; production mode must be supplied by the deployment environment.
+Set `NODE_ENV=production` in the server environment, as in the Docker example above.
+See [deployment instructions](docs/deploy.md) for authentication, public callbacks and quota operation.
 
-Old server-side OAuth variables `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and
-`GOOGLE_REDIRECT_URI` are no longer read. Browser sync uses `GIS_CLIENT_ID`;
-there is no replacement server-side client secret or redirect variable.
+These old server-side OAuth variables are no longer read:
+
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GOOGLE_REDIRECT_URI`
+ Browser sync uses `GIS_CLIENT_ID`.
+There is no replacement server-side client secret or redirect variable.
 
 ### Frontend build setting
 
-`VITE_GIS_CLIENT_ID` is optional and is read by Vite when building the frontend,
-not by the running server. It defaults to empty and embeds a public GIS client ID
-as the fallback when runtime `GIS_CLIENT_ID` is empty. There is no client-ID
+Vite reads the optional `VITE_GIS_CLIENT_ID` at build time.
+The running server does not read it. It defaults to empty. Its bundled public ID is used when runtime `GIS_CLIENT_ID` is empty. There is no client-ID
 validation; an invalid value may fail at Google authorization. Changing this
 fallback requires rebuilding the frontend. A nonempty runtime `GIS_CLIENT_ID`
 overrides it without rebuilding.
 
-Sources: [configuration](src/config.rs), [startup](src/main.rs),
-[user handling](src/middleware.rs), [SPA cache](src/spa.rs), [feed URLs](src/routes/news.rs),
-[frontend configuration](client/src/lib/config.js).
+Sources:
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `./bin/dev` | Start dev server with frontend hot rebuild |
-| `cargo build --release` | Build for production |
-| `cargo test` | Run all tests |
-
-### WebSub subscription checks and retries
-
-Startup, channel additions, daily renewal and manual full refresh check each topic/callback through Google's
-[official Subscriber Diagnostics](https://pubsubhubbub.appspot.com/subscribe) before subscribing.
-This is the HTML `GET /subscription-details` diagnostic, not a JSON or all-subscriptions API.
-Checks use the stored signing secret and skip active subscriptions with more than two days remaining.
-HTTP errors or unknown diagnostic HTML/state/dates are logged and fall back to the callback-confirmed DB lease;
-that fallback does **not** establish the Hub's current state. Diagnostics never replace stored secrets or confirmed leases.
-
-One process-wide gate spaces diagnostic, subscribe and unsubscribe requests at least 10 seconds apart.
-Transient failures (network errors, 408, 429, 500, 502, 503, 504) get at most two retries, at least 30 seconds apart;
-a longer `Retry-After` delay or HTTP date is respected. Permanent errors are not retried.
-After a batch finishes, Discord receives one summary naming only the channels that ultimately failed.
-Only when a failed channel has an empty or ID-placeholder name, its public Atom feed is fetched to resolve and save the name.
-If that also fails, the summary explicitly says the name is unavailable and the ID remains in logs.
-API startup, metadata backfill and periodic scans run independently of Hub work. The Hub worker waits 24 hours after its initial pass before renewing subscriptions, avoiding a second startup failure batch.
-HTTP acceptance remains separate from asynchronous callback confirmation, with a one-hour grace period before
-re-requesting an accepted subscription. Manual refresh queues every channel for bounded API repair, independently of Hub renewal. See [API scheduling, quota costs, recovery limits and production checks](docs/deploy.md#websub-に依存しない-api-巡回).
-See also the [YouTube push notification guide](https://developers.google.com/youtube/v3/guides/push_notifications).
+- [Configuration](src/config.rs) and [startup](src/main.rs).
+- [User handling](src/middleware.rs) and [SPA cache](src/spa.rs).
+- [Feed URLs](src/routes/news.rs) and [frontend configuration](client/src/lib/config.js).
