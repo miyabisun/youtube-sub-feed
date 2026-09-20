@@ -234,7 +234,7 @@ WebSubの不正なpush、購読・API取得の失敗通知に使います。URL�
 
 ## 環境変数
 
-一覧と不正値の扱いは [README.md](../README.md#environment-variables) を正本とします。
+環境変数の一覧と不正値の扱いは、[README.md](../README.md#environment-variables) を参照してください。
 本番では `NODE_ENV=production` を明示してください。Dockerfile や release build は
 この値を設定しません。上記起動例では `-e NODE_ENV=production` で渡します。
 
