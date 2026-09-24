@@ -2,15 +2,73 @@ use crate::state::AppState;
 use crate::websub::atom::{parse_atom_document, AtomEntry};
 use crate::websub::{extract_channel_id, signature};
 use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, QueryRejection};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/websub/callback", get(verification).post(notification))
+    Router::new().route(
+        "/api/websub/callback",
+        get(verification).post(notification).fallback(|| async {
+            CallbackLog::new("-").respond("method_not_allowed", StatusCode::METHOD_NOT_ALLOWED)
+        }),
+    )
+}
+
+/// Exactly one aggregate is emitted with the response, including extractor errors.
+/// Unknown counters remain absent rather than claiming zero work was done.
+#[derive(Default)]
+struct CallbackLog {
+    kind: &'static str,
+    mode: Option<String>,
+    channel: Option<String>,
+    topic: Option<String>,
+    lease: Option<i64>,
+    bytes: Option<usize>,
+    entry_elements: Option<usize>,
+    incomplete_entries: Option<usize>,
+    entries: Option<usize>,
+    inserted: Option<usize>,
+    tombstones: Option<usize>,
+    removed: Option<usize>,
+}
+
+impl CallbackLog {
+    fn new(kind: &'static str) -> Self {
+        Self {
+            kind,
+            ..Self::default()
+        }
+    }
+
+    fn respond(self, outcome: &'static str, response: impl IntoResponse) -> Response {
+        let response = response.into_response();
+        tracing::info!(
+            "[websub] callback kind={} outcome={} status={} mode={} channel={} topic={} lease={} bytes={} entry_elements={} incomplete_entries={} entries={} inserted={} tombstones={} removed={}",
+            self.kind, outcome, response.status().as_u16(),
+            log_field(&self.mode), log_field(&self.channel), log_field(&self.topic),
+            log_field(&self.lease), log_field(&self.bytes), log_field(&self.entry_elements),
+            log_field(&self.incomplete_entries), log_field(&self.entries),
+            log_field(&self.inserted), log_field(&self.tombstones), log_field(&self.removed),
+        );
+        response
+    }
+}
+
+fn log_field(value: &Option<impl std::fmt::Display>) -> String {
+    value
+        .as_ref()
+        .map(|value| {
+            // body_preview already bounds and escapes control characters; also escape
+            // ordinary spaces so an untrusted value cannot forge another key/value.
+            body_preview(value.to_string().as_bytes()).replace(' ', "\\u{20}")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "-".into())
 }
 
 #[derive(Deserialize, Debug)]
@@ -48,15 +106,27 @@ pub fn channel_id_from_topic(topic: &str) -> Option<String> {
 /// On "unsubscribe", we remove the subscription row.
 pub async fn verification(
     State(state): State<AppState>,
-    Query(params): Query<VerificationParams>,
+    params: Result<Query<VerificationParams>, QueryRejection>,
 ) -> impl IntoResponse {
+    let mut log = CallbackLog::new("verification");
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(rejection) => return log.respond("invalid_query", rejection),
+    };
+    log.mode = Some(params.hub_mode.clone());
+    log.topic = Some(params.hub_topic.clone());
+    log.lease = params.hub_lease_seconds;
     let Some(channel_id) = channel_id_from_topic(&params.hub_topic) else {
         tracing::warn!(
             "[websub] verification: malformed hub.topic: {}",
             params.hub_topic
         );
-        return (StatusCode::BAD_REQUEST, "malformed hub.topic").into_response();
+        return log.respond(
+            "invalid_topic",
+            (StatusCode::BAD_REQUEST, "malformed hub.topic"),
+        );
     };
+    log.channel = Some(channel_id.clone());
 
     match params.hub_mode.as_str() {
         "subscribe" => {
@@ -79,7 +149,10 @@ pub async fn verification(
                     "[websub] verification for unknown channel {}, rejecting",
                     channel_id
                 );
-                return (StatusCode::NOT_FOUND, "unknown channel").into_response();
+                return log.respond(
+                    "subscribe_rejected",
+                    (StatusCode::NOT_FOUND, "unknown channel"),
+                );
             }
 
             tracing::info!(
@@ -106,24 +179,36 @@ pub async fn verification(
                     "[websub] unexpected unsubscribe verification for {} (no pending_unsubscribe row), rejecting",
                     channel_id
                 );
-                return (StatusCode::NOT_FOUND, "not pending unsubscribe").into_response();
+                return log.respond(
+                    "unsubscribe_rejected",
+                    (StatusCode::NOT_FOUND, "not pending unsubscribe"),
+                );
             }
 
             tracing::info!("[websub] Unsubscription verified: {}", channel_id);
         }
         other => {
             tracing::warn!("[websub] unknown hub.mode: {}", other);
-            return (StatusCode::BAD_REQUEST, "unknown hub.mode").into_response();
+            return log.respond(
+                "unknown_mode",
+                (StatusCode::BAD_REQUEST, "unknown hub.mode"),
+            );
         }
     }
 
     // Echo the challenge as the plain-text body.
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain")],
-        params.hub_challenge,
+    log.respond(
+        if params.hub_mode == "subscribe" {
+            "subscribed"
+        } else {
+            "unsubscribed"
+        },
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            params.hub_challenge,
+        ),
     )
-        .into_response()
 }
 
 /// Hub push notification POST handler.
@@ -135,15 +220,21 @@ pub async fn verification(
 pub async fn notification(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> impl IntoResponse {
+    let mut log = CallbackLog::new("push");
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return log.respond("body_read_failed", rejection),
+    };
+    log.bytes = Some(body.len());
     let Ok(xml) = std::str::from_utf8(&body) else {
         tracing::warn!(
             "[websub] non-UTF-8 push body, dropping: bytes={}, preview=\"{}\"",
             body.len(),
             body_preview(&body)
         );
-        return StatusCode::BAD_REQUEST;
+        return log.respond("invalid_utf8", StatusCode::BAD_REQUEST);
     };
 
     let Some(channel_id) = extract_channel_id(xml) else {
@@ -152,8 +243,9 @@ pub async fn notification(
             body.len(),
             body_preview(&body)
         );
-        return StatusCode::BAD_REQUEST;
+        return log.respond("missing_channel", StatusCode::BAD_REQUEST);
     };
+    log.channel = Some(channel_id.clone());
 
     let secret: Option<String> = {
         let conn = state.db.lock().unwrap();
@@ -170,7 +262,7 @@ pub async fn notification(
             "[websub] push for unsubscribed channel {}, dropping",
             channel_id
         );
-        return StatusCode::NOT_FOUND;
+        return log.respond("unsubscribed", StatusCode::NOT_FOUND);
     };
 
     let Some(sig_header) = headers.get("x-hub-signature").and_then(|v| v.to_str().ok()) else {
@@ -179,7 +271,7 @@ pub async fn notification(
             channel_id
         );
         warn_bad_push(&state, REASON_MISSING_SIGNATURE, &channel_id, &body, None).await;
-        return StatusCode::UNAUTHORIZED;
+        return log.respond("missing_signature", StatusCode::UNAUTHORIZED);
     };
 
     if !signature::verify(sig_header, &secret, &body) {
@@ -188,15 +280,19 @@ pub async fn notification(
             channel_id
         );
         warn_bad_push(&state, REASON_HMAC_MISMATCH, &channel_id, &body, None).await;
-        return StatusCode::UNAUTHORIZED;
+        return log.respond("hmac_mismatch", StatusCode::UNAUTHORIZED);
     }
 
     let parsed = parse_atom_document(xml);
     let tombstone_count = parsed.deleted_video_ids.len();
-    if parsed.malformed
+    log.entry_elements = Some(parsed.entry_elements);
+    log.incomplete_entries = Some(parsed.incomplete_entries);
+    log.entries = Some(parsed.entries.len());
+    log.tombstones = Some(tombstone_count);
+    let unexpected_body = parsed.malformed
         || parsed.incomplete_entries > 0
-        || (parsed.entry_elements == 0 && tombstone_count == 0)
-    {
+        || (parsed.entry_elements == 0 && tombstone_count == 0);
+    if unexpected_body {
         tracing::warn!(
             "[websub] unexpected push body for {}: malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}, preview=\"{}\"",
             channel_id,
@@ -249,6 +345,7 @@ pub async fn notification(
         }
     }
 
+    log.removed = Some(removed_videos);
     let now = crate::util::now_unix();
     let new_video_ids: Vec<String> = {
         let conn = state.db.lock().unwrap();
@@ -257,27 +354,22 @@ pub async fn notification(
             Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!(%error, "[websub] video save failed; asking Hub to retry");
-                return StatusCode::INTERNAL_SERVER_ERROR;
+                return log.respond("save_failed", StatusCode::INTERNAL_SERVER_ERROR);
             }
         };
         log_new_videos(&channel_title, &channel_id, &newly_inserted);
         newly_inserted.iter().map(|e| e.video_id.clone()).collect()
     };
 
-    tracing::info!(
-        "[websub] push processed: channel={}, bytes={}, entry_elements={}, incomplete_entries={}, entries={}, inserted={}, tombstones={}, removed={}",
-        channel_id,
-        body.len(),
-        parsed.entry_elements,
-        parsed.incomplete_entries,
-        parsed.entries.len(),
-        new_video_ids.len(),
-        tombstone_count,
-        removed_videos
-    );
+    log.inserted = Some(new_video_ids.len());
+    let outcome = if unexpected_body {
+        "unexpected_body"
+    } else {
+        "accepted"
+    };
 
     if new_video_ids.is_empty() {
-        return StatusCode::OK;
+        return log.respond(outcome, StatusCode::OK);
     }
 
     // Enrich the new rows (duration / Shorts / livestream) via the API-key-only
@@ -294,7 +386,7 @@ pub async fn notification(
         }
     });
 
-    StatusCode::OK
+    log.respond(outcome, StatusCode::OK)
 }
 
 /// Reasons a push that named a channel we subscribe to was not accepted as
@@ -469,6 +561,381 @@ mod tests {
         let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret).unwrap();
         mac.update(body.as_bytes());
         format!("sha1={}", hex::encode(mac.finalize().into_bytes()))
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn assert_callback_log(
+        state: AppState,
+        request: Request<axum::body::Body>,
+        kind: &str,
+        status: u16,
+        outcome: &str,
+        fields: &str,
+    ) -> axum::response::Response {
+        use tracing::instrument::WithSubscriber;
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let response = routes()
+            .with_state(state)
+            .oneshot(request)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = logs
+            .lines()
+            .filter(|line| line.starts_with(" INFO [websub] callback "))
+            .collect();
+        assert_eq!(lines.len(), 1, "one aggregate per request: {logs}");
+        let actual: std::collections::BTreeMap<_, _> = lines[0]
+            .split_whitespace()
+            .skip(3)
+            .map(|field| field.split_once('=').unwrap())
+            .collect();
+        assert_eq!(lines[0].split_whitespace().count(), 17, "{logs}");
+        let mut expected: std::collections::BTreeMap<_, _> = [
+            "kind",
+            "outcome",
+            "status",
+            "mode",
+            "channel",
+            "topic",
+            "lease",
+            "bytes",
+            "entry_elements",
+            "incomplete_entries",
+            "entries",
+            "inserted",
+            "tombstones",
+            "removed",
+        ]
+        .into_iter()
+        .map(|key| (key, "-"))
+        .collect();
+        let status_text = status.to_string();
+        expected.extend([
+            ("kind", kind),
+            ("outcome", outcome),
+            ("status", &status_text),
+        ]);
+        expected.extend(
+            fields
+                .split_whitespace()
+                .map(|field| field.split_once('=').unwrap()),
+        );
+        assert_eq!(actual, expected, "{logs}");
+        assert!(!lines[0].contains("secret-marker"));
+        assert!(!lines[0].contains("challenge-marker"));
+        assert!(!lines[0].contains("sha1="));
+        response
+    }
+
+    #[tokio::test]
+    async fn callback_log_verification_outcomes_preserve_responses() {
+        for (mode, channel, subscription, status, outcome, response_body) in [
+            (
+                "subscribe",
+                "UC_log",
+                "pending",
+                200,
+                "subscribed",
+                "challenge-marker",
+            ),
+            (
+                "subscribe",
+                "UC_missing",
+                "pending",
+                404,
+                "subscribe_rejected",
+                "unknown channel",
+            ),
+            (
+                "subscribe",
+                "UC_log",
+                "pending_unsubscribe",
+                404,
+                "subscribe_rejected",
+                "unknown channel",
+            ),
+            (
+                "unsubscribe",
+                "UC_log",
+                "pending_unsubscribe",
+                200,
+                "unsubscribed",
+                "challenge-marker",
+            ),
+            (
+                "unsubscribe",
+                "UC_log",
+                "verified",
+                404,
+                "unsubscribe_rejected",
+                "not pending unsubscribe",
+            ),
+            (
+                "other",
+                "UC_log",
+                "pending",
+                400,
+                "unknown_mode",
+                "unknown hub.mode",
+            ),
+        ] {
+            let (state, _) = setup_state_with_subscription("UC_log", "secret-marker");
+            state
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE channel_subscriptions SET verification_status = ?1",
+                    [subscription],
+                )
+                .unwrap();
+            let topic =
+                format!("https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel}");
+            let request = Request::builder().uri(format!(
+                "/api/websub/callback?hub.mode={mode}&hub.topic={topic}&hub.challenge=challenge-marker&hub.lease_seconds=432000"
+            )).body(axum::body::Body::empty()).unwrap();
+            let response = assert_callback_log(
+                state,
+                request,
+                "verification",
+                status,
+                outcome,
+                &format!("mode={mode} channel={channel} topic={topic} lease=432000"),
+            )
+            .await;
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                response_body
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_log_query_rejections_and_unsafe_values() {
+        // Preserve Axum's rejection body, without logging the raw query or challenge.
+        let reference = Router::new().route("/", get(|_: Query<VerificationParams>| async {}));
+        for query in [
+            "",
+            "hub.mode=subscribe&hub.topic=x&hub.challenge=challenge-marker&hub.lease_seconds=bad",
+        ] {
+            let response = assert_callback_log(
+                AppState::test(),
+                Request::builder()
+                    .uri(format!("/api/websub/callback?{query}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+                "verification",
+                400,
+                "invalid_query",
+                "",
+            )
+            .await;
+            let original = reference
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/?{query}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers(), original.headers());
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                to_bytes(original.into_body(), usize::MAX).await.unwrap()
+            );
+        }
+        let response = assert_callback_log(AppState::test(), Request::builder()
+            .uri("/api/websub/callback?hub.mode=bad%20mode%0A&hub.topic=no%20channel%09%22%5C&hub.challenge=challenge-marker")
+            .body(axum::body::Body::empty()).unwrap(), "verification", 400, "invalid_topic",
+            r#"mode=bad\u{20}mode\n topic=no\u{20}channel\t\"\\"#).await;
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "malformed hub.topic"
+        );
+        assert_callback_log(AppState::test(), Request::builder()
+            .uri("/api/websub/callback?hub.mode=other&hub.topic=x?channel_id=UC%2520log%250A&hub.challenge=challenge-marker")
+            .body(axum::body::Body::empty()).unwrap(), "verification", 400, "unknown_mode",
+            r"mode=other channel=UC\u{20}log\n topic=x?channel_id=UC%20log%0A").await;
+    }
+
+    #[tokio::test]
+    async fn callback_log_push_rejections_and_counters() {
+        let (state, _) = setup_state_with_subscription("UC_log", "secret-marker");
+        let valid = r#"<feed xmlns:yt="urn:youtube"><entry><yt:channelId>UC_log</yt:channelId><yt:videoId>new</yt:videoId><title>T</title><published>2026-04-24T10:00:00Z</published></entry></feed>"#;
+        let cases = [
+            (vec![0xff], None, 400, "invalid_utf8", ""),
+            (b"<feed/>".to_vec(), None, 400, "missing_channel", ""),
+            (empty_feed("UC_absent").into_bytes(), None, 404, "unsubscribed", "channel=UC_absent"),
+            (valid.as_bytes().to_vec(), None, 401, "missing_signature", "channel=UC_log"),
+            (valid.as_bytes().to_vec(), Some("sha1=invalid".to_string()), 401, "hmac_mismatch", "channel=UC_log"),
+            (empty_feed("UC_log").into_bytes(), Some(sign(b"secret-marker", &empty_feed("UC_log"))),
+                200, "unexpected_body", "channel=UC_log entry_elements=0 incomplete_entries=0 entries=0 inserted=0 tombstones=0 removed=0"),
+            (valid.as_bytes().to_vec(), Some(sign(b"secret-marker", valid)), 200, "accepted",
+                "channel=UC_log entry_elements=1 incomplete_entries=0 entries=1 inserted=1 tombstones=0 removed=0"),
+            (valid.as_bytes().to_vec(), Some(sign(b"secret-marker", valid)), 200, "accepted",
+                "channel=UC_log entry_elements=1 incomplete_entries=0 entries=1 inserted=0 tombstones=0 removed=0"),
+        ];
+        for (body, signature, status, outcome, fields) in cases {
+            let bytes = body.len();
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/websub/callback");
+            if let Some(signature) = signature {
+                request = request.header("x-hub-signature", signature);
+            }
+            let response = assert_callback_log(
+                state.clone(),
+                request.body(axum::body::Body::from(body)).unwrap(),
+                "push",
+                status,
+                outcome,
+                &format!("bytes={bytes} {fields}"),
+            )
+            .await;
+            assert!(to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        let body = tombstone("UC_log", "new");
+        assert_callback_log(state.clone(), post_signed(&body, "secret-marker"), "push", 200, "accepted",
+            &format!("channel=UC_log bytes={} entry_elements=0 incomplete_entries=0 entries=0 inserted=0 tombstones=1 removed=1", body.len())).await;
+        let body = valid.replace("<yt:videoId>new</yt:videoId>", "");
+        assert_callback_log(state.clone(), post_signed(&body, "secret-marker"), "push", 200, "unexpected_body",
+            &format!("channel=UC_log bytes={} entry_elements=1 incomplete_entries=1 entries=0 inserted=0 tombstones=0 removed=0", body.len())).await;
+        state.db.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON videos BEGIN SELECT RAISE(FAIL, 'isolated save failure'); END;"
+        ).unwrap();
+        let response = assert_callback_log(state, post_signed(valid, "secret-marker"), "push", 500, "save_failed",
+            &format!("channel=UC_log bytes={} entry_elements=1 incomplete_entries=0 entries=1 tombstones=0 removed=0", valid.len())).await;
+        assert!(to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn callback_log_body_read_failures_preserve_axum_rejection() {
+        use http_body_util::BodyExt;
+        fn failing_body() -> axum::body::Body {
+            axum::body::Body::new(
+                http_body_util::Full::new(Bytes::from_static(b"partial"))
+                    .map_err(|never| -> std::io::Error { match never {} })
+                    .with_trailers(async {
+                        Some(Err(std::io::Error::other("isolated read failure")))
+                    }),
+            )
+        }
+        let original = Router::new().route("/", axum::routing::post(|_: Bytes| async {}));
+        for (body, original_body, status) in [
+            (failing_body(), failing_body(), 400),
+            (
+                axum::body::Body::from(vec![0; 2_097_153]),
+                axum::body::Body::from(vec![0; 2_097_153]),
+                413,
+            ),
+        ] {
+            let response = assert_callback_log(
+                AppState::test(),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/websub/callback")
+                    .body(body)
+                    .unwrap(),
+                "push",
+                status,
+                "body_read_failed",
+                "",
+            )
+            .await;
+            let reference = original
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/")
+                        .body(original_body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers(), reference.headers());
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                to_bytes(reference.into_body(), usize::MAX).await.unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_log_includes_head_and_unsupported_methods() {
+        assert_callback_log(
+            AppState::test(),
+            Request::builder()
+                .method("HEAD")
+                .uri("/api/websub/callback")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            "verification",
+            400,
+            "invalid_query",
+            "",
+        )
+        .await;
+        let response = assert_callback_log(
+            AppState::test(),
+            Request::builder()
+                .method("PUT")
+                .uri("/api/websub/callback")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            "-",
+            405,
+            "method_not_allowed",
+            "",
+        )
+        .await;
+        assert_eq!(response.headers()["allow"], "GET,HEAD,POST");
+        assert!(to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn callback_log_fields_are_bounded_single_tokens_with_missing_values() {
+        assert_eq!(log_field(&None::<String>), "-");
+        assert_eq!(log_field(&Some("")), "-");
+        assert_eq!(
+            log_field(&Some(" \t\r\n\0\"\\\u{2028}")),
+            r#"\u{20}\t\r\n\u{0}\"\\\u{2028}"#
+        );
+        assert_eq!(log_field(&Some("あ".repeat(600))), r"\u{3042}".repeat(512));
     }
 
     #[test]

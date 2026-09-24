@@ -2455,6 +2455,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "hmac",
+ "http-body-util",
  "quick-xml",
  "rand",
  "regex-lite",
