@@ -4,6 +4,7 @@
   import fetcher from '$lib/fetcher.js'
   import { getGroups, loadGroups } from '$lib/groups.svelte.js'
   import VideoCard from '$lib/components/VideoCard.svelte'
+  import PostCard from '$lib/components/PostCard.svelte'
   import Spinner from '$lib/components/Spinner.svelte'
   import Toast from '$lib/components/Toast.svelte'
   import Icon from '$lib/components/Icon.svelte'
@@ -11,10 +12,12 @@
   import { navigate } from '$lib/router.svelte.js'
   import { startAutoReload } from '$lib/auto-reload.js'
   import { createVideoHider } from '$lib/video-watch.js'
+  import { feedKinds, kindsParam } from '$lib/feed-kinds.svelte.js'
 
   let { groupId = null } = $props()
   let groups = $derived(getGroups())
 
+  let kinds = $derived(kindsParam(feedKinds))
   let videos = $state([])
   let loading = $state(false)
   let loadingMore = $state(false)
@@ -28,6 +31,13 @@
   async function loadVideos(reset = false) {
     if (!reset && (loading || loadingMore)) return
     const seq = ++requestSeq
+    if (!kinds) {
+      videos = []
+      hasMore = false
+      loading = false
+      loadingMore = false
+      return
+    }
 
     if (reset) {
       loading = true
@@ -36,7 +46,7 @@
 
     try {
       const offset = reset ? 0 : videos.length
-      let url = `${config.path.api}/feed?limit=${LIMIT}&offset=${offset}`
+      let url = `${config.path.api}/feed?kinds=${kinds}&limit=${LIMIT}&offset=${offset}`
       if (groupId) url += `&group=${groupId}`
       const data = await fetcher(url)
       if (seq !== requestSeq) return
@@ -55,21 +65,10 @@
 
   const hideVideo = createVideoHider({
     hideRequest: (id, options) => fetcher(`${config.path.api}/videos/${id}/hide`, options),
-    onHidden: (id) => (videos = videos.filter((v) => v.id !== id)),
+    onHidden: (id) => (videos = videos.filter((v) => v.kind !== 'video' || v.id !== id)),
     onSuccess: () => (toast = { message: '非表示にしました', type: 'success' }),
     onError: (error) => (toast = { message: error.message, type: 'error' }),
   })
-
-  const PLAY_ALL_LIMIT = 20
-
-  function openPlayAll(shortsOnly = false) {
-    const ids = videos
-      .filter((v) => (shortsOnly ? v.is_short : !v.is_short))
-      .slice(0, PLAY_ALL_LIMIT)
-      .map((v) => v.id)
-      .join(',')
-    window.open(`https://www.youtube.com/watch_videos?video_ids=${ids}`)
-  }
 
   let groupCycle = $derived([null, ...groups.map((g) => String(g.id))])
 
@@ -84,6 +83,7 @@
 
   $effect(() => {
     void groupId
+    void kinds
     untrack(() => loadVideos(true))
   })
 
@@ -108,37 +108,43 @@
   class="feed"
   use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}
 >
-  {#if loading && videos.length === 0}
+  <div class="kind-bar" role="group" aria-label="表示する種類">
+    {#each [['video', '動画'], ['post', '投稿']] as [kind, label] (kind)}
+      <button
+        class="kind-btn"
+        aria-pressed={feedKinds[kind]}
+        onclick={() => (feedKinds[kind] = !feedKinds[kind])}
+      >
+        <Icon>
+          {#if feedKinds[kind]}
+            <polyline points="5 12 10 17 19 7" />
+          {:else}
+            <line x1="5" y1="12" x2="19" y2="12" />
+          {/if}
+        </Icon>
+        {label}
+      </button>
+    {/each}
+  </div>
+  {#if !kinds}
+    <p class="empty">「動画」か「投稿」をオンにすると表示されます</p>
+  {:else if loading && videos.length === 0}
     <Spinner />
   {:else if videos.length === 0}
-    <p class="empty">動画がありません</p>
+    <p class="empty">表示できる項目がありません</p>
   {:else}
-    {@const normalCount = videos.filter((v) => !v.is_short).length}
-    {@const shortsCount = videos.filter((v) => v.is_short).length}
-    {#if normalCount > 0 || shortsCount > 0}
-      <div class="play-all-bar">
-        {#if normalCount > 0}
-          <button class="play-all-btn" onclick={() => openPlayAll()}>
-            <Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
-            連続再生 ({Math.min(normalCount, PLAY_ALL_LIMIT)}本)
-          </button>
-        {/if}
-        {#if shortsCount > 0}
-          <button class="play-all-btn" onclick={() => openPlayAll(true)}>
-            <Icon><polygon points="6 4 20 12 6 20 6 4" /></Icon>
-            Shorts ({Math.min(shortsCount, PLAY_ALL_LIMIT)}本)
-          </button>
-        {/if}
-      </div>
-    {/if}
     <div class="video-list">
-      {#each videos as video (video.id)}
-        <div class="video-wrapper">
-          <div class="video-item">
-            <VideoCard {video} onwatch={(id) => hideVideo(id, { silent: true })} />
-            <button class="hide-btn" onclick={() => hideVideo(video.id)}>もう見た</button>
+      {#each videos as item (`${item.kind}:${item.id}`)}
+        {#if item.kind === 'post'}
+          <PostCard post={item} />
+        {:else}
+          <div class="video-wrapper">
+            <div class="video-item">
+              <VideoCard video={item} onwatch={(id) => hideVideo(id, { silent: true })} />
+              <button class="hide-btn" onclick={() => hideVideo(item.id)}>もう見た</button>
+            </div>
           </div>
-        </div>
+        {/if}
       {/each}
     </div>
     {#if hasMore}
@@ -205,25 +211,33 @@
 		border-color: var(--c-danger-border)
 		opacity: 1
 
-.play-all-bar
+.kind-bar
 	display: flex
 	gap: var(--sp-2)
 	margin-bottom: var(--sp-3)
 
-.play-all-btn
+.kind-btn
 	display: inline-flex
 	align-items: center
 	gap: var(--sp-1)
-	padding: var(--sp-2) var(--sp-4)
-	background: var(--c-surface)
-	color: var(--c-text)
-	border: 1px solid var(--c-border)
-	border-radius: var(--radius-sm)
+	padding: var(--sp-1) var(--sp-3)
+	background: transparent
+	color: var(--c-text-sub)
+	border: 1px dashed var(--c-border)
+	border-radius: var(--radius-full)
 	font-size: var(--fs-sm)
 	cursor: pointer
 
+	&[aria-pressed="true"]
+		background: var(--c-accent-bg)
+		color: var(--c-text)
+		border: 1px solid var(--c-accent-border)
+
 	&:hover
-		opacity: 0.8
+		background: var(--c-overlay-2)
+
+	&[aria-pressed="true"]:hover
+		background: var(--c-accent-bg)
 
 .empty
 	text-align: center
@@ -240,4 +254,5 @@
 	.video-list
 		display: grid
 		grid-template-columns: repeat(3, 1fr)
+		align-items: start
 </style>

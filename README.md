@@ -57,6 +57,17 @@ Without the key, API catch-up and detail-based classification are unavailable.
 Without periodic catch-up, startup/manual refresh runs only one bounded pass.
 A new channel may show no videos until push delivery or API retrieval.
 
+## Read channel posts
+
+The feed also shows the public posts from your channels' Posts tab, mixed with videos by time.
+Use **動画** (Videos) and **投稿** (Posts) above the feed to choose what appears; both start on.
+**返信** (Reply) opens the post on YouTube, where you reply; on a phone, the YouTube app may open it.
+
+The app reads the first page of each Posts tab about once an hour, starting at launch, without signing in.
+YouTube offers no official API for posts, so this uses its unofficial web endpoint.
+A change on YouTube's side can break it; failures are logged and reported to Discord when configured.
+Post times are estimated from labels such as "3 days ago". Members-only posts are not shown.
+
 For sync, [create a Google web client ID](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid).
 Use your app’s public origin. Allow the `https://www.googleapis.com/auth/youtube.readonly` scope.
 Set the resulting ID as `GIS_CLIENT_ID`; enable YouTube Data API v3 in the Google project.

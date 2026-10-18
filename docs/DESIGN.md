@@ -121,9 +121,23 @@ Domain components on top of the Sumi recipes:
   thumbnail's top-right with an enlarged invisible hit area; hover shifts
   it to the danger role. Hiding is the feed's core gesture — always one
   tap, no confirmation.
-- **Play-all bar:** default (non-primary) buttons above the feed that open
-  a YouTube queue of the loaded videos — one for normal videos, one for
-  Shorts, each showing its count. Play glyphs are SVG per the template.
+- **Kind toggles:** a row of pill buttons above the feed, one per item
+  kind, each a real toggle (`aria-pressed`). On = accent-subtle fill, solid
+  accent border and a check glyph; off = transparent with a dashed neutral
+  border and a dash glyph — shape carries the state, not hue alone. The
+  state lasts for the session (group switches and swipes keep it) and
+  every launch starts with all kinds on. With every kind off, the feed
+  shows a short empty guide instead of items.
+- **Post card:** a channel post shares the feed grid with video cards but
+  reads as text, not a thumbnail: a surface panel (1px border, md radius)
+  with a caption meta row (24px circular channel avatar, channel link,
+  relative time), the body as plain text with its line breaks kept and
+  clamped to a few lines behind an inline expand link, then the images —
+  one image contained at a capped height, several in a horizontal
+  scroll-snap row of square crops. A trailing outlined reply link with a
+  speech-bubble glyph opens the post on YouTube in a new tab; posts have
+  no hide action. In the PC grid, rows align to the top so a tall post
+  does not stretch its neighbours.
 - **Group nav (Header):** groups are the nav tabs (Sumi tab recipe, active
   = accent underline), horizontally scrollable, with「すべて」first. On
   mobile the tab row is replaced by a native select. Swiping the feed
