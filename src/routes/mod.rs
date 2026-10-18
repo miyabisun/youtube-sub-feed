@@ -52,6 +52,7 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::ErrorResponse,
         openapi::OkResponse,
         openapi::FeedItem,
+        openapi::PostItem,
         openapi::HistoryItem,
         openapi::ChannelItem,
         openapi::ChannelVideoItem,

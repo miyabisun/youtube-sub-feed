@@ -22,6 +22,7 @@ async fn main() {
         http,
         hub: Arc::new(youtube_sub_feed::websub::hub::Hub::default()),
         youtube_api: Arc::new(youtube_sub_feed::state::Api::default()),
+        youtube_browse_url: youtube_sub_feed::state::YOUTUBE_BROWSE_URL.into(),
         enrichment_lock: Arc::new(tokio::sync::Mutex::new(())),
         catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
         warning_cooldown: Arc::new(youtube_sub_feed::state::WarningCooldown::default()),

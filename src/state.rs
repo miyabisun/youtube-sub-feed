@@ -1,5 +1,6 @@
 use crate::config::Config;
 pub use crate::notify::WarningCooldown;
+pub use crate::youtube::posts::BROWSE_URL as YOUTUBE_BROWSE_URL;
 pub use crate::youtube::videos::Api;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub hub: Arc<crate::websub::hub::Hub>,
     pub youtube_api: Arc<crate::youtube::videos::Api>,
+    /// InnerTube browse endpoint read for channel posts.
+    pub youtube_browse_url: String,
     pub enrichment_lock: Arc<tokio::sync::Mutex<()>>,
     /// Held for the duration of any catch-up work so startup, the periodic
     /// videoCount scan and the manual full sweep never duplicate quota spend.
@@ -54,6 +57,7 @@ impl AppState {
                 "http://127.0.0.1:1/subscribe".into(),
             )),
             youtube_api: Arc::new(crate::youtube::videos::Api::at("http://127.0.0.1:1".into())),
+            youtube_browse_url: "http://127.0.0.1:1/browse".into(),
             enrichment_lock: Arc::new(tokio::sync::Mutex::new(())),
             catchup_lock: Arc::new(tokio::sync::Mutex::new(())),
             warning_cooldown: Arc::new(WarningCooldown::default()),

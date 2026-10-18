@@ -24,6 +24,8 @@ pub struct OkResponse {
 /// `https://i.ytimg.com/vi/{id}/hqdefault.jpg` を組み立てる。
 #[derive(Serialize, ToSchema)]
 pub struct FeedItem {
+    /// 項目の種類 ("video")
+    pub kind: String,
     /// 動画ID
     pub id: String,
     /// チャンネルID
@@ -44,6 +46,29 @@ pub struct FeedItem {
     pub channel_title: String,
     /// チャンネルアイコンURL
     pub channel_thumbnail: Option<String>,
+}
+
+/// フィード投稿アイテム (`kinds` に post を含めたときの kind="post" の項目)
+///
+/// 返信は `https://www.youtube.com/post/{id}` で YouTube 側の投稿画面を開く。
+#[derive(Serialize, ToSchema)]
+pub struct PostItem {
+    /// 項目の種類 ("post")
+    pub kind: String,
+    /// 投稿ID
+    pub id: String,
+    /// チャンネルID
+    pub channel_id: String,
+    /// 推定公開日時 (ISO 8601)。初めて取得した時点の相対表記から逆算する
+    pub published_at: Option<String>,
+    /// チャンネル名
+    pub channel_title: String,
+    /// チャンネルアイコンURL
+    pub channel_thumbnail: Option<String>,
+    /// 本文 (プレーンテキスト、改行を含む)
+    pub content: String,
+    /// 画像URL
+    pub images: Vec<String>,
 }
 
 /// 視聴履歴アイテム

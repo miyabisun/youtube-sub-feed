@@ -61,6 +61,51 @@ struct FeedQuery {
     limit: Option<i64>,
     offset: Option<i64>,
     group: Option<i64>,
+    /// Comma-separated `video` / `post`; videos only when omitted.
+    kinds: Option<String>,
+}
+
+/// Feed rows share the video column layout (0..=9, see `video_json`) followed
+/// by kind, post content and post image URLs. ?1 user, ?2 optional group.
+const FEED_VIDEOS: &str =
+    "SELECT v.id AS id, v.channel_id, v.title, v.published_at AS published_at,
+        v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
+        c.title, c.thumbnail_url, 'video' AS kind, NULL, NULL
+     FROM videos v
+     JOIN channels c ON v.channel_id = c.id
+     JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
+     LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
+     WHERE COALESCE(uv.is_hidden, 0) = 0
+       AND v.is_members_only = 0
+       AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
+       AND (v.is_short = 0 OR uc.hide_shorts = 0)
+       AND (?2 IS NULL OR c.id IN (SELECT channel_id FROM channel_groups WHERE group_id = ?2))";
+
+const FEED_POSTS: &str = "SELECT p.id AS id, p.channel_id, NULL, p.published_at AS published_at,
+        NULL, 0, 0, NULL, c.title, c.thumbnail_url, 'post', p.content, p.image_urls
+     FROM posts p
+     JOIN channels c ON p.channel_id = c.id
+     JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
+     WHERE (?2 IS NULL OR c.id IN (SELECT channel_id FROM channel_groups WHERE group_id = ?2))";
+
+fn feed_item_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
+    if row.get::<_, String>(10)? == "video" {
+        let mut value = video_json(row, None)?;
+        value["kind"] = json!("video");
+        return Ok(value);
+    }
+    let images: Value =
+        serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_else(|_| json!([]));
+    Ok(json!({
+        "kind": "post",
+        "id": row.get::<_, String>(0)?,
+        "channel_id": row.get::<_, String>(1)?,
+        "published_at": crate::util::row_timestamp_to_rfc3339(row, 3)?,
+        "channel_title": row.get::<_, String>(8)?,
+        "channel_thumbnail": row.get::<_, Option<String>>(9)?,
+        "content": row.get::<_, String>(11)?,
+        "images": images,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -93,14 +138,15 @@ fn video_json(row: &rusqlite::Row, watched_at_index: Option<usize>) -> rusqlite:
     path = "/api/feed",
     tag = "動画フィード",
     summary = "動画一覧取得",
-    description = "ユーザーが購読しているチャンネルの動画を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能",
+    description = "ユーザーが購読しているチャンネルの動画と投稿を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能\n- kinds で種類を指定 (video, post)。省略時は動画のみ。各項目は kind を持つ\n- 投稿の公開日時は相対表記から推定した値",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
         ("group" = Option<i64>, Query, description = "グループIDで絞り込み"),
+        ("kinds" = Option<String>, Query, description = "カンマ区切りの種類 video / post (デフォルト: video)"),
     ),
     responses(
-        (status = 200, description = "動画一覧", body = Vec<FeedItem>),
+        (status = 200, description = "動画と投稿の一覧 (kind=post の項目は PostItem)", body = Vec<FeedItem>),
         (status = 401, description = "未認証", body = ErrorResponse),
     ),
 )]
@@ -111,51 +157,33 @@ async fn get_feed(
 ) -> Result<Json<Value>, AppError> {
     let limit = query.limit.unwrap_or(100).min(500);
     let offset = query.offset.unwrap_or(0);
-    let uid = user_id.0;
+
+    let kinds = query.kinds.as_deref().unwrap_or("video");
+    let selects: Vec<&str> = kinds
+        .split(',')
+        .filter_map(|kind| match kind {
+            "video" => Some(FEED_VIDEOS),
+            "post" => Some(FEED_POSTS),
+            _ => None,
+        })
+        .collect();
+    if selects.is_empty() {
+        return Ok(Json(json!([])));
+    }
+    let sql = format!(
+        "{} ORDER BY published_at DESC, id LIMIT ?3 OFFSET ?4",
+        selects.join(" UNION ALL ")
+    );
 
     let rows = {
         let conn = state.db.lock().unwrap();
-
-        let (group_join, group_where) = match query.group {
-            Some(_) => (
-                "JOIN channel_groups cg ON v.channel_id = cg.channel_id",
-                "AND cg.group_id = ?2",
-            ),
-            None => ("", ""),
-        };
-
-        let sql = format!(
-            "SELECT v.id, v.channel_id, v.title, v.published_at,
-                    v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
-                    c.title as channel_title, c.thumbnail_url as channel_thumbnail
-             FROM videos v
-             JOIN channels c ON v.channel_id = c.id
-             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-             {group_join}
-             LEFT JOIN user_videos uv ON uv.video_id = v.id AND uv.user_id = ?1
-             WHERE COALESCE(uv.is_hidden, 0) = 0
-               AND v.is_members_only = 0
-               AND (v.is_livestream = 0 OR uc.show_livestreams = 1)
-               AND (v.is_short = 0 OR uc.hide_shorts = 0)
-               {group_where}
-             ORDER BY v.published_at DESC
-             LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
-            group_join = group_join,
-            group_where = group_where,
-            limit_idx = if query.group.is_some() { 3 } else { 2 },
-            offset_idx = if query.group.is_some() { 4 } else { 3 },
-        );
-
-        let map_row = |row: &rusqlite::Row| video_json(row, None);
-
         let mut stmt = conn.prepare(&sql)?;
-        let rows = if let Some(group_id) = query.group {
-            stmt.query_map(rusqlite::params![uid, group_id, limit, offset], map_row)?
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map(rusqlite::params![uid, limit, offset], map_row)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        let rows = stmt
+            .query_map(
+                rusqlite::params![user_id.0, query.group, limit, offset],
+                feed_item_json,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
         rows
     };
 
@@ -270,6 +298,7 @@ mod tests {
     // - Show livestreams only when user's show_livestreams=1 for that channel
     // - Sort by published_at DESC
     // - Group filter and pagination support
+    // - `kinds=video,post` mixes channel posts into the same timeline
     //
     // All tests drive the real `get_feed` / `hide_video` / `unhide_video`
     // handlers over HTTP (oneshot). Requests pass through `auth_middleware`,
@@ -333,7 +362,7 @@ mod tests {
                 id,
                 channel_id,
                 format!("Video {}", id),
-                published_at,
+                crate::util::rfc3339_to_unix(published_at),
                 is_livestream
             ],
         )
@@ -453,6 +482,133 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    fn insert_post(state: &AppState, id: &str, channel_id: &str, published_at: i64) {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO posts (id, channel_id, content, image_urls, published_at)
+             VALUES (?1, ?2, ?3, '[\"https://yt3.ggpht.com/a\",\"https://yt3.ggpht.com/b\"]', ?4)",
+            params![id, channel_id, format!("Post {id}\nline 2"), published_at],
+        )
+        .unwrap();
+    }
+
+    /// 2024-01-02 / 2024-01-04 as Unix seconds, between the videos below.
+    const JAN_2: i64 = 1704153600;
+    const JAN_4: i64 = 1704326400;
+
+    fn insert_mixed(state: &AppState) {
+        insert_video(state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
+        insert_video(state, "v3", "UC2", "2024-01-03T00:00:00Z", 0);
+        insert_post(state, "p2", "UC1", JAN_2);
+        insert_post(state, "p4", "UC2", JAN_4);
+    }
+
+    #[tokio::test]
+    async fn feed_without_kinds_lists_only_videos() {
+        let state = setup_state();
+        insert_mixed(&state);
+        assert_eq!(feed_ids(&state, "").await, vec!["v3", "v1"]);
+    }
+
+    #[tokio::test]
+    async fn feed_mixes_videos_and_posts_by_published_at_desc() {
+        let state = setup_state();
+        insert_mixed(&state);
+        assert_eq!(
+            feed_ids(&state, "?kinds=video,post").await,
+            vec!["p4", "v3", "p2", "v1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_kinds_selects_each_kind_alone_or_none() {
+        let state = setup_state();
+        insert_mixed(&state);
+        assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p4", "p2"]);
+        assert_eq!(feed_ids(&state, "?kinds=video").await, vec!["v3", "v1"]);
+        assert!(feed_ids(&state, "?kinds=").await.is_empty());
+        assert!(feed_ids(&state, "?kinds=bogus").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn feed_group_filter_applies_to_posts() {
+        let state = setup_state();
+        let group_id = insert_group_with_channel(&state, "G1", "UC1");
+        insert_mixed(&state);
+        assert_eq!(
+            feed_ids(&state, &format!("?kinds=video,post&group={group_id}")).await,
+            vec!["p2", "v1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_paginates_across_the_mixed_timeline() {
+        let state = setup_state();
+        let group_id = insert_group_with_channel(&state, "G1", "UC1");
+        insert_mixed(&state);
+        insert_post(&state, "p0", "UC1", 0);
+        assert_eq!(
+            feed_ids(&state, "?kinds=video,post&limit=3").await,
+            vec!["p4", "v3", "p2"]
+        );
+        assert_eq!(
+            feed_ids(&state, "?kinds=video,post&limit=3&offset=3").await,
+            vec!["v1", "p0"]
+        );
+        assert_eq!(
+            feed_ids(
+                &state,
+                &format!("?kinds=video,post&group={group_id}&limit=2&offset=1")
+            )
+            .await,
+            vec!["v1", "p0"]
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_excludes_posts_of_unsubscribed_channels() {
+        let state = setup_state();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("INSERT INTO channels (id, title) VALUES ('UC3', 'Ch3')", [])
+                .unwrap();
+        }
+        insert_post(&state, "p1", "UC3", JAN_2);
+        assert!(feed_ids(&state, "?kinds=post").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn feed_items_carry_their_kind_and_post_fields() {
+        let state = setup_state();
+        insert_mixed(&state);
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feed?kinds=video,post&limit=2")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json[0],
+            serde_json::json!({
+                "kind": "post",
+                "id": "p4",
+                "channel_id": "UC2",
+                "channel_title": "Ch2",
+                "channel_thumbnail": null,
+                "published_at": "2024-01-04T00:00:00Z",
+                "content": "Post p4\nline 2",
+                "images": ["https://yt3.ggpht.com/a", "https://yt3.ggpht.com/b"],
+            })
+        );
+        assert_eq!(json[1]["kind"], "video");
+        assert_eq!(json[1]["title"], "Video v3");
+    }
+
     #[tokio::test]
     async fn feed_excludes_hidden_videos() {
         let state = setup_state();
@@ -565,15 +721,13 @@ mod tests {
 
     #[tokio::test]
     async fn feed_filters_by_group() {
-        // Exercises the handler's dynamic SQL: with ?group=, the query gains a
-        // channel_groups JOIN and the bind indices shift (limit=?3, offset=?4).
         let state = setup_state();
         let group_id = insert_group_with_channel(&state, "G1", "UC1");
 
         insert_video(&state, "v1", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v2", "UC2", "2024-01-03T00:00:00Z", 0);
 
-        // Without the group filter, both appear (dynamic SQL: no JOIN).
+        // Without the group filter, both appear.
         assert_eq!(feed_ids(&state, "").await, vec!["v2", "v1"]);
         // With the group filter, only UC1's video appears.
         assert_eq!(
@@ -583,21 +737,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feed_pagination_shifts_bind_indices_with_group() {
-        // limit/offset binding must remain correct in both SQL variants.
+    async fn feed_paginates_with_and_without_group() {
+        // limit/offset must page correctly with and without the group filter.
         let state = setup_state();
         let group_id = insert_group_with_channel(&state, "G1", "UC1");
         insert_video(&state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
         insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
 
-        // No-group variant: limit=?2 offset=?3
         assert_eq!(
             feed_ids(&state, "?limit=2&offset=0").await,
             vec!["v3", "v2"]
         );
         assert_eq!(feed_ids(&state, "?limit=2&offset=2").await, vec!["v1"]);
-        // Group variant: limit=?3 offset=?4
         assert_eq!(
             feed_ids(&state, &format!("?group={group_id}&limit=2&offset=0")).await,
             vec!["v3", "v2"]

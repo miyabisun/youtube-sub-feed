@@ -389,6 +389,15 @@ fn create_tables(conn: &Connection) {
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS posts (
+            id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            image_urls TEXT NOT NULL DEFAULT '[]',
+            published_at INTEGER NOT NULL,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        );
+
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);
         CREATE INDEX IF NOT EXISTS idx_videos_published ON videos (published_at DESC);
