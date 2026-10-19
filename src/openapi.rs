@@ -71,14 +71,6 @@ pub struct PostItem {
     pub images: Vec<String>,
 }
 
-/// 動画・投稿が混在する履歴。動画の既存フィールドは変更しない。
-#[derive(Serialize, ToSchema)]
-#[serde(untagged)]
-pub enum HistoryEntry {
-    Video(HistoryItem),
-    Post(PostHistoryItem),
-}
-
 /// 投稿の非表示履歴 (動画履歴と同じ一覧で kind="post" を持つ)
 #[derive(Serialize, ToSchema)]
 pub struct PostHistoryItem {

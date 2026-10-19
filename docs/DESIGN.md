@@ -122,8 +122,8 @@ Domain components on top of the Sumi recipes:
   it to the danger role. Hiding is the feed's core gesture — always one
   tap, no confirmation. On text-first post cards, keep the same quiet
   top-right placement in the meta row, using surface colors rather than
-  an image scrim. Reserve a 44px-high hit area in normal flow so the
-  control never overlaps the text, images, or reply action.
+  an image scrim. Same size and enlarged invisible hit area as on video
+  cards; it never overlaps the text, images, or reply action.
 - **Kind toggles:** a row of pill buttons above the feed, one per item
   kind, each a real toggle (`aria-pressed`). On = accent-subtle fill, solid
   accent border and a check glyph; off = transparent with a dashed neutral

@@ -122,7 +122,6 @@
 	position: relative
 	flex-shrink: 0
 	margin-left: auto
-	min-height: 44px
 	padding: var(--sp-1) var(--sp-3)
 	background: var(--c-overlay-1)
 	color: var(--c-text-sub)
@@ -130,11 +129,21 @@
 	border-radius: var(--radius-sm)
 	font-size: var(--fs-xs)
 	cursor: pointer
+	opacity: 0.7
+
+	&::before
+		content: ''
+		position: absolute
+		top: -12px
+		right: -8px
+		bottom: -12px
+		left: -8px
 
 	&:hover
 		background: var(--c-danger-bg)
 		color: var(--c-danger)
 		border-color: var(--c-danger-border)
+		opacity: 1
 
 	&.restore:hover
 		background: var(--c-accent-bg)

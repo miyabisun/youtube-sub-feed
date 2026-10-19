@@ -62,7 +62,7 @@
 <section class="history" aria-labelledby="history-title">
   <header class="history-header">
     <h1 id="history-title">視聴履歴</h1>
-    <p>「もう見た」にした動画・投稿</p>
+    <p>YouTubeで開いた動画と、「もう見た」にした動画・投稿</p>
   </header>
 
   {#if loading}
@@ -79,7 +79,7 @@
             <VideoCard video={item} />
           {/if}
           {#if item.watched_at}
-            <p class="watched-at">記録: {relativeTime(item.watched_at)}</p>
+            <p class="watched-at">視聴記録: {relativeTime(item.watched_at)}</p>
           {/if}
         </article>
       {/each}

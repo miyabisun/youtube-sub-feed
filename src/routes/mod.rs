@@ -56,7 +56,6 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::FeedItem,
         openapi::PostItem,
         openapi::HistoryItem,
-        openapi::HistoryEntry,
         openapi::PostHistoryItem,
         openapi::ChannelItem,
         openapi::ChannelVideoItem,

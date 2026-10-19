@@ -205,7 +205,7 @@ async fn get_feed(
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
     ),
     responses(
-        (status = 200, description = "動画・投稿の履歴", body = Vec<HistoryEntry>),
+        (status = 200, description = "動画・投稿の履歴 (kind=post の項目は PostHistoryItem)", body = Vec<HistoryItem>),
         (status = 401, description = "未認証", body = ErrorResponse),
     ),
 )]
@@ -726,34 +726,6 @@ mod tests {
             .query_row("SELECT count(*) FROM user_posts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
-    }
-
-    /// Isolated HTTP fixture for client/e2e/posts.cjs; no background sync or external APIs.
-    #[tokio::test]
-    #[ignore = "Run with the Chromium post lifecycle test"]
-    async fn posts_browser_fixture() {
-        let state = setup_state();
-        insert_video(&state, "p-text", "UC1", "2024-01-03T00:00:00Z", 0);
-        for (id, content, images) in [
-            ("p-text", "画像なしの投稿です。\n改行も保持されます。", "[]"),
-            ("p-image", "画像付きの投稿です。", "[\"/favicon.svg\"]"),
-            ("p-gallery", "複数画像の長い投稿です。\n何行もある本文を表示します。\n続きの内容です。\nテキストがボタンと重ならないか確認します。\nさらに続きます。\nまだ続きます。\n最後の行です。", "[\"/favicon.svg\",\"/favicon.svg?2\"]"),
-        ] {
-            state.db.lock().unwrap().execute(
-                "INSERT INTO posts (id,channel_id,content,image_urls,published_at) VALUES (?1,'UC1',?2,?3,?4)",
-                params![id,content,images,JAN_4],
-            ).unwrap();
-        }
-        state.db.lock().unwrap().execute(
-            "UPDATE channels SET title='とても長いチャンネル名・毎日の活動とお知らせを届けるチャンネル' WHERE id='UC1'",[]
-        ).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-            .await
-            .unwrap();
-        println!("Post browser fixture: http://127.0.0.1:3000");
-        axum::serve(listener, crate::routes::build_router(state))
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
