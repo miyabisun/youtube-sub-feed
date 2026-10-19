@@ -2110,7 +2110,14 @@
         "disablePullToRefresh": true
        }
       },
-      "trackingParams": "CCgQ8JMBGAsiEwjave6r7sOXAxUxtbkFHZOtAms="
+      "trackingParams": "CCgQ8JMBGAsiEwjave6r7sOXAxUxtbkFHZOtAms=",
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@YouTube/posts"
+        }
+       }
+      }
      }
     }
    ]

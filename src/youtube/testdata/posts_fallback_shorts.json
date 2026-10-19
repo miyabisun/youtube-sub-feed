@@ -1,0 +1,26 @@
+{
+ "contents": {
+  "twoColumnBrowseResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "title": "Shorts",
+      "selected": true,
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@GamerLuffy777/shorts"
+        }
+       }
+      },
+      "content": {
+       "richGridRenderer": {
+        "contents": []
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

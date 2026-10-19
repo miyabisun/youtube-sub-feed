@@ -1,0 +1,50 @@
+{
+ "contents": {
+  "twoColumnBrowseResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "title": "Home",
+      "selected": true,
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@justtwoguysplayingminecraf9646/featured"
+        }
+       }
+      },
+      "content": {
+       "sectionListRenderer": {
+        "contents": []
+       }
+      }
+     }
+    },
+    {
+     "tabRenderer": {
+      "title": "Videos",
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@justtwoguysplayingminecraf9646/videos"
+        }
+       }
+      }
+     }
+    },
+    {
+     "tabRenderer": {
+      "title": "Playlists",
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@justtwoguysplayingminecraf9646/playlists"
+        }
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

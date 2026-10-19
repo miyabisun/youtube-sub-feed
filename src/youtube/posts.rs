@@ -70,6 +70,14 @@ pub fn parse(response: &Value) -> Result<Vec<Post>, &'static str> {
                 .find(|tab| tab["selected"] == true)
         })
         .ok_or("no selected tab")?;
+    // Channels without Posts fall back to another selected tab.
+    if !tab
+        .pointer("/endpoint/commandMetadata/webCommandMetadata/url")
+        .and_then(Value::as_str)
+        .is_some_and(|url| url.ends_with("/posts"))
+    {
+        return Ok(vec![]);
+    }
     let sections = tab
         .pointer("/content/sectionListRenderer/contents")
         .and_then(Value::as_array)
@@ -265,7 +273,53 @@ mod tests {
     }
 
     #[test]
-    fn a_response_without_the_posts_tab_is_an_error() {
+    fn a_channel_falling_back_to_videos_has_no_posts() {
+        // UC9RVroxQd_uSipkkak5o-tw, public browse response, 2026-10-19.
+        let response: Value =
+            serde_json::from_str(include_str!("testdata/posts_fallback_videos.json")).unwrap();
+        assert_eq!(parse(&response), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_channel_falling_back_to_shorts_has_no_posts() {
+        // UC-oOcKk6bbILgAJCsXYnBpA, public browse response, 2026-10-19.
+        let response: Value =
+            serde_json::from_str(include_str!("testdata/posts_fallback_shorts.json")).unwrap();
+        assert_eq!(parse(&response), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_channel_falling_back_to_home_has_no_posts() {
+        // UC-AgWw025aOGg6Fx9yq7AYw, public browse response, 2026-10-19.
+        let response: Value =
+            serde_json::from_str(include_str!("testdata/posts_fallback_featured.json")).unwrap();
+        assert_eq!(parse(&response), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_selected_posts_tab_still_requires_a_section_list() {
+        let mut response = posts_tab();
+        response["contents"]["twoColumnBrowseResultsRenderer"]["tabs"][1]["tabRenderer"]
+            ["content"] = serde_json::json!({"richGridRenderer": {"contents": []}});
+        assert_eq!(parse(&response), Err("selected tab has no section list"));
+    }
+
+    #[test]
+    fn parses_a_post_from_the_selected_youtube_posts_tab() {
+        // UCBR8-60-B28hp2BmDPdntcQ, public browse response, 2026-10-19.
+        let response: Value =
+            serde_json::from_str(include_str!("testdata/posts_tab_youtube.json")).unwrap();
+        let posts = parse(&response).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, "Ugkx3dqOdBTxo7aos-jSj7q9BhAHWQOM_bQn");
+        assert_eq!(
+            posts[0].content,
+            "watching educational videos at 2x speed to double the learning"
+        );
+    }
+
+    #[test]
+    fn a_response_without_a_selected_tab_is_an_error() {
         let mut response = posts_tab();
         response["contents"]["twoColumnBrowseResultsRenderer"]["tabs"][1]["tabRenderer"]
             ["selected"] = Value::Bool(false);

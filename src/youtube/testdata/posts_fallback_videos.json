@@ -1,0 +1,26 @@
+{
+ "contents": {
+  "twoColumnBrowseResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "title": "Videos",
+      "selected": true,
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@minecraftletsplay1286/videos"
+        }
+       }
+      },
+      "content": {
+       "richGridRenderer": {
+        "contents": []
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

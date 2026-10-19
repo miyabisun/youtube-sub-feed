@@ -47,7 +47,14 @@
         "disablePullToRefresh": true
        }
       },
-      "trackingParams": "CCIQ8JMBGAsiEwjsvrms7sOXAxVrQA8CHaS-PdQ="
+      "trackingParams": "CCIQ8JMBGAsiEwjsvrms7sOXAxVrQA8CHaS-PdQ=",
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@YouTube/posts"
+        }
+       }
+      }
      }
     }
    ]

@@ -1,0 +1,71 @@
+{
+ "contents": {
+  "twoColumnBrowseResultsRenderer": {
+   "tabs": [
+    {
+     "tabRenderer": {
+      "selected": true,
+      "endpoint": {
+       "commandMetadata": {
+        "webCommandMetadata": {
+         "url": "/@YouTube/posts"
+        }
+       }
+      },
+      "content": {
+       "sectionListRenderer": {
+        "contents": [
+         {
+          "itemSectionRenderer": {
+           "contents": [
+            {
+             "backstagePostThreadRenderer": {
+              "post": {
+               "backstagePostRenderer": {
+                "postId": "Ugkx3dqOdBTxo7aos-jSj7q9BhAHWQOM_bQn",
+                "contentText": {
+                 "runs": [
+                  {
+                   "text": "watching educational videos at 2x speed to double the learning"
+                  }
+                 ]
+                },
+                "publishedTimeText": {
+                 "runs": [
+                  {
+                   "text": "6 hours ago",
+                   "navigationEndpoint": {
+                    "clickTrackingParams": "CL8BEPS8AiITCMH9wJX8xJcDFTYG6gEdYkQap8oBBDWGWhM=",
+                    "commandMetadata": {
+                     "webCommandMetadata": {
+                      "url": "/post/Ugkx3dqOdBTxo7aos-jSj7q9BhAHWQOM_bQn",
+                      "webPageType": "WEB_PAGE_TYPE_BROWSE",
+                      "rootVe": 247244,
+                      "apiUrl": "/youtubei/v1/browse"
+                     }
+                    },
+                    "browseEndpoint": {
+                     "browseId": "FEpost_detail",
+                     "params": "wgNaEhhVQ0JSOC02MC1CMjhocDJCbURQZG50Y1EaJFVna3gzZHFPZEJUeG83YW9zLWpTajdxOUJoQUhXUU9NX2JRbloYVUNCUjgtNjAtQjI4aHAyQm1EUGRudGNR",
+                     "canonicalBaseUrl": "/post/Ugkx3dqOdBTxo7aos-jSj7q9BhAHWQOM_bQn"
+                    }
+                   }
+                  }
+                 ]
+                }
+               }
+              }
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}
