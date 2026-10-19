@@ -3,12 +3,13 @@
   import fetcher from '$lib/fetcher.js'
   import { relativeTime } from '$lib/relative-time.js'
   import VideoCard from '$lib/components/VideoCard.svelte'
+  import PostCard from '$lib/components/PostCard.svelte'
   import Spinner from '$lib/components/Spinner.svelte'
   import Toast from '$lib/components/Toast.svelte'
 
   const LIMIT = 100
 
-  let videos = $state([])
+  let items = $state([])
   let loading = $state(true)
   let loadingMore = $state(false)
   let hasMore = $state(true)
@@ -17,19 +18,29 @@
 
   async function loadHistory() {
     if (loadingMore || !hasMore) return
-    if (videos.length > 0) loadingMore = true
+    if (items.length > 0) loadingMore = true
 
     try {
-      const data = await fetcher(
-        `${config.path.api}/history?limit=${LIMIT}&offset=${videos.length}`,
-      )
-      videos = [...videos, ...data]
+      const data = await fetcher(`${config.path.api}/history?limit=${LIMIT}&offset=${items.length}`)
+      items = [...items, ...data]
       hasMore = data.length === LIMIT
     } catch (e) {
       toast = { message: e.message, type: 'error' }
     } finally {
       loading = false
       loadingMore = false
+    }
+  }
+
+  async function restorePost(id) {
+    try {
+      await fetcher(`${config.path.api}/posts/${encodeURIComponent(id)}/unhide`, {
+        method: 'PATCH',
+      })
+      items = items.filter((item) => item.kind !== 'post' || item.id !== id)
+      toast = { message: '復元しました', type: 'success' }
+    } catch (e) {
+      toast = { message: e.message, type: 'error' }
     }
   }
 
@@ -51,20 +62,24 @@
 <section class="history" aria-labelledby="history-title">
   <header class="history-header">
     <h1 id="history-title">視聴履歴</h1>
-    <p>YouTubeで開いた動画と「もう見た」にした動画</p>
+    <p>「もう見た」にした動画・投稿</p>
   </header>
 
   {#if loading}
     <Spinner />
-  {:else if videos.length === 0}
+  {:else if items.length === 0}
     <p class="empty">視聴履歴はまだありません</p>
   {:else}
     <div class="video-list">
-      {#each videos as video (video.id)}
+      {#each items as item (`${item.kind ?? 'video'}:${item.id}`)}
         <article class="history-item">
-          <VideoCard {video} />
-          {#if video.watched_at}
-            <p class="watched-at">視聴記録: {relativeTime(video.watched_at)}</p>
+          {#if item.kind === 'post'}
+            <PostCard post={item} onrestore={restorePost} />
+          {:else}
+            <VideoCard video={item} />
+          {/if}
+          {#if item.watched_at}
+            <p class="watched-at">記録: {relativeTime(item.watched_at)}</p>
           {/if}
         </article>
       {/each}
@@ -135,4 +150,5 @@
 	.video-list
 		display: grid
 		grid-template-columns: repeat(3, minmax(0, 1fr))
+		align-items: start
 </style>

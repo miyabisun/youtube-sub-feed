@@ -70,6 +70,14 @@
     onError: (error) => (toast = { message: error.message, type: 'error' }),
   })
 
+  const hidePost = createVideoHider({
+    hideRequest: (id, options) =>
+      fetcher(`${config.path.api}/posts/${encodeURIComponent(id)}/hide`, options),
+    onHidden: (id) => (videos = videos.filter((v) => v.kind !== 'post' || v.id !== id)),
+    onSuccess: () => (toast = { message: '非表示にしました', type: 'success' }),
+    onError: (error) => (toast = { message: error.message, type: 'error' }),
+  })
+
   let groupCycle = $derived([null, ...groups.map((g) => String(g.id))])
 
   function navigateGroup(delta) {
@@ -136,7 +144,7 @@
     <div class="video-list">
       {#each videos as item (`${item.kind}:${item.id}`)}
         {#if item.kind === 'post'}
-          <PostCard post={item} />
+          <PostCard post={item} onhide={hidePost} />
         {:else}
           <div class="video-wrapper">
             <div class="video-item">

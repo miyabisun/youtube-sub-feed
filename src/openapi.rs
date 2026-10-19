@@ -71,7 +71,24 @@ pub struct PostItem {
     pub images: Vec<String>,
 }
 
-/// 視聴履歴アイテム
+/// 動画・投稿が混在する履歴。動画の既存フィールドは変更しない。
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum HistoryEntry {
+    Video(HistoryItem),
+    Post(PostHistoryItem),
+}
+
+/// 投稿の非表示履歴 (動画履歴と同じ一覧で kind="post" を持つ)
+#[derive(Serialize, ToSchema)]
+pub struct PostHistoryItem {
+    #[serde(flatten)]
+    pub post: PostItem,
+    /// 非表示にした日時 (ISO 8601)
+    pub watched_at: Option<String>,
+}
+
+/// 動画の視聴履歴アイテム
 #[derive(Serialize, ToSchema)]
 pub struct HistoryItem {
     pub id: String,

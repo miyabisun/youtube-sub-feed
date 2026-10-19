@@ -14,6 +14,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/history", get(get_history))
         .route("/api/videos/{id}/hide", patch(hide_video))
         .route("/api/videos/{id}/unhide", patch(unhide_video))
+        .route("/api/posts/{id}/hide", patch(hide_post))
+        .route("/api/posts/{id}/unhide", patch(unhide_post))
 }
 
 /// The fields shared by RSS and JSON Feed, selected with the same visibility rules.
@@ -86,7 +88,9 @@ const FEED_POSTS: &str = "SELECT p.id AS id, p.channel_id, NULL, p.published_at 
      FROM posts p
      JOIN channels c ON p.channel_id = c.id
      JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
-     WHERE (?2 IS NULL OR c.id IN (SELECT channel_id FROM channel_groups WHERE group_id = ?2))";
+     LEFT JOIN user_posts up ON up.post_id = p.id AND up.user_id = ?1
+     WHERE COALESCE(up.is_hidden, 0) = 0
+       AND (?2 IS NULL OR c.id IN (SELECT channel_id FROM channel_groups WHERE group_id = ?2))";
 
 fn feed_item_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
     if row.get::<_, String>(10)? == "video" {
@@ -138,7 +142,7 @@ fn video_json(row: &rusqlite::Row, watched_at_index: Option<usize>) -> rusqlite:
     path = "/api/feed",
     tag = "動画フィード",
     summary = "動画一覧取得",
-    description = "ユーザーが購読しているチャンネルの動画と投稿を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能\n- kinds で種類を指定 (video, post)。省略時は動画のみ。各項目は kind を持つ\n- 投稿の公開日時は相対表記から推定した値",
+    description = "ユーザーが購読しているチャンネルの動画と投稿を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画・投稿を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能\n- kinds で種類を指定 (video, post)。省略時は動画のみ。各項目は kind を持つ\n- 投稿の公開日時は相対表記から推定した値",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
@@ -195,13 +199,13 @@ async fn get_feed(
     path = "/api/history",
     tag = "動画フィード",
     summary = "視聴履歴取得",
-    description = "ユーザーが視聴済み（非表示）にした動画を記録日時の降順で取得する。",
+    description = "ユーザーが非表示にした動画と投稿を記録日時の降順で取得する。投稿は kind=post と watched_at を持つ。動画の既存の形式は維持する。",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
     ),
     responses(
-        (status = 200, description = "視聴履歴", body = Vec<HistoryItem>),
+        (status = 200, description = "動画・投稿の履歴", body = Vec<HistoryEntry>),
         (status = 401, description = "未認証", body = ErrorResponse),
     ),
 )]
@@ -215,20 +219,36 @@ async fn get_history(
     let rows = {
         let conn = state.db.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT v.id, v.channel_id, v.title, v.published_at,
+            "SELECT v.id AS id, v.channel_id, v.title, v.published_at,
                     v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
                     c.title AS channel_title, c.thumbnail_url AS channel_thumbnail,
-                    uv.created_at
+                    'video' AS kind, NULL, NULL, uv.created_at AS watched_at,
+                    COALESCE(uv.created_at, 0) AS marked_order
              FROM user_videos uv
              JOIN videos v ON v.id = uv.video_id
              JOIN channels c ON c.id = v.channel_id
              WHERE uv.user_id = ?1 AND uv.is_hidden = 1
-             ORDER BY COALESCE(uv.created_at, 0) DESC, v.id DESC
+             UNION ALL
+             SELECT p.id, p.channel_id, NULL, p.published_at,
+                    NULL, 0, 0, NULL, c.title, c.thumbnail_url,
+                    'post', p.content, p.image_urls, up.created_at,
+                    COALESCE(up.created_at, 0)
+             FROM user_posts up
+             JOIN posts p ON p.id = up.post_id
+             JOIN channels c ON c.id = p.channel_id
+             WHERE up.user_id = ?1 AND up.is_hidden = 1
+             ORDER BY marked_order DESC, id DESC, kind
              LIMIT ?2 OFFSET ?3",
         )?;
         let rows = stmt
             .query_map(rusqlite::params![user_id.0, limit, offset], |row| {
-                video_json(row, Some(10))
+                if row.get::<_, String>(10)? == "video" {
+                    video_json(row, Some(13))
+                } else {
+                    let mut value = feed_item_json(row)?;
+                    value["watched_at"] = json!(crate::util::row_timestamp_to_rfc3339(row, 13)?);
+                    Ok(value)
+                }
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows
@@ -282,6 +302,57 @@ async fn unhide_video(
     let conn = state.db.lock().unwrap();
     conn.execute(
         "DELETE FROM user_videos WHERE user_id = ?1 AND video_id = ?2",
+        rusqlite::params![user_id.0, id],
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/posts/{id}/hide",
+    tag = "投稿フィード",
+    summary = "投稿を非表示にする",
+    description = "指定した投稿をユーザーのフィードから非表示にする。",
+    params(("id" = String, Path, description = "投稿ID")),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
+async fn hide_post(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO user_posts (user_id, post_id, is_hidden) VALUES (?1, ?2, 1)
+         ON CONFLICT(user_id, post_id) DO UPDATE SET is_hidden = 1, created_at = unixepoch()
+         WHERE user_posts.is_hidden = 0",
+        rusqlite::params![user_id.0, id],
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/posts/{id}/unhide",
+    tag = "投稿フィード",
+    summary = "非表示投稿を復元する",
+    params(("id" = String, Path, description = "投稿ID")),
+    responses(
+        (status = 200, description = "成功", body = OkResponse),
+        (status = 401, description = "未認証", body = ErrorResponse),
+    ),
+)]
+async fn unhide_post(
+    State(state): State<AppState>,
+    Extension(user_id): Extension<UserId>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "DELETE FROM user_posts WHERE user_id = ?1 AND post_id = ?2",
         rusqlite::params![user_id.0, id],
     )?;
     Ok(Json(json!({"ok": true})))
@@ -501,6 +572,188 @@ mod tests {
         insert_video(state, "v3", "UC2", "2024-01-03T00:00:00Z", 0);
         insert_post(state, "p2", "UC1", JAN_2);
         insert_post(state, "p4", "UC2", JAN_4);
+    }
+
+    async fn post_action(state: &AppState, id: &str, action: &str, email: &str) {
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/posts/{id}/{action}"))
+                    .header("Cf-Access-Authenticated-User-Email", email)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn posts_hide_restore_persist_and_are_isolated_per_user() {
+        let state = setup_state();
+        insert_mixed(&state);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO users (google_id,email) VALUES ('g2','user2@example.com');
+             INSERT INTO user_channels (user_id,channel_id) VALUES (2,'UC1'),(2,'UC2');",
+            )
+            .unwrap();
+        for _ in 0..2 {
+            post_action(&state, "p2", "hide", "test@example.com").await;
+            assert_eq!(
+                feed_ids(&state, "?kinds=video,post").await,
+                vec!["p4", "v3", "v1"]
+            );
+            assert_eq!(history_ids(&state, "").await, vec!["p2"]);
+        }
+        assert_eq!(
+            feed_ids_as(&state, "?kinds=post", Some("user2@example.com")).await,
+            vec!["p4", "p2"]
+        );
+        assert!(history_ids_as(&state, "", Some("user2@example.com"))
+            .await
+            .is_empty());
+        post_action(&state, "p2", "hide", "user2@example.com").await;
+        for _ in 0..2 {
+            post_action(&state, "p2", "unhide", "test@example.com").await;
+            assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p4", "p2"]);
+            assert!(history_ids(&state, "").await.is_empty());
+        }
+        assert_eq!(
+            feed_ids_as(&state, "?kinds=post", Some("user2@example.com")).await,
+            vec!["p4"]
+        );
+        assert_eq!(
+            history_ids_as(&state, "", Some("user2@example.com")).await,
+            vec!["p2"]
+        );
+        post_action(&state, "p2", "hide", "test@example.com").await;
+        assert_eq!(history_ids(&state, "").await, vec!["p2"]);
+    }
+
+    #[tokio::test]
+    async fn posts_history_mixes_kinds_by_hidden_time_and_keeps_video_shape() {
+        let state = setup_state();
+        insert_mixed(&state);
+        hide(&state, "v1").await;
+        state.db.lock().unwrap().execute_batch(
+            "UPDATE user_videos SET created_at=40 WHERE video_id='v1';
+             INSERT INTO user_videos (user_id,video_id,is_hidden,created_at) VALUES (1,'v3',1,20);
+             INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30),(1,'p4',1,10);"
+        ).unwrap();
+        assert_eq!(history_ids(&state, "?limit=2").await, vec!["v1", "p2"]);
+        assert_eq!(
+            history_ids(&state, "?limit=2&offset=2").await,
+            vec!["v3", "p4"]
+        );
+        let history = history_json_as(&state, "", None).await;
+        assert_eq!(
+            history[0],
+            serde_json::json!({
+                "id":"v1", "channel_id":"UC1", "title":"Video v1",
+                "published_at":"2024-01-01T00:00:00Z", "duration":null,
+                "is_short":0, "is_livestream":0, "livestream_ended_at":null,
+                "channel_title":"Ch1", "channel_thumbnail":null,
+                "watched_at":"1970-01-01T00:00:40Z"
+            })
+        );
+        assert_eq!(
+            history[1],
+            serde_json::json!({
+                "kind":"post", "id":"p2", "channel_id":"UC1", "channel_title":"Ch1",
+                "channel_thumbnail":null, "content":"Post p2\nline 2",
+                "images":["https://yt3.ggpht.com/a","https://yt3.ggpht.com/b"],
+                "published_at":"2024-01-02T00:00:00Z", "watched_at":"1970-01-01T00:00:30Z"
+            })
+        );
+        post_action(&state, "p2", "unhide", "test@example.com").await;
+        assert_eq!(history_ids(&state, "").await, vec!["v1", "v3", "p4"]);
+    }
+
+    #[tokio::test]
+    async fn posts_visible_rows_stay_in_feed_until_hidden_with_a_new_timestamp() {
+        let state = setup_state();
+        insert_post(&state, "p1", "UC1", JAN_2);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO user_posts (user_id,post_id,created_at) VALUES (1,'p1',10)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p1"]);
+        assert!(history_ids(&state, "").await.is_empty());
+        post_action(&state, "p1", "hide", "test@example.com").await;
+        assert!(feed_ids(&state, "?kinds=post").await.is_empty());
+        let marked: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT created_at FROM user_posts WHERE post_id='p1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(marked >= JAN_2);
+        let first = history_json_as(&state, "", None).await;
+        post_action(&state, "p1", "hide", "test@example.com").await;
+        assert_eq!(history_json_as(&state, "", None).await, first);
+    }
+
+    #[test]
+    fn posts_state_cascades_when_user_or_post_is_deleted() {
+        let state = setup_state();
+        insert_mixed(&state);
+        let conn = state.db.lock().unwrap();
+        conn.execute_batch(
+            "INSERT INTO user_posts (user_id,post_id,is_hidden) VALUES (1,'p2',1),(1,'p4',1);
+            DELETE FROM posts WHERE id='p2';",
+        )
+        .unwrap();
+        let remaining: String = conn
+            .query_row("SELECT post_id FROM user_posts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, "p4");
+        conn.execute("DELETE FROM users WHERE id=1", []).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM user_posts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// Isolated HTTP fixture for client/e2e/posts.cjs; no background sync or external APIs.
+    #[tokio::test]
+    #[ignore = "Run with the Chromium post lifecycle test"]
+    async fn posts_browser_fixture() {
+        let state = setup_state();
+        insert_video(&state, "p-text", "UC1", "2024-01-03T00:00:00Z", 0);
+        for (id, content, images) in [
+            ("p-text", "画像なしの投稿です。\n改行も保持されます。", "[]"),
+            ("p-image", "画像付きの投稿です。", "[\"/favicon.svg\"]"),
+            ("p-gallery", "複数画像の長い投稿です。\n何行もある本文を表示します。\n続きの内容です。\nテキストがボタンと重ならないか確認します。\nさらに続きます。\nまだ続きます。\n最後の行です。", "[\"/favicon.svg\",\"/favicon.svg?2\"]"),
+        ] {
+            state.db.lock().unwrap().execute(
+                "INSERT INTO posts (id,channel_id,content,image_urls,published_at) VALUES (?1,'UC1',?2,?3,?4)",
+                params![id,content,images,JAN_4],
+            ).unwrap();
+        }
+        state.db.lock().unwrap().execute(
+            "UPDATE channels SET title='とても長いチャンネル名・毎日の活動とお知らせを届けるチャンネル' WHERE id='UC1'",[]
+        ).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+            .await
+            .unwrap();
+        println!("Post browser fixture: http://127.0.0.1:3000");
+        axum::serve(listener, crate::routes::build_router(state))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

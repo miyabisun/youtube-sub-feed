@@ -120,7 +120,10 @@ Domain components on top of the Sumi recipes:
 - **Hide button (「もう見た」):** quiet scrim overlay button on the
   thumbnail's top-right with an enlarged invisible hit area; hover shifts
   it to the danger role. Hiding is the feed's core gesture — always one
-  tap, no confirmation.
+  tap, no confirmation. On text-first post cards, keep the same quiet
+  top-right placement in the meta row, using surface colors rather than
+  an image scrim. Reserve a 44px-high hit area in normal flow so the
+  control never overlaps the text, images, or reply action.
 - **Kind toggles:** a row of pill buttons above the feed, one per item
   kind, each a real toggle (`aria-pressed`). On = accent-subtle fill, solid
   accent border and a check glyph; off = transparent with a dashed neutral
@@ -135,9 +138,16 @@ Domain components on top of the Sumi recipes:
   clamped to a few lines behind an inline expand link, then the images —
   one image contained at a capped height, several in a horizontal
   scroll-snap row of square crops. A trailing outlined reply link with a
-  speech-bubble glyph opens the post on YouTube in a new tab; posts have
-  no hide action. In the PC grid, rows align to the top so a tall post
-  does not stretch its neighbours.
+  speech-bubble glyph opens the post on YouTube in a new tab. The
+  visibility control stays in the meta row, independent of image count.
+  In the PC grid, rows align to the top so a tall post does not stretch
+  its neighbours.
+- **History:** videos and posts reuse their feed card anatomy, with a
+  muted record-time caption below each card. Post restoration occupies
+  the same top-right control position as hiding in the feed. Use a quiet
+  surface button with an accent border on hover; keep the reply link
+  separate. The layout follows the feed's single-column / three-column
+  grid and top-aligns cards of different heights.
 - **Group nav (Header):** groups are the nav tabs (Sumi tab recipe, active
   = accent underline), horizontally scrollable, with「すべて」first. On
   mobile the tab row is replaced by a native select. Swiping the feed

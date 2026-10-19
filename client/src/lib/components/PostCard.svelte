@@ -3,7 +3,19 @@
   import { link } from '$lib/router.svelte.js'
   import Icon from '$lib/components/Icon.svelte'
 
-  let { post } = $props()
+  let { post, onhide = null, onrestore = null } = $props()
+
+  let pending = $state(false)
+
+  async function changeVisibility() {
+    if (pending) return
+    pending = true
+    try {
+      await (onrestore ?? onhide)(post.id)
+    } finally {
+      pending = false
+    }
+  }
 
   let body = $state(null)
   let clamped = $state(false)
@@ -26,6 +38,16 @@
     {/if}
     <a class="channel" href={link(`/channel/${post.channel_id}`)}>{post.channel_title}</a>
     <span class="time">{relativeTime(post.published_at)}</span>
+    {#if onhide || onrestore}
+      <button
+        class="post-state"
+        class:restore={!!onrestore}
+        disabled={pending}
+        onclick={changeVisibility}
+      >
+        {onrestore ? '復元' : 'もう見た'}
+      </button>
+    {/if}
   </div>
   {#if post.content}
     <p class="content" class:expanded bind:this={body}>{post.content}</p>
@@ -95,6 +117,33 @@
 .time
 	color: var(--c-text-muted)
 	flex-shrink: 0
+
+.post-state
+	position: relative
+	flex-shrink: 0
+	margin-left: auto
+	min-height: 44px
+	padding: var(--sp-1) var(--sp-3)
+	background: var(--c-overlay-1)
+	color: var(--c-text-sub)
+	border: 1px solid var(--c-border)
+	border-radius: var(--radius-sm)
+	font-size: var(--fs-xs)
+	cursor: pointer
+
+	&:hover
+		background: var(--c-danger-bg)
+		color: var(--c-danger)
+		border-color: var(--c-danger-border)
+
+	&.restore:hover
+		background: var(--c-accent-bg)
+		color: var(--c-text)
+		border-color: var(--c-accent-border)
+
+	&:disabled
+		opacity: 0.5
+		cursor: wait
 
 .content
 	margin: 0
