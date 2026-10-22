@@ -165,69 +165,11 @@ async fn scan_channels(
             target.repair_after = 0;
         }
     }
-    let mut counts = HashMap::new();
-    for batch in targets.chunks(50) {
-        let ids = batch
-            .iter()
-            .map(|t| t.channel_id.clone())
-            .collect::<Vec<_>>();
-        match fetch_channel_video_counts(state, &ids).await {
-            Ok(result) => {
-                for count in result {
-                    counts.insert(count.channel_id, count.video_count);
-                }
-                outcome.failed_channels +=
-                    ids.iter().filter(|id| !counts.contains_key(*id)).count();
-            }
-            Err(
-                error @ (FetchError::QuotaExceeded | FetchError::Deferred | FetchError::Database),
-            ) => return Err(error),
-            Err(error) => {
-                tracing::warn!(%error, channels = ids.len(), "[catchup] statistics batch failed");
-                outcome.failed_channels += ids.len();
-            }
-        }
-    }
-
-    targets.sort_by_key(|t| (t.head_attempted_at, t.channel_id.clone()));
-    let changed = targets
-        .iter()
-        .filter(|t| {
-            counts
-                .get(&t.channel_id)
-                .is_some_and(|count| video_count_changed(t.previous_video_count, *count))
-        })
-        .take(CHANGED_PAGES)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut used = changed
-        .iter()
-        .map(|t| t.channel_id.clone())
-        .collect::<HashSet<_>>();
-    let repairs = targets
-        .iter()
-        .filter(|t| t.repair_after <= now && !used.contains(&t.channel_id))
-        .take(REPAIR_PAGES)
-        .cloned()
-        .collect::<Vec<_>>();
-    used.extend(repairs.iter().map(|t| t.channel_id.clone()));
-    targets.sort_by_key(|t| (t.backfill_attempted_at, t.channel_id.clone()));
-    // Busy heads must not starve an active history cursor. A nonempty token
-    // identifies a distinct page, so this does not duplicate the head request.
-    let backfills = targets
-        .into_iter()
-        .filter(|t| {
-            t.backfill_after <= now && (!used.contains(&t.channel_id) || t.page_token.is_some())
-        })
-        .take(BACKFILL_PAGES)
-        .collect::<Vec<_>>();
+    let counts = fetch_video_counts(state, &targets, outcome).await?;
+    let pages = select_pages(targets, &counts, now);
 
     let mut new_ids = Vec::new();
-    for (kind, selected) in [
-        ("changed", changed),
-        ("repair", repairs),
-        ("backfill", backfills),
-    ] {
+    for (kind, selected) in pages {
         for target in selected {
             // Persist attempts before IO so a bad channel rotates behind healthy
             // channels, including after a restart. Successful progress is separate.
@@ -290,6 +232,84 @@ async fn scan_channels(
     }
     crate::sync::video_enrich::enrich_videos(state, &new_ids).await?;
     Ok(())
+}
+
+/// Current video counts per channel; channels whose statistics failed count as failed.
+async fn fetch_video_counts(
+    state: &AppState,
+    targets: &[ChannelTarget],
+    outcome: &mut SweepOutcome,
+) -> Result<HashMap<String, u64>, FetchError> {
+    let mut counts = HashMap::new();
+    for batch in targets.chunks(50) {
+        let ids = batch
+            .iter()
+            .map(|t| t.channel_id.clone())
+            .collect::<Vec<_>>();
+        match fetch_channel_video_counts(state, &ids).await {
+            Ok(result) => {
+                for count in result {
+                    counts.insert(count.channel_id, count.video_count);
+                }
+                outcome.failed_channels +=
+                    ids.iter().filter(|id| !counts.contains_key(*id)).count();
+            }
+            Err(
+                error @ (FetchError::QuotaExceeded | FetchError::Deferred | FetchError::Database),
+            ) => return Err(error),
+            Err(error) => {
+                tracing::warn!(%error, channels = ids.len(), "[catchup] statistics batch failed");
+                outcome.failed_channels += ids.len();
+            }
+        }
+    }
+    Ok(counts)
+}
+
+/// Pick this sweep's changed, repair and backfill pages, each channel at most once
+/// per head request.
+fn select_pages(
+    mut targets: Vec<ChannelTarget>,
+    counts: &HashMap<String, u64>,
+    now: i64,
+) -> [(&'static str, Vec<ChannelTarget>); 3] {
+    targets.sort_by_key(|t| (t.head_attempted_at, t.channel_id.clone()));
+    let changed = targets
+        .iter()
+        .filter(|t| {
+            counts
+                .get(&t.channel_id)
+                .is_some_and(|count| video_count_changed(t.previous_video_count, *count))
+        })
+        .take(CHANGED_PAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut used = changed
+        .iter()
+        .map(|t| t.channel_id.clone())
+        .collect::<HashSet<_>>();
+    let repairs = targets
+        .iter()
+        .filter(|t| t.repair_after <= now && !used.contains(&t.channel_id))
+        .take(REPAIR_PAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    used.extend(repairs.iter().map(|t| t.channel_id.clone()));
+    targets.sort_by_key(|t| (t.backfill_attempted_at, t.channel_id.clone()));
+    // Busy heads must not starve an active history cursor. A nonempty token
+    // identifies a distinct page, so this does not duplicate the head request.
+    let backfills = targets
+        .into_iter()
+        .filter(|t| {
+            t.backfill_after <= now && (!used.contains(&t.channel_id) || t.page_token.is_some())
+        })
+        .take(BACKFILL_PAGES)
+        .collect::<Vec<_>>();
+    [
+        ("changed", changed),
+        ("repair", repairs),
+        ("backfill", backfills),
+    ]
 }
 
 fn save_page(

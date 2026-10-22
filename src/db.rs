@@ -288,9 +288,7 @@ pub fn open_memory() -> Connection {
     conn
 }
 
-fn create_tables(conn: &Connection) {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS users (
+const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             google_id TEXT,
             email TEXT NOT NULL,
@@ -422,9 +420,11 @@ fn create_tables(conn: &Connection) {
         CREATE INDEX IF NOT EXISTS idx_user_videos_user ON user_videos(user_id);
         CREATE INDEX IF NOT EXISTS idx_user_videos_hidden ON user_videos(user_id, is_hidden);
         CREATE INDEX IF NOT EXISTS idx_groups_user ON groups(user_id);
-        CREATE INDEX IF NOT EXISTS idx_channel_subscriptions_expires ON channel_subscriptions(expires_at);",
-    )
-    .expect("Failed to create tables");
+        CREATE INDEX IF NOT EXISTS idx_channel_subscriptions_expires ON channel_subscriptions(expires_at);";
+
+fn create_tables(conn: &Connection) {
+    conn.execute_batch(SCHEMA_SQL)
+        .expect("Failed to create tables");
 }
 
 /// Convert legacy RFC 3339 TEXT timestamps to Unix seconds and rebuild the
@@ -459,8 +459,19 @@ fn migrate_timestamps_to_unix(conn: &Connection) {
     conn.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")
         .expect("Failed to start timestamp migration");
 
-    let result = conn.execute_batch(
-        "DROP INDEX IF EXISTS idx_users_email;
+    let result = conn.execute_batch(TIMESTAMP_REBUILD_SQL);
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK;");
+        panic!("Timestamp migration failed: {error}");
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("Failed to restore foreign keys");
+    create_tables(conn);
+    normalize_timestamp_storage(conn, CORE_TIMESTAMPS);
+    migrate_sessions_to_unix(conn);
+}
+
+const TIMESTAMP_REBUILD_SQL: &str = "DROP INDEX IF EXISTS idx_users_email;
          DROP INDEX IF EXISTS idx_users_rss_token;
          DROP INDEX IF EXISTS idx_videos_published;
          DROP INDEX IF EXISTS idx_videos_channel;
@@ -553,18 +564,7 @@ fn migrate_timestamps_to_unix(conn: &Connection) {
          ALTER TABLE user_videos_unix RENAME TO user_videos;
          ALTER TABLE groups_unix RENAME TO groups;
          ALTER TABLE channel_subscriptions_unix RENAME TO channel_subscriptions;
-         COMMIT;",
-    );
-    if let Err(error) = result {
-        let _ = conn.execute_batch("ROLLBACK;");
-        panic!("Timestamp migration failed: {error}");
-    }
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .expect("Failed to restore foreign keys");
-    create_tables(conn);
-    normalize_timestamp_storage(conn, CORE_TIMESTAMPS);
-    migrate_sessions_to_unix(conn);
-}
+         COMMIT;";
 
 fn column_declaration(conn: &Connection, table: &str, column: &str) -> Option<(String, bool)> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).ok()?;
@@ -640,6 +640,123 @@ fn migrate_sessions_to_unix(conn: &Connection) {
         .expect("Failed to restore foreign keys");
 }
 
+/// Single-user → multi-user schema steps, run in order inside one transaction.
+const MULTI_USER_MIGRATION: &[&str] = &[
+    // 1. Create users table from auth data (first user becomes master)
+    "CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            google_id TEXT,
+            email TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'member',
+            rss_token TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER
+        );
+        INSERT OR IGNORE INTO users (id, google_id, email, role, created_at, updated_at)
+        SELECT id, google_id, email, 'master',
+               COALESCE(updated_at, unixepoch()), updated_at
+        FROM auth;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);",
+
+    // 2. Recreate sessions with user_id instead of auth_id
+    "CREATE TABLE sessions_new (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at INTEGER,
+            created_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        INSERT INTO sessions_new (id, user_id, expires_at, created_at)
+        SELECT id, auth_id, expires_at, created_at FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;",
+
+    // 3. Create user_channels from channels (per-user preferences)
+    "CREATE TABLE IF NOT EXISTS user_channels (
+            user_id INTEGER NOT NULL,
+            channel_id TEXT NOT NULL,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
+            show_livestreams INTEGER NOT NULL DEFAULT 0,
+            hide_shorts INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY (user_id, channel_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO user_channels (user_id, channel_id, is_favorite, show_livestreams, created_at)
+        SELECT u.id, c.id, c.is_favorite, c.show_livestreams, c.created_at
+        FROM channels c, users u;",
+
+    // 4. Create user_videos from hidden videos
+    "CREATE TABLE IF NOT EXISTS user_videos (
+            user_id INTEGER NOT NULL,
+            video_id TEXT NOT NULL,
+            is_hidden INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY (user_id, video_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO user_videos (user_id, video_id, is_hidden, created_at)
+        SELECT u.id, v.id, 1, COALESCE(v.fetched_at, unixepoch())
+        FROM videos v, users u
+        WHERE v.is_hidden = 1;",
+
+    // 5. Recreate channels without is_favorite, show_livestreams
+    "CREATE TABLE channels_new (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            thumbnail_url TEXT,
+            upload_playlist_id TEXT,
+            last_fetched_at INTEGER,
+            created_at INTEGER
+        );
+        INSERT INTO channels_new (id, title, thumbnail_url, upload_playlist_id, last_fetched_at, created_at)
+        SELECT id, title, thumbnail_url, upload_playlist_id, last_fetched_at, created_at
+        FROM channels;
+        DROP TABLE channels;
+        ALTER TABLE channels_new RENAME TO channels;",
+
+    // 6. Recreate videos without is_hidden
+    "CREATE TABLE videos_new (
+            id TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            thumbnail_url TEXT,
+            published_at TEXT,
+            duration TEXT,
+            is_short INTEGER NOT NULL DEFAULT 0,
+            is_livestream INTEGER NOT NULL DEFAULT 0,
+            livestream_ended_at INTEGER,
+            fetched_at INTEGER,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        );
+        INSERT INTO videos_new (id, channel_id, title, thumbnail_url, published_at, duration, is_short, is_livestream, livestream_ended_at, fetched_at)
+        SELECT id, channel_id, title, thumbnail_url, published_at, duration, is_short, is_livestream, livestream_ended_at, fetched_at
+        FROM videos;
+        DROP TABLE videos;
+        ALTER TABLE videos_new RENAME TO videos;",
+
+    // 7. Recreate groups with user_id
+    "CREATE TABLE groups_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        INSERT INTO groups_new (id, user_id, name, sort_order, created_at)
+        SELECT g.id, u.id, g.name, g.sort_order, g.created_at
+        FROM groups g, users u;
+        DROP TABLE groups;
+        ALTER TABLE groups_new RENAME TO groups;",
+
+    // 8. Drop old auth table
+    "DROP TABLE auth;",
+];
+
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let has_auth_table = conn.prepare("SELECT 1 FROM auth LIMIT 0").is_ok();
     if !has_auth_table {
@@ -653,149 +770,9 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 
     conn.execute_batch("BEGIN TRANSACTION;")?;
 
-    let result = (|| -> Result<(), rusqlite::Error> {
-        // 1. Create users table from auth data (first user becomes master)
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id TEXT,
-                email TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'member',
-                rss_token TEXT,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                updated_at INTEGER
-            );
-
-            INSERT OR IGNORE INTO users (id, google_id, email, role, created_at, updated_at)
-            SELECT id, google_id, email, 'master',
-                   COALESCE(updated_at, unixepoch()), updated_at
-            FROM auth;
-
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_rss_token ON users(rss_token);",
-        )?;
-
-        // 2. Recreate sessions with user_id instead of auth_id
-        conn.execute_batch(
-            "CREATE TABLE sessions_new (
-                id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                expires_at INTEGER,
-                created_at INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            INSERT INTO sessions_new (id, user_id, expires_at, created_at)
-            SELECT id, auth_id, expires_at, created_at FROM sessions;
-
-            DROP TABLE sessions;
-            ALTER TABLE sessions_new RENAME TO sessions;",
-        )?;
-
-        // 3. Create user_channels from channels (per-user preferences)
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS user_channels (
-                user_id INTEGER NOT NULL,
-                channel_id TEXT NOT NULL,
-                is_favorite INTEGER NOT NULL DEFAULT 0,
-                show_livestreams INTEGER NOT NULL DEFAULT 0,
-                hide_shorts INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                PRIMARY KEY (user_id, channel_id),
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
-            );
-
-            INSERT OR IGNORE INTO user_channels (user_id, channel_id, is_favorite, show_livestreams, created_at)
-            SELECT u.id, c.id, c.is_favorite, c.show_livestreams, c.created_at
-            FROM channels c, users u;",
-        )?;
-
-        // 4. Create user_videos from hidden videos
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS user_videos (
-                user_id INTEGER NOT NULL,
-                video_id TEXT NOT NULL,
-                is_hidden INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                PRIMARY KEY (user_id, video_id),
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
-            );
-
-            INSERT OR IGNORE INTO user_videos (user_id, video_id, is_hidden, created_at)
-            SELECT u.id, v.id, 1, COALESCE(v.fetched_at, unixepoch())
-            FROM videos v, users u
-            WHERE v.is_hidden = 1;",
-        )?;
-
-        // 5. Recreate channels without is_favorite, show_livestreams
-        conn.execute_batch(
-            "CREATE TABLE channels_new (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                thumbnail_url TEXT,
-                upload_playlist_id TEXT,
-                last_fetched_at INTEGER,
-                created_at INTEGER
-            );
-
-            INSERT INTO channels_new (id, title, thumbnail_url, upload_playlist_id, last_fetched_at, created_at)
-            SELECT id, title, thumbnail_url, upload_playlist_id, last_fetched_at, created_at
-            FROM channels;
-
-            DROP TABLE channels;
-            ALTER TABLE channels_new RENAME TO channels;",
-        )?;
-
-        // 6. Recreate videos without is_hidden
-        conn.execute_batch(
-            "CREATE TABLE videos_new (
-                id TEXT PRIMARY KEY,
-                channel_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                thumbnail_url TEXT,
-                published_at TEXT,
-                duration TEXT,
-                is_short INTEGER NOT NULL DEFAULT 0,
-                is_livestream INTEGER NOT NULL DEFAULT 0,
-                livestream_ended_at INTEGER,
-                fetched_at INTEGER,
-                FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
-            );
-
-            INSERT INTO videos_new (id, channel_id, title, thumbnail_url, published_at, duration, is_short, is_livestream, livestream_ended_at, fetched_at)
-            SELECT id, channel_id, title, thumbnail_url, published_at, duration, is_short, is_livestream, livestream_ended_at, fetched_at
-            FROM videos;
-
-            DROP TABLE videos;
-            ALTER TABLE videos_new RENAME TO videos;",
-        )?;
-
-        // 7. Recreate groups with user_id
-        conn.execute_batch(
-            "CREATE TABLE groups_new (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            INSERT INTO groups_new (id, user_id, name, sort_order, created_at)
-            SELECT g.id, u.id, g.name, g.sort_order, g.created_at
-            FROM groups g, users u;
-
-            DROP TABLE groups;
-            ALTER TABLE groups_new RENAME TO groups;",
-        )?;
-
-        // 8. Drop old auth table
-        conn.execute_batch("DROP TABLE auth;")?;
-
-        Ok(())
-    })();
+    let result = MULTI_USER_MIGRATION
+        .iter()
+        .try_for_each(|step| conn.execute_batch(step));
 
     match result {
         Ok(()) => {
@@ -1838,14 +1815,7 @@ mod tests {
         assert_eq!(user1_groups, vec!["User1 Group"]);
     }
 
-    #[test]
-    fn test_migrate_from_old_schema() {
-        let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-
-        // Create old (single-user) schema
-        conn.execute_batch(
-            "CREATE TABLE auth (
+    const OLD_SINGLE_USER_SCHEMA: &str = "CREATE TABLE auth (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 google_id TEXT NOT NULL,
                 email TEXT NOT NULL,
@@ -1898,13 +1868,10 @@ mod tests {
                 expires_at TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (auth_id) REFERENCES auth(id) ON DELETE CASCADE
-            );",
-        )
-        .unwrap();
+            );";
 
-        // Insert old data (sessions は旧スキーマの auth_id 参照)
-        conn.execute_batch(
-            "INSERT INTO auth (google_id, email, access_token, refresh_token, token_expires_at, updated_at)
+    // Old data (sessions reference auth_id as in the old schema)
+    const OLD_SINGLE_USER_DATA: &str = "INSERT INTO auth (google_id, email, access_token, refresh_token, token_expires_at, updated_at)
              VALUES ('g1', 'test@example.com', 'at', 'rt', '2026-01-01T00:00:00Z', '2025-01-01T00:00:00Z');
              INSERT INTO channels (id, title, show_livestreams, is_favorite, created_at)
              VALUES ('UC1', 'Ch1', 1, 1, '2024-01-01T00:00:00Z');
@@ -1912,8 +1879,18 @@ mod tests {
              INSERT INTO videos (id, channel_id, title, is_hidden) VALUES ('v2', 'UC1', 'Hidden', 1);
              INSERT INTO groups (name, sort_order, created_at) VALUES ('G1', 0, '2024-01-01T00:00:00Z');
              INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', 1);
-             INSERT INTO sessions (id, auth_id, expires_at, created_at) VALUES ('s1', 1, '2026-01-01T00:00:00Z', '2025-01-01T00:00:00Z');",
-        ).unwrap();
+             INSERT INTO sessions (id, auth_id, expires_at, created_at) VALUES ('s1', 1, '2026-01-01T00:00:00Z', '2025-01-01T00:00:00Z');";
+
+    #[test]
+    fn test_migrate_from_old_schema() {
+        let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        // Create old (single-user) schema
+        conn.execute_batch(OLD_SINGLE_USER_SCHEMA).unwrap();
+
+        // Insert old data (sessions は旧スキーマの auth_id 参照)
+        conn.execute_batch(OLD_SINGLE_USER_DATA).unwrap();
 
         // Run the same migration chain as open().
         migrate(&conn).unwrap();

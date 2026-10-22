@@ -46,7 +46,5 @@ missing_assert_message = "warn"
 # lib はこの bin とテストのためだけにあり外部の利用者がいない。公開 API 向けの節を書く読み手がいない。
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
-# schema DDL・移行・WebSub 受信・API 再試行は上から順に読む一続きの手順で、分割すると手順が散る。
-too_many_lines = "allow"
 # utoipa の `#[derive(OpenApi)]` が展開するコードで出る。こちらのコードでは直せない。
 needless_for_each = "allow"

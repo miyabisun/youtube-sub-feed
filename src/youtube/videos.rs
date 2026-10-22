@@ -359,6 +359,15 @@ fn retry_after_seconds(value: Option<&str>, now: i64) -> u64 {
         .unwrap_or(0)
 }
 
+/// Persist a shared pause so every worker skips the API until `until`.
+fn persist_pause(state: &AppState, column: &str, until: i64) -> Result<(), FetchError> {
+    state.conn().execute(
+        &format!("UPDATE youtube_api_state SET {column} = ?1 WHERE id = 1"),
+        [until],
+    )?;
+    Ok(())
+}
+
 /// Three attempts at most, with bounded local backoff. Long Retry-After releases
 /// the worker and persists a shared pause instead of sleeping through many ticks.
 /// URLs and response bodies can carry credentials: never log either of them.
@@ -433,10 +442,7 @@ async fn get_json_with_retry(
             // Conservative: crosses the next Pacific midnight even on a 25-hour
             // DST day, without adding a timezone database dependency.
             let until = state.youtube_api.now() + 25 * 3600;
-            state.conn().execute(
-                "UPDATE youtube_api_state SET quota_until = ?1 WHERE id = 1",
-                [until],
-            )?;
+            persist_pause(state, "quota_until", until)?;
             tracing::warn!(until, "[youtube-api] quota pause");
             return Err(FetchError::QuotaExceeded);
         }
@@ -454,10 +460,7 @@ async fn get_json_with_retry(
                     .youtube_api
                     .now()
                     .saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
-                state.conn().execute(
-                    "UPDATE youtube_api_state SET retry_until = ?1 WHERE id = 1",
-                    [until],
-                )?;
+                persist_pause(state, "retry_until", until)?;
                 tracing::warn!(until, "[youtube-api] Retry-After pause");
                 return Err(FetchError::Deferred);
             }

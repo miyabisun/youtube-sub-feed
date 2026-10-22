@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::websub::atom::{parse_atom_document, AtomEntry};
+use crate::websub::atom::{parse_atom_document, AtomEntry, ParsedAtomDocument};
 use crate::websub::{extract_channel_id, signature};
 use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, QueryRejection};
@@ -248,15 +248,7 @@ pub async fn notification(
     };
     log.channel = Some(channel_id.clone());
 
-    let secret: Option<String> = {
-        let conn = state.conn();
-        conn.query_row(
-            "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
-            [&channel_id],
-            |row| row.get(0),
-        )
-        .ok()
-    };
+    let secret = lookup_hub_secret(&state, &channel_id);
 
     let Some(secret) = secret else {
         tracing::warn!(
@@ -290,61 +282,10 @@ pub async fn notification(
     log.incomplete_entries = Some(parsed.incomplete_entries);
     log.entries = Some(parsed.entries.len());
     log.tombstones = Some(tombstone_count);
-    let unexpected_body = parsed.malformed
-        || parsed.incomplete_entries > 0
-        || (parsed.entry_elements == 0 && tombstone_count == 0);
-    if unexpected_body {
-        tracing::warn!(
-            "[websub] unexpected push body for {}: malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}, preview=\"{}\"",
-            channel_id,
-            parsed.malformed,
-            parsed.entry_elements,
-            parsed.incomplete_entries,
-            parsed.entries.len(),
-            tombstone_count,
-            body_preview(&body)
-        );
-        warn_bad_push(
-            &state,
-            REASON_UNEXPECTED_BODY,
-            &channel_id,
-            &body,
-            Some(&format!(
-                "malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}",
-                parsed.malformed,
-                parsed.entry_elements,
-                parsed.incomplete_entries,
-                parsed.entries.len(),
-                tombstone_count
-            )),
-        )
-        .await;
-    }
+    let unexpected_body = check_push_body(&state, &channel_id, &body, &parsed).await;
 
-    // Tombstones retire videos rather than announcing them. The DELETE is scoped
-    // to the signing channel: the HMAC proves the push belongs to that
-    // subscription and to nothing else.
-    let mut removed_videos = 0usize;
-    {
-        let conn = state.conn();
-        for video_id in &parsed.deleted_video_ids {
-            match conn.execute(
-                "DELETE FROM videos WHERE id = ?1 AND channel_id = ?2",
-                rusqlite::params![video_id, channel_id],
-            ) {
-                Ok(0) => tracing::debug!(
-                    "[websub] {} retired {}, which we do not hold",
-                    channel_id,
-                    video_id
-                ),
-                Ok(count) => {
-                    removed_videos += count;
-                    tracing::info!("[websub] video removed: {} ({})", video_id, channel_id);
-                }
-                Err(e) => tracing::warn!("[websub] failed to remove {}: {}", video_id, e),
-            }
-        }
-    }
+    // Tombstones retire videos rather than announcing them.
+    let removed_videos = remove_tombstones(&state, &channel_id, &parsed.deleted_video_ids);
 
     log.removed = Some(removed_videos);
     let now = crate::util::now_unix();
@@ -388,6 +329,82 @@ pub async fn notification(
     });
 
     log.respond(outcome, StatusCode::OK)
+}
+
+fn lookup_hub_secret(state: &AppState, channel_id: &str) -> Option<String> {
+    let conn = state.conn();
+    conn.query_row(
+        "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
+        [channel_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// Whether a signed push body is not what the hub should send; warns when so.
+async fn check_push_body(
+    state: &AppState,
+    channel_id: &str,
+    body: &[u8],
+    parsed: &ParsedAtomDocument,
+) -> bool {
+    let tombstone_count = parsed.deleted_video_ids.len();
+    let unexpected_body = parsed.malformed
+        || parsed.incomplete_entries > 0
+        || (parsed.entry_elements == 0 && tombstone_count == 0);
+    if unexpected_body {
+        tracing::warn!(
+            "[websub] unexpected push body for {}: malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}, preview=\"{}\"",
+            channel_id,
+            parsed.malformed,
+            parsed.entry_elements,
+            parsed.incomplete_entries,
+            parsed.entries.len(),
+            tombstone_count,
+            body_preview(body)
+        );
+        warn_bad_push(
+            state,
+            REASON_UNEXPECTED_BODY,
+            channel_id,
+            body,
+            Some(&format!(
+                "malformed={}, entry_elements={}, incomplete_entries={}, parsed_entries={}, tombstones={}",
+                parsed.malformed,
+                parsed.entry_elements,
+                parsed.incomplete_entries,
+                parsed.entries.len(),
+                tombstone_count
+            )),
+        )
+        .await;
+    }
+    unexpected_body
+}
+
+/// Retire tombstoned videos. The DELETE is scoped to the signing channel: the
+/// HMAC proves the push belongs to that subscription and to nothing else.
+fn remove_tombstones(state: &AppState, channel_id: &str, video_ids: &[String]) -> usize {
+    let mut removed_videos = 0usize;
+    let conn = state.conn();
+    for video_id in video_ids {
+        match conn.execute(
+            "DELETE FROM videos WHERE id = ?1 AND channel_id = ?2",
+            rusqlite::params![video_id, channel_id],
+        ) {
+            Ok(0) => tracing::debug!(
+                "[websub] {} retired {}, which we do not hold",
+                channel_id,
+                video_id
+            ),
+            Ok(count) => {
+                removed_videos += count;
+                tracing::info!("[websub] video removed: {} ({})", video_id, channel_id);
+            }
+            Err(e) => tracing::warn!("[websub] failed to remove {}: {}", video_id, e),
+        }
+    }
+    removed_videos
 }
 
 /// Reasons a push that named a channel we subscribe to was not accepted as
