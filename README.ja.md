@@ -98,7 +98,7 @@ NODE_ENV=production ./target/release/youtube-sub-feed
 ローカル開発用の`./bin/dev`は画面をビルド・監視し、Rustサーバーを起動します。
 開発モードはDB内の最初のユーザーを使うため、空のDBでは自動ログインできません。
 初期設定と隔離方法は[ローカル開発](docs/deploy.md#ローカル開発)を参照してください。
-バックエンドの検証は、画面のビルド後に`cargo test --locked`で行います。
+バックエンドの検証は、画面のビルド後に`cargo fmt --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`、`cargo test --locked`で行います。
 
 ## 環境変数
 

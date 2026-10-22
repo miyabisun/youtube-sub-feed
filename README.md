@@ -104,7 +104,7 @@ Edit `.env` before starting; the default database path is `./feed.db`.
 Production uses the same Access setup as Docker. For local development, `./bin/dev` watches the frontend and starts the Rust server.
 Development mode reuses the first existing DB user; it does not create one automatically.
 See [local development](docs/deploy.md#ローカル開発) for initial setup and isolation.
-Run `cargo test --locked` after building the frontend to check the backend.
+After building the frontend, check the backend with `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings` and `cargo test --locked`.
 
 ## Environment Variables
 
