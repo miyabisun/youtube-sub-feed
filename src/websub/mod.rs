@@ -7,19 +7,18 @@ use quick_xml::Reader;
 
 pub const HUB_URL: &str = "https://pubsubhubbub.appspot.com/subscribe";
 
+#[must_use]
 pub fn topic_url(channel_id: &str) -> String {
-    format!(
-        "https://www.youtube.com/xml/feeds/videos.xml?channel_id={}",
-        channel_id
-    )
+    format!("https://www.youtube.com/xml/feeds/videos.xml?channel_id={channel_id}")
 }
 
-/// Extract the channel_id from a WebSub push notification (Atom XML).
+/// Extract the `channel_id` from a `WebSub` push notification (Atom XML).
 ///
 /// The hub signs each push with the per-channel secret, so the channel has to
 /// be named before the signature can be checked. Element local names are used
 /// because namespace prefixes and attributes are transport details, not part
 /// of the Atom/YouTube field identity.
+#[must_use]
 pub fn extract_channel_id(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);

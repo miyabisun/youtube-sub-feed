@@ -50,7 +50,7 @@ pub struct FeedItem {
 
 /// フィード投稿アイテム (`kinds` に post を含めたときの kind="post" の項目)
 ///
-/// 返信は `https://www.youtube.com/post/{id}` で YouTube 側の投稿画面を開く。
+/// 返信は `https://www.youtube.com/post/{id}` で `YouTube` 側の投稿画面を開く。
 #[derive(Serialize, ToSchema)]
 pub struct PostItem {
     /// 項目の種類 ("post")

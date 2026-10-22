@@ -32,7 +32,7 @@ async fn get_news(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let items = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         favorite_items(&conn, user_id, 50)?
     };
 
@@ -120,12 +120,12 @@ mod tests {
     use rusqlite::params;
     use tower::ServiceExt;
 
-    /// Same fixture as rss::tests: user 1 with one favorite channel (UC_fav)
-    /// and one non-favorite channel (UC_nofav).
+    /// Same fixture as `rss::tests`: user 1 with one favorite channel (`UC_fav`)
+    /// and one non-favorite channel (`UC_nofav`).
     fn setup_state() -> AppState {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email, rss_token) VALUES ('g1', 'test@example.com', 'tok-1')",
                 [],
@@ -162,7 +162,7 @@ mod tests {
         published_at: &str,
         is_livestream: i64,
     ) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -184,7 +184,7 @@ mod tests {
             .with_state(state.clone())
     }
 
-    /// Drive GET /api/news as user_id and return (status, parsed JSON body).
+    /// Drive GET /api/news as `user_id` and return (status, parsed JSON body).
     async fn get_news_feed(state: &AppState, user_id: i64) -> (StatusCode, serde_json::Value) {
         let resp = app(state, user_id)
             .oneshot(
@@ -210,7 +210,7 @@ mod tests {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
-    /// Extract item ids in document order (= published_at DESC).
+    /// Extract item ids in document order (= `published_at` DESC).
     fn item_ids(feed: &serde_json::Value) -> Vec<String> {
         feed["items"]
             .as_array()
@@ -237,7 +237,7 @@ mod tests {
         insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
                 [],
@@ -255,7 +255,7 @@ mod tests {
         insert_video(&state, "v_members", "UC_fav", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v_public", "UC_fav", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
                 [],
@@ -273,7 +273,7 @@ mod tests {
         insert_video(&state, "v_short", "UC_fav", "2024-01-03T00:00:00Z", 0);
         insert_video(&state, "v_normal", "UC_fav", "2024-01-02T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
                 .unwrap();
             conn.execute(
@@ -302,7 +302,7 @@ mod tests {
     async fn news_includes_livestreams_when_channel_enabled() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE user_channels SET show_livestreams = 1 WHERE user_id = 1 AND channel_id = 'UC_fav'",
                 [],
@@ -319,11 +319,11 @@ mod tests {
     async fn news_keeps_its_limit_and_newest_videos() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             for i in 0..105 {
                 conn.execute(
                     "INSERT INTO videos (id, channel_id, title, published_at) VALUES (?1, 'UC_fav', 'Video', ?2)",
-                    params![format!("v{i}"), 1700000000 + i],
+                    params![format!("v{i}"), 1_700_000_000 + i],
                 ).unwrap();
             }
         }
@@ -349,7 +349,7 @@ mod tests {
         let state = setup_state();
         insert_video(&state, "v_user1", "UC_fav", "2024-01-02T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email, rss_token) VALUES ('g2', 'user2@example.com', 'tok-2')",
                 [],
@@ -436,7 +436,7 @@ mod tests {
     async fn news_omits_date_published_when_unknown() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO videos (id, channel_id, title) VALUES ('v_nodate', 'UC_fav', 'No Date')",
                 [],

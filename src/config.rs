@@ -11,7 +11,7 @@ pub struct Config {
     pub gis_client_id: String,
     pub discord_webhook_url: Option<String>,
     pub websub_callback_url: String,
-    /// YouTube Data API key for video detail enrichment (duration / Shorts /
+    /// `YouTube` Data API key for video detail enrichment (duration / Shorts /
     /// livestream). API-key-only endpoints — no OAuth involved.
     pub youtube_api_key: Option<String>,
     /// This server's optional UTC-day request budget, allocated from the actual project quota.
@@ -54,9 +54,7 @@ impl Config {
         let catchup_interval_minutes =
             parse_interval_minutes(env::var("CATCHUP_INTERVAL_MINUTES").ok().as_deref());
 
-        let is_production = env::var("NODE_ENV")
-            .map(|v| v == "production")
-            .unwrap_or(false);
+        let is_production = env::var("NODE_ENV").is_ok_and(|v| v == "production");
 
         if gis_client_id.is_empty() {
             tracing::info!(
@@ -70,15 +68,16 @@ impl Config {
             );
         }
 
-        match catchup_interval_minutes {
-            Some(minutes) => tracing::info!(
-                "CATCHUP_INTERVAL_MINUTES={}. Checking channel videoCount values every {} minute(s).",
-                minutes,
-                minutes
-            ),
-            None => tracing::info!(
-                "CATCHUP_INTERVAL_MINUTES not set to a positive number. Periodic API work is disabled; startup/manual each run only one bounded pass. Unfinished history needs periodic scans."
-            ),
+        if let Some(minutes) = catchup_interval_minutes {
+            tracing::info!(
+            "CATCHUP_INTERVAL_MINUTES={}. Checking channel videoCount values every {} minute(s).",
+            minutes,
+            minutes
+        );
+        } else {
+            tracing::info!(
+            "CATCHUP_INTERVAL_MINUTES not set to a positive number. Periodic API work is disabled; startup/manual each run only one bounded pass. Unfinished history needs periodic scans."
+        );
         }
 
         Self {

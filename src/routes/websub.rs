@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use std::fmt::Write;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route(
@@ -50,18 +51,17 @@ impl CallbackLog {
         tracing::info!(
             "[websub] callback kind={} outcome={} status={} mode={} channel={} topic={} lease={} bytes={} entry_elements={} incomplete_entries={} entries={} inserted={} tombstones={} removed={}",
             self.kind, outcome, response.status().as_u16(),
-            log_field(&self.mode), log_field(&self.channel), log_field(&self.topic),
-            log_field(&self.lease), log_field(&self.bytes), log_field(&self.entry_elements),
-            log_field(&self.incomplete_entries), log_field(&self.entries),
-            log_field(&self.inserted), log_field(&self.tombstones), log_field(&self.removed),
+            log_field(self.mode.as_ref()), log_field(self.channel.as_ref()), log_field(self.topic.as_ref()),
+            log_field(self.lease.as_ref()), log_field(self.bytes.as_ref()), log_field(self.entry_elements.as_ref()),
+            log_field(self.incomplete_entries.as_ref()), log_field(self.entries.as_ref()),
+            log_field(self.inserted.as_ref()), log_field(self.tombstones.as_ref()), log_field(self.removed.as_ref()),
         );
         response
     }
 }
 
-fn log_field(value: &Option<impl std::fmt::Display>) -> String {
+fn log_field(value: Option<&impl std::fmt::Display>) -> String {
     value
-        .as_ref()
         .map(|value| {
             // body_preview already bounds and escapes control characters; also escape
             // ordinary spaces so an untrusted value cannot forge another key/value.
@@ -85,11 +85,12 @@ pub struct VerificationParams {
     pub hub_lease_seconds: Option<i64>,
 }
 
-/// Extract the channel_id from a hub.topic URL of the form:
-/// https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC_xxx
+/// Extract the `channel_id` from a hub.topic URL of the form:
+/// <https://www.youtube.com/xml/feeds/videos.xml?channel_id=UC_xxx>
 ///
 /// Applies URL decoding so percent-encoded variants (e.g. `UC%5Ftest`) still resolve
 /// to the canonical channel ID stored in our DB.
+#[must_use]
 pub fn channel_id_from_topic(topic: &str) -> Option<String> {
     let raw = topic
         .split_once("channel_id=")
@@ -133,7 +134,7 @@ pub async fn verification(
             let lease = params.hub_lease_seconds.unwrap_or(0);
             let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(lease)).timestamp();
 
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             let updated = conn
                 .execute(
                     "UPDATE channel_subscriptions
@@ -165,7 +166,7 @@ pub async fn verification(
             // Only honor unsubscribe verification if we previously marked the row
             // 'pending_unsubscribe'. Otherwise a third party could issue arbitrary
             // GETs against our public callback to force-delete our subscriptions.
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             let deleted = conn
                 .execute(
                     "DELETE FROM channel_subscriptions
@@ -213,8 +214,8 @@ pub async fn verification(
 
 /// Hub push notification POST handler.
 /// Flow:
-///   1. Extract channel_id from Atom body.
-///   2. Look up hub_secret for that channel.
+///   1. Extract `channel_id` from Atom body.
+///   2. Look up `hub_secret` for that channel.
 ///   3. Verify X-Hub-Signature via HMAC-SHA1.
 ///   4. Parse Atom entries and UPSERT videos.
 pub async fn notification(
@@ -248,7 +249,7 @@ pub async fn notification(
     log.channel = Some(channel_id.clone());
 
     let secret: Option<String> = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.query_row(
             "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
             [&channel_id],
@@ -325,7 +326,7 @@ pub async fn notification(
     // subscription and to nothing else.
     let mut removed_videos = 0usize;
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         for video_id in &parsed.deleted_video_ids {
             match conn.execute(
                 "DELETE FROM videos WHERE id = ?1 AND channel_id = ?2",
@@ -348,7 +349,7 @@ pub async fn notification(
     log.removed = Some(removed_videos);
     let now = crate::util::now_unix();
     let new_video_ids: Vec<String> = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let channel_title = lookup_channel_title(&conn, &channel_id);
         let newly_inserted = match partition_new_entries(&conn, &channel_id, &parsed.entries, now) {
             Ok(entries) => entries,
@@ -422,9 +423,9 @@ async fn warn_bad_push(
 
     let mut description = format!("channel: {}\nbytes: {}\n", channel_id, body.len());
     if let Some(detail) = detail {
-        description.push_str(&format!("詳細: {}\n", detail));
+        let _ = writeln!(description, "詳細: {detail}");
     }
-    description.push_str(&format!("本文: {}", body_preview(body)));
+    let _ = write!(description, "本文: {}", body_preview(body));
 
     crate::notify::notify_warning(
         &state.http,
@@ -453,7 +454,7 @@ pub(crate) fn lookup_channel_title(conn: &rusqlite::Connection, channel_id: &str
 }
 
 /// Insert each entry into `videos` and return references to the entries that
-/// represent newly published videos (no prior row existed for that video_id).
+/// represent newly published videos (no prior row existed for that `video_id`).
 /// Existing rows in this channel have metadata refreshed; storage failures stay retryable.
 ///
 /// Shared by push and polling so insertion and duplicate handling have one owner.
@@ -539,7 +540,7 @@ mod tests {
         let state = crate::state::AppState::test();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO channels (id, title, created_at) VALUES (?1, 'T', ?2)",
                 rusqlite::params![channel_id, now],
@@ -704,9 +705,7 @@ mod tests {
         ] {
             let (state, _) = setup_state_with_subscription("UC_log", "secret-marker");
             state
-                .db
-                .lock()
-                .unwrap()
+                .conn()
                 .execute(
                     "UPDATE channel_subscriptions SET verification_status = ?1",
                     [subscription],
@@ -828,7 +827,7 @@ mod tests {
         let body = valid.replace("<yt:videoId>new</yt:videoId>", "");
         assert_callback_log(state.clone(), post_signed(&body, "secret-marker"), "push", 200, "unexpected_body",
             &format!("channel=UC_log bytes={} entry_elements=1 incomplete_entries=1 entries=0 inserted=0 tombstones=0 removed=0", body.len())).await;
-        state.db.lock().unwrap().execute_batch(
+        state.conn().execute_batch(
             "CREATE TRIGGER fail_insert BEFORE INSERT ON videos BEGIN SELECT RAISE(FAIL, 'isolated save failure'); END;"
         ).unwrap();
         let response = assert_callback_log(state, post_signed(valid, "secret-marker"), "push", 500, "save_failed",
@@ -929,13 +928,13 @@ mod tests {
 
     #[test]
     fn callback_log_fields_are_bounded_single_tokens_with_missing_values() {
-        assert_eq!(log_field(&None::<String>), "-");
-        assert_eq!(log_field(&Some("")), "-");
+        assert_eq!(log_field(None::<&String>), "-");
+        assert_eq!(log_field(Some(&"")), "-");
         assert_eq!(
-            log_field(&Some(" \t\r\n\0\"\\\u{2028}")),
+            log_field(Some(&" \t\r\n\0\"\\\u{2028}")),
             r#"\u{20}\t\r\n\u{0}\"\\\u{2028}"#
         );
-        assert_eq!(log_field(&Some("あ".repeat(600))), r"\u{3042}".repeat(512));
+        assert_eq!(log_field(Some(&"あ".repeat(600))), r"\u{3042}".repeat(512));
     }
 
     #[test]
@@ -997,7 +996,7 @@ mod tests {
         assert_eq!(&body[..], b"xyz123");
 
         let (status, lease): (String, i64) = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT verification_status, lease_seconds FROM channel_subscriptions WHERE channel_id = 'UC_v1'",
                 [],
@@ -1006,14 +1005,14 @@ mod tests {
             .unwrap()
         };
         assert_eq!(status, "verified");
-        assert_eq!(lease, 432000);
+        assert_eq!(lease, 432_000);
     }
 
     #[tokio::test]
     async fn test_verification_unsubscribe_removes_row_when_pending_unsubscribe() {
         let (state, _) = setup_state_with_subscription("UC_u1", "sec");
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE channel_subscriptions SET verification_status = 'pending_unsubscribe' WHERE channel_id = 'UC_u1'",
                 [],
@@ -1031,7 +1030,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM channel_subscriptions WHERE channel_id = 'UC_u1'",
                 [],
@@ -1051,7 +1050,7 @@ mod tests {
         // can trigger deletion via this endpoint.
         let (state, _) = setup_state_with_subscription("UC_keep", "sec");
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE channel_subscriptions SET verification_status = 'verified' WHERE channel_id = 'UC_keep'",
                 [],
@@ -1069,7 +1068,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM channel_subscriptions WHERE channel_id = 'UC_keep'",
                 [],
@@ -1089,7 +1088,7 @@ mod tests {
         // state that we set while asking the hub to drop a removed channel.
         let (state, _) = setup_state_with_subscription("UC_goodbye", "sec");
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE channel_subscriptions SET verification_status = 'pending_unsubscribe' WHERE channel_id = 'UC_goodbye'",
                 [],
@@ -1107,7 +1106,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let status: String = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_goodbye'",
                 [],
@@ -1165,7 +1164,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let (id, title): (String, String) = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT id, title FROM videos WHERE id = 'vid_new'",
                 [],
@@ -1199,21 +1198,21 @@ mod tests {
             AtomEntry {
                 video_id: "existing".to_string(),
                 title: "New Title".to_string(),
-                published: Some(1777161600),
+                published: Some(1_777_161_600),
             },
             AtomEntry {
                 video_id: "fresh1".to_string(),
                 title: "First".to_string(),
-                published: Some(1777161600),
+                published: Some(1_777_161_600),
             },
             AtomEntry {
                 video_id: "fresh2".to_string(),
                 title: "Second".to_string(),
-                published: Some(1777161600),
+                published: Some(1_777_161_600),
             },
         ];
 
-        let new = partition_new_entries(&conn, "UC_x", &entries, 1777161600).unwrap();
+        let new = partition_new_entries(&conn, "UC_x", &entries, 1_777_161_600).unwrap();
 
         let new_ids: Vec<&str> = new.iter().map(|e| e.video_id.as_str()).collect();
         assert_eq!(new_ids.len(), 2);
@@ -1244,7 +1243,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            published_at, 1777161600,
+            published_at, 1_777_161_600,
             "legacy timestamps must be repaired"
         );
     }
@@ -1281,10 +1280,10 @@ mod tests {
         let entries = vec![AtomEntry {
             video_id: "v1".to_string(),
             title: "T".to_string(),
-            published: Some(1777161600),
+            published: Some(1_777_161_600),
         }];
 
-        let new = partition_new_entries(&conn, "UC_ghost", &entries, 1777161600);
+        let new = partition_new_entries(&conn, "UC_ghost", &entries, 1_777_161_600);
         assert!(new.is_err(), "FK violation must remain retryable");
     }
 
@@ -1333,7 +1332,7 @@ mod tests {
         assert_eq!(resp2.status(), StatusCode::OK);
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM videos WHERE id = 'same_vid'",
                 [],
@@ -1375,7 +1374,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM videos WHERE id = 'tampered'",
                 [],
@@ -1712,7 +1711,7 @@ mod tests {
         );
 
         // Parses, but names no channel.
-        let no_channel = post_push(r#"<feed><entry><title>t</title></entry></feed>"#, "sha1=x");
+        let no_channel = post_push(r"<feed><entry><title>t</title></entry></feed>", "sha1=x");
         assert_eq!(
             app().oneshot(no_channel).await.unwrap().status(),
             StatusCode::BAD_REQUEST
@@ -1812,7 +1811,7 @@ mod tests {
     }
 
     fn insert_video(state: &crate::state::AppState, video_id: &str, channel_id: &str) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, fetched_at) VALUES (?1, ?2, 'V', ?3)",
             rusqlite::params![video_id, channel_id, crate::util::now_unix()],
@@ -1821,7 +1820,7 @@ mod tests {
     }
 
     fn video_exists(state: &crate::state::AppState, video_id: &str) -> bool {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.query_row("SELECT 1 FROM videos WHERE id = ?1", [video_id], |_| Ok(()))
             .is_ok()
     }
@@ -1852,7 +1851,7 @@ mod tests {
         let secret = generate_secret();
         let (state, now) = setup_state_with_subscription("UC_signer", &secret);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO channels (id, title, created_at) VALUES ('UC_victim', 'T', ?1)",
                 [&now],

@@ -14,7 +14,7 @@ pub fn start(state: AppState) {
         // Startup already checked every subscription. API enrichment is owned
         // by catchup, so a slow Hub cannot hold that queue.
         loop {
-            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+            tokio::time::sleep(Duration::from_hours(24)).await;
             match all_channel_ids(&state) {
                 Ok(ids) => {
                     subscribe_all(&state, ids).await;
@@ -26,7 +26,7 @@ pub fn start(state: AppState) {
 }
 
 pub(crate) fn all_channel_ids(state: &AppState) -> rusqlite::Result<Vec<String>> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     let mut stmt = conn.prepare("SELECT id FROM channels ORDER BY id")?;
     let rows = stmt.query_map([], |row| row.get(0))?.collect();
     rows
@@ -59,13 +59,13 @@ pub(crate) async fn subscribe_all(state: &AppState, channel_ids: Vec<String>) ->
 }
 
 async fn failure_channel_title(state: &AppState, id: &str) -> String {
-    let title = crate::routes::websub::lookup_channel_title(&state.db.lock().unwrap(), id);
+    let title = crate::routes::websub::lookup_channel_title(&state.conn(), id);
     if !title.trim().is_empty() && title.trim() != id {
         return title;
     }
     match state.hub.channel_title(&state.http, id).await {
         Ok(title) if !title.trim().is_empty() && title.trim() != id => {
-            if let Err(e) = state.db.lock().unwrap().execute(
+            if let Err(e) = state.conn().execute(
                 "UPDATE channels SET title = ?1 WHERE id = ?2 AND (trim(title) = '' OR trim(title) = id)",
                 rusqlite::params![title, id],
             ) {
@@ -86,7 +86,7 @@ fn failure_message(names: &[String]) -> Option<String> {
     }
     let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
     Some(if names.len() <= 3 {
-        format!("{} の購読に失敗しました", shown)
+        format!("{shown} の購読に失敗しました")
     } else {
         format!(
             "{} ほか、合計{}個のチャンネルで購読失敗しました",
@@ -99,7 +99,7 @@ fn failure_message(names: &[String]) -> Option<String> {
 async fn register_subscription(state: &AppState, channel_id: &str) -> Result<bool, String> {
     let now = crate::util::now_unix();
     let stored = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.query_row(
             "SELECT hub_secret, verification_status, expires_at, subscribed_at FROM channel_subscriptions WHERE channel_id = ?1",
             [channel_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?))
@@ -107,8 +107,7 @@ async fn register_subscription(state: &AppState, channel_id: &str) -> Result<boo
     };
     let secret = stored
         .as_ref()
-        .map(|row| row.0.clone())
-        .unwrap_or_else(signature::generate_secret);
+        .map_or_else(signature::generate_secret, |row| row.0.clone());
     let expiration = state
         .hub
         .expiration(channel_id, &state.config.websub_callback_url, &secret)
@@ -138,9 +137,7 @@ async fn register_subscription(state: &AppState, channel_id: &str) -> Result<boo
     }
     // Store the secret before POST; the callback may arrive before HTTP acceptance.
     state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute(
             "INSERT OR IGNORE INTO channel_subscriptions
          (channel_id, hub_secret, lease_seconds, subscribed_at, expires_at, verification_status)
@@ -160,9 +157,7 @@ async fn register_subscription(state: &AppState, channel_id: &str) -> Result<boo
         .map_err(|e| e.to_string())?;
     // Never reset verified status or the previous lease on request acceptance/failure.
     state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute(
             "UPDATE channel_subscriptions SET subscribed_at = ?1 WHERE channel_id = ?2",
             rusqlite::params![crate::util::now_unix(), channel_id],
@@ -310,7 +305,7 @@ mod tests {
         }
 
         fn channel(&self, id: &str, name: &str, lease: Option<i64>) {
-            let conn = self.state.db.lock().unwrap();
+            let conn = self.state.conn();
             conn.execute(
                 "INSERT INTO channels (id, title, created_at) VALUES (?1, ?2, 0)",
                 [id, name],
@@ -368,7 +363,7 @@ mod tests {
         stub.channel("UC_new", "新チャンネル", None);
         let state = stub.state.clone();
         stub.finish(tokio::spawn(async move {
-            crate::sync::initial_setup::run_initial_setup(&state).await
+            crate::sync::initial_setup::run_initial_setup(&state).await;
         }))
         .await;
         stub.assert_paced();
@@ -395,7 +390,7 @@ mod tests {
             .iter()
             .all(|h| h.kind == "check"));
         assert!(stub.observed.lock().unwrap().warnings.is_empty());
-        let conn = stub.state.db.lock().unwrap();
+        let conn = stub.state.conn();
         let (secret, status, expires): (String, String, i64) = conn.query_row("SELECT hub_secret, verification_status, expires_at FROM channel_subscriptions WHERE channel_id = 'UC_near'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
         assert_eq!(
             (secret.as_str(), status.as_str(), expires),
@@ -453,7 +448,7 @@ mod tests {
         });
         let (counts, unsubscribed) = stub.finish(operation).await;
         assert_eq!(counts, (3, 2));
-        let retained: (String, String, i64) = stub.state.db.lock().unwrap().query_row(
+        let retained: (String, String, i64) = stub.state.conn().query_row(
             "SELECT hub_secret, verification_status, expires_at FROM channel_subscriptions WHERE channel_id = 'UC_down'", [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         ).unwrap();
@@ -578,7 +573,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let before = stub.observed.lock().unwrap().hits.len();
-        tokio::time::advance(Duration::from_secs(23 * 60 * 60)).await;
+        tokio::time::advance(Duration::from_hours(23)).await;
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
@@ -594,7 +589,7 @@ mod tests {
                 .count(),
             3
         );
-        tokio::time::advance(Duration::from_secs(60 * 60)).await;
+        tokio::time::advance(Duration::from_hours(1)).await;
         let observed = stub.observed.clone();
         stub.finish(tokio::spawn(async move {
             loop {
@@ -627,7 +622,11 @@ mod tests {
         let state = stub.state.clone();
         let counts = stub
             .finish(tokio::spawn(async move {
-                subscribe_all(&state, ids.iter().map(|id| id.to_string()).collect()).await
+                subscribe_all(
+                    &state,
+                    ids.iter().map(std::string::ToString::to_string).collect(),
+                )
+                .await
             }))
             .await;
         assert_eq!(counts, (0, 3));
@@ -680,10 +679,7 @@ mod tests {
             );
             assert_eq!(observed.warnings, vec![(observed.hits.len(), "A&B, 第二チャンネル, 名前未取得のチャンネル ほか、合計4個のチャンネルで購読失敗しました".into())]);
         }
-        let saved = crate::routes::websub::lookup_channel_title(
-            &stub.state.db.lock().unwrap(),
-            "UC_permanent",
-        );
+        let saved = crate::routes::websub::lookup_channel_title(&stub.state.conn(), "UC_permanent");
         assert_eq!(saved, "A&B");
         let state = stub.state.clone();
         stub.finish(tokio::spawn(async move {

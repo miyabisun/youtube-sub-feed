@@ -4,7 +4,7 @@ use regex_lite::Regex;
 use std::sync::LazyLock;
 
 static NUMERIC_ENTITY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&#([xX][0-9a-fA-F]+|[0-9]+);").unwrap());
+    LazyLock::new(|| Regex::new(r"&#([xX][0-9a-fA-F]+|[0-9]+);").expect("literal regex is valid"));
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -45,7 +45,7 @@ enum EntryField {
 /// Numeric references handle both decimal (`&#39;`) and hex (`&#x27;`) forms;
 /// invalid code points are left as-is. `&amp;` is applied last so the chain
 /// is well-defined for non-nested input — nested escapes like `&amp;lt;`
-/// would over-decode, but YouTube has not been observed to produce them.
+/// would over-decode, but `YouTube` has not been observed to produce them.
 ///
 /// Unknown named entities (e.g. `&nbsp;`) are intentionally left untouched.
 ///
@@ -63,8 +63,7 @@ fn decode_xml_entities(s: &str) -> String {
             };
         codepoint
             .and_then(char::from_u32)
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| caps[0].to_string())
+            .map_or_else(|| caps[0].to_string(), |c| c.to_string())
     });
     with_numeric
         .replace("&lt;", "<")
@@ -75,6 +74,7 @@ fn decode_xml_entities(s: &str) -> String {
 }
 
 /// Read only the feed's own title, never a video's nested entry title.
+#[must_use]
 pub fn parse_channel_title(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     let mut depth = 0usize;
@@ -124,6 +124,7 @@ pub fn parse_channel_title(xml: &str) -> Option<String> {
     }
 }
 
+#[must_use]
 pub fn parse_atom_document(xml: &str) -> ParsedAtomDocument {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -241,11 +242,13 @@ fn push_deleted_video_id(element: &BytesStart<'_>, parsed: &mut ParsedAtomDocume
     }
 }
 
+#[must_use]
 pub fn parse_atom_feed(xml: &str) -> Vec<AtomEntry> {
     parse_atom_document(xml).entries
 }
 
 /// The video IDs a push retires, read from its tombstone elements.
+#[must_use]
 pub fn parse_deleted_video_ids(xml: &str) -> Vec<String> {
     parse_atom_document(xml).deleted_video_ids
 }
@@ -316,12 +319,12 @@ mod tests {
         assert_eq!(parsed.entries.len(), 1);
         assert_eq!(parsed.entries[0].video_id, "v-prefixed");
         assert_eq!(parsed.entries[0].title, "S&P500");
-        assert_eq!(parsed.entries[0].published, Some(1788093296));
+        assert_eq!(parsed.entries[0].published, Some(1_788_093_296));
     }
 
     #[test]
     fn records_entry_elements_that_cannot_be_imported() {
-        let xml = r#"<feed><entry><title>No ID</title></entry></feed>"#;
+        let xml = r"<feed><entry><title>No ID</title></entry></feed>";
 
         let parsed = parse_atom_document(xml);
 
@@ -332,10 +335,10 @@ mod tests {
 
     #[test]
     fn records_missing_title_and_invalid_published_without_dropping_the_entry() {
-        let xml = r#"<feed>
+        let xml = r"<feed>
           <entry><videoId>missing-title</videoId><published>2026-08-30T12:34:56Z</published></entry>
           <entry><videoId>bad-published</videoId><title>Kept</title><published>not-a-date</published></entry>
-        </feed>"#;
+        </feed>";
 
         let parsed = parse_atom_document(xml);
 
@@ -352,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_parse_missing_title() {
-        let xml = r#"<feed><entry><yt:videoId>vid1</yt:videoId><published>2024-01-01T00:00:00Z</published></entry></feed>"#;
+        let xml = r"<feed><entry><yt:videoId>vid1</yt:videoId><published>2024-01-01T00:00:00Z</published></entry></feed>";
         let entries = parse_atom_feed(xml);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "");
@@ -360,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_parse_no_video_id_skipped() {
-        let xml = r#"<feed><entry><title>No ID</title></entry></feed>"#;
+        let xml = r"<feed><entry><title>No ID</title></entry></feed>";
         let entries = parse_atom_feed(xml);
         assert_eq!(entries.len(), 0);
     }
@@ -368,7 +371,7 @@ mod tests {
     #[test]
     fn test_parse_published_date() {
         let entries = parse_atom_feed(SAMPLE_FEED);
-        assert_eq!(entries[0].published, Some(1705312800));
+        assert_eq!(entries[0].published, Some(1_705_312_800));
     }
 
     #[test]
@@ -395,7 +398,7 @@ mod tests {
     // double-escaped in the browser as the literal text "S&amp;P500".
     #[test]
     fn test_parse_decodes_ampersand_in_title() {
-        let xml = r#"<feed><entry><yt:videoId>v1</yt:videoId><title>S&amp;P500 で投資</title><published>2026-01-01T00:00:00Z</published></entry></feed>"#;
+        let xml = r"<feed><entry><yt:videoId>v1</yt:videoId><title>S&amp;P500 で投資</title><published>2026-01-01T00:00:00Z</published></entry></feed>";
         let entries = parse_atom_feed(xml);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "S&P500 で投資");
@@ -403,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_parse_decodes_all_predefined_entities() {
-        let xml = r#"<feed><entry><yt:videoId>v1</yt:videoId><title>a&lt;b&gt;c&quot;d&apos;e&amp;f</title></entry></feed>"#;
+        let xml = r"<feed><entry><yt:videoId>v1</yt:videoId><title>a&lt;b&gt;c&quot;d&apos;e&amp;f</title></entry></feed>";
         let entries = parse_atom_feed(xml);
         assert_eq!(entries[0].title, "a<b>c\"d'e&f");
     }

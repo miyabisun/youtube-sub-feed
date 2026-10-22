@@ -74,9 +74,7 @@ impl Stub {
         state.youtube_api = Arc::new(Api::at(base.clone()));
         state.hub = Arc::new(crate::websub::hub::Hub::at(format!("{base}/subscribe")));
         state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .execute(
                 "INSERT INTO users (id, email) VALUES (1, 'test@example.test')",
                 [],
@@ -91,7 +89,7 @@ impl Stub {
                 async move {
                     if endpoint == "subscription-details" {
                         let mode = observed.lock().unwrap().hub_mode;
-                        if mode == 1 { tokio::time::sleep(Duration::from_secs(3600)).await; }
+                        if mode == 1 { tokio::time::sleep(Duration::from_hours(1)).await; }
                         return (StatusCode::SERVICE_UNAVAILABLE, "diagnostic unavailable").into_response();
                     }
                     let ids = query.get("id").or_else(|| query.get("playlistId")).cloned().unwrap_or_default();
@@ -160,9 +158,7 @@ impl Stub {
         let path = dir.join("feed.db");
         self.state.db = Arc::new(Mutex::new(crate::db::open(path.to_str().unwrap())));
         self.state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .execute(
                 "INSERT INTO users (id, email) VALUES (1, 'test@example.test')",
                 [],
@@ -182,9 +178,7 @@ impl Stub {
 
     fn seed_video(&self, channel: &str, id: &str) {
         self.state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .execute(
                 "INSERT INTO videos (id, channel_id, title) VALUES (?1, ?2, ?1)",
                 [id, channel],
@@ -193,10 +187,10 @@ impl Stub {
     }
 
     fn channel(&self, id: &str, previous: Option<u64>, current: u64, repaired: bool) {
-        let conn = self.state.db.lock().unwrap();
+        let conn = self.state.conn();
         conn.execute(
             "INSERT INTO channels (id, title, video_count) VALUES (?1, ?1, ?2)",
-            rusqlite::params![id, previous.map(|n| n as i64)],
+            rusqlite::params![id, previous.map(|n| i64::try_from(n).unwrap())],
         )
         .unwrap();
         conn.execute(
@@ -284,9 +278,7 @@ impl Stub {
 
     fn stored(&self) -> usize {
         self.state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .query_row("SELECT count(*) FROM videos", [], |r| r.get(0))
             .unwrap()
     }
@@ -328,7 +320,7 @@ fn missing_or_changed_video_count_needs_a_playlist_lookup() {
 #[test]
 fn sweep_derives_missing_playlist_ids_without_dropping_channels() {
     let state = AppState::test();
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     conn.execute("INSERT INTO channels (id, title, upload_playlist_id) VALUES ('UCstored', 'S', 'UUcustom'), ('UCderived', 'D', NULL)", []).unwrap();
     let targets = channel_targets(&conn).unwrap();
     assert_eq!(
@@ -390,9 +382,7 @@ async fn background_survives_hub(mode: u8) {
         assert_eq!(stub.observed.lock().unwrap().verifications, 1);
         let status: String = stub
             .state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .query_row(
                 "SELECT verification_status FROM channel_subscriptions",
                 [],
@@ -461,9 +451,7 @@ async fn repairs_are_distributed_and_revisit_heads_despite_delayed_statistics() 
         stub.page(&id, "", &[&id], None);
     }
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute("UPDATE channel_catchup SET repair_after = 0", [])
         .unwrap();
     let outcome = stub.scan().await;
@@ -482,23 +470,19 @@ async fn repairs_are_distributed_and_revisit_heads_despite_delayed_statistics() 
     assert_eq!(stub.stored(), 4);
     // A deep cursor must not postpone the independently due head repair.
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute(
             "UPDATE channel_catchup SET repair_after = ?1",
             [stub.state.youtube_api.now() + 86400],
         )
         .unwrap();
-    stub.state.db.lock().unwrap().execute("UPDATE channel_catchup SET repair_after = 0, page_token = 'old-page' WHERE channel_id = 'UC000'", []).unwrap();
+    stub.state.conn().execute("UPDATE channel_catchup SET repair_after = 0, page_token = 'old-page' WHERE channel_id = 'UC000'", []).unwrap();
     stub.page("UC000", "", &["replacement"], None);
     stub.scan().await;
     assert!(stub.feed_ids().await.contains(&"replacement".into()));
     let token: String = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row(
             "SELECT page_token FROM channel_catchup WHERE channel_id = 'UC000'",
             [],
@@ -513,17 +497,15 @@ async fn page_rows_count_and_cursor_rollback_together_and_retry_without_duplicat
     let stub = Stub::new().await;
     stub.channel("UCtest", None, 60, false);
     stub.page("UCtest", "", &["first", "fail"], Some("next"));
-    stub.state.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_insert BEFORE INSERT ON videos WHEN NEW.id = 'fail' BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;").unwrap();
+    stub.state.conn().execute_batch("CREATE TRIGGER fail_insert BEFORE INSERT ON videos WHEN NEW.id = 'fail' BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;").unwrap();
     assert_eq!(stub.scan().await.failed_channels, 1);
     assert_eq!(stub.stored(), 0, "partial page must roll back");
-    let progress: (Option<i64>, Option<String>, i64) = stub.state.db.lock().unwrap().query_row(
+    let progress: (Option<i64>, Option<String>, i64) = stub.state.conn().query_row(
         "SELECT c.video_count, p.page_token, p.repair_after FROM channels c JOIN channel_catchup p ON c.id = p.channel_id", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).unwrap();
     assert_eq!(progress, (None, None, 0));
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute_batch("DROP TRIGGER fail_insert;")
         .unwrap();
     assert_eq!(stub.scan().await.imported, 2);
@@ -539,21 +521,17 @@ async fn progress_save_failure_also_rolls_back_import_and_count() {
     let stub = Stub::new().await;
     stub.channel("UCtest", Some(1), 2, false);
     stub.page("UCtest", "", &["v1"], Some("next"));
-    stub.state.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_progress BEFORE UPDATE ON channel_catchup WHEN NEW.page_token IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END;").unwrap();
+    stub.state.conn().execute_batch("CREATE TRIGGER fail_progress BEFORE UPDATE ON channel_catchup WHEN NEW.page_token IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END;").unwrap();
     assert_eq!(stub.scan().await.failed_channels, 1);
     assert_eq!(stub.stored(), 0);
     let count: i64 = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row("SELECT video_count FROM channels", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 1);
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute_batch("DROP TRIGGER fail_progress;")
         .unwrap();
     assert_eq!(stub.scan().await.imported, 1);
@@ -618,9 +596,7 @@ async fn broken_page_token_restarts_only_that_history_without_stalling_other_cha
         stub.channel(id, Some(1), 1, true);
     }
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute(
             "UPDATE channel_catchup SET page_token = 'expired', backfill_after = 0",
             [],
@@ -668,7 +644,7 @@ async fn long_api_retry_after_pauses_all_callers_then_resumes_without_losing_wor
     stub.page("UCtest", "", &["new"], None);
     stub.fail("channels", 429, "rateLimitExceeded", "1200", 1);
     assert!(stub.scan().await.deferred);
-    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::time::advance(Duration::from_mins(10)).await;
     assert!(stub.scan().await.deferred);
     assert_eq!(stub.calls("channels"), 1);
     tokio::time::advance(Duration::from_secs(601)).await;
@@ -702,9 +678,7 @@ async fn quota_pause_and_budget_survive_restart_and_resume_after_the_deadline() 
     assert_eq!(stub.observed.lock().unwrap().hits.len(), 1);
     let until: i64 = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row("SELECT quota_until FROM youtube_api_state", [], |row| {
             row.get(0)
         })
@@ -719,13 +693,11 @@ async fn quota_pause_and_budget_survive_restart_and_resume_after_the_deadline() 
     assert_eq!(stub.calls("channels"), 2);
     let units: i64 = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row("SELECT requests FROM youtube_api_state", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        units as usize,
+        usize::try_from(units).unwrap(),
         stub.observed.lock().unwrap().hits.len() - 1,
         "expired window resets only its counter"
     );
@@ -771,9 +743,7 @@ async fn changed_and_history_queues_have_independent_bounds_and_rotate_failures(
         stub.page(&id, "old", &[&format!("old{i}")], None);
     }
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute("UPDATE channel_catchup SET backfill_after = 0", [])
         .unwrap();
     stub.fail("playlistItems:UU00", 404, "playlistNotFound", "0", 2);
@@ -783,7 +753,7 @@ async fn changed_and_history_queues_have_independent_bounds_and_rotate_failures(
         (4, 0, 2)
     );
     assert_eq!(first.failed_channels, 1);
-    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::time::advance(Duration::from_mins(10)).await;
     let second = stub.scan().await;
     assert_eq!(second.head_pages, 4);
     assert!(second.backfill_pages <= 2);
@@ -820,9 +790,7 @@ async fn details_backlog_is_bounded_batched_and_retries_only_the_unfinished_batc
     );
     let checked: i64 = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row(
             "SELECT count(*) FROM videos WHERE details_checked_at IS NOT NULL",
             [],
@@ -830,7 +798,7 @@ async fn details_backlog_is_bounded_batched_and_retries_only_the_unfinished_batc
         )
         .unwrap();
     assert_eq!(checked, 50);
-    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::time::advance(Duration::from_mins(10)).await;
     stub.scan().await;
     assert_eq!(
         stub.calls("videos"),
@@ -862,13 +830,11 @@ async fn details_save_failure_keeps_the_entire_batch_pending_for_the_next_tick()
     for id in ["v1", "v2"] {
         stub.seed_video("UCtest", id);
     }
-    stub.state.db.lock().unwrap().execute_batch("CREATE TRIGGER fail_details BEFORE UPDATE OF duration ON videos WHEN NEW.id = 'v2' BEGIN SELECT RAISE(ABORT, 'injected details failure'); END;").unwrap();
+    stub.state.conn().execute_batch("CREATE TRIGGER fail_details BEFORE UPDATE OF duration ON videos WHEN NEW.id = 'v2' BEGIN SELECT RAISE(ABORT, 'injected details failure'); END;").unwrap();
     assert_eq!(stub.scan().await.failed_channels, 1);
     let checked: i64 = stub
         .state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .query_row(
             "SELECT count(*) FROM videos WHERE details_checked_at IS NOT NULL",
             [],
@@ -877,12 +843,10 @@ async fn details_save_failure_keeps_the_entire_batch_pending_for_the_next_tick()
         .unwrap();
     assert_eq!(checked, 0);
     stub.state
-        .db
-        .lock()
-        .unwrap()
+        .conn()
         .execute_batch("DROP TRIGGER fail_details;")
         .unwrap();
-    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::time::advance(Duration::from_mins(10)).await;
     stub.scan().await;
     assert_eq!(stub.calls("videos"), 2);
     assert_eq!(
@@ -898,7 +862,7 @@ async fn push_poll_and_backfill_share_insertion_and_do_not_duplicate_details_req
     let stub = Stub::new().await;
     stub.channel("UCtest", Some(0), 1, true);
     stub.page("UCtest", "", &["same"], None);
-    stub.state.db.lock().unwrap().execute("INSERT INTO channel_subscriptions (channel_id, hub_secret, verification_status) VALUES ('UCtest', 'isolated-secret', 'verified')", []).unwrap();
+    stub.state.conn().execute("INSERT INTO channel_subscriptions (channel_id, hub_secret, verification_status) VALUES ('UCtest', 'isolated-secret', 'verified')", []).unwrap();
     let body = r#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015"><yt:channelId>UCtest</yt:channelId><entry><yt:videoId>same</yt:videoId><title>Same</title><published>2026-09-08T12:00:00Z</published></entry></feed>"#;
     let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(b"isolated-secret").unwrap();
     mac.update(body.as_bytes());
@@ -978,7 +942,7 @@ async fn upgrading_the_previous_schema_preserves_feed_and_new_progress_is_idempo
     stub.use_disk();
     stub.channel("UCtest", Some(1), 1, true);
     stub.seed_video("UCtest", "existing");
-    stub.state.db.lock().unwrap().execute_batch(
+    stub.state.conn().execute_batch(
         "UPDATE videos SET duration = 'PT5M', details_checked_at = 1, shorts_classifier_version = 1;
          ALTER TABLE videos DROP COLUMN details_attempted_at;
          DROP TABLE channel_catchup;

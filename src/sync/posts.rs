@@ -31,13 +31,8 @@ async fn sweep(state: &AppState) {
     let mut failures = Vec::new();
     for channel_id in &channel_ids {
         let result = match posts::fetch(&state.http, &state.youtube_browse_url, channel_id).await {
-            Ok(page) => store(
-                &state.db.lock().unwrap(),
-                channel_id,
-                &page,
-                crate::util::now_unix(),
-            )
-            .map_err(|e| e.to_string()),
+            Ok(page) => store(&state.conn(), channel_id, &page, crate::util::now_unix())
+                .map_err(|e| e.to_string()),
             Err(e) => Err(e),
         };
         if let Err(e) = result {
@@ -80,7 +75,7 @@ pub fn store(
             post.id,
             channel_id,
             post.content,
-            serde_json::to_string(&post.images).unwrap(),
+            serde_json::to_string(&post.images).expect("a list of strings always serializes"),
             now - post.age_seconds.unwrap_or(0),
         ])?;
     }
@@ -102,7 +97,10 @@ mod tests {
         Post {
             id: id.into(),
             content: content.into(),
-            images: images.iter().map(|url| url.to_string()).collect(),
+            images: images
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             age_seconds,
         }
     }
@@ -157,7 +155,13 @@ mod tests {
                     r#"["https://a","https://b"]"#.into(),
                     6_400
                 ),
-                ("p2".into(), "UC1".into(), "".into(), "[]".into(), 10_000),
+                (
+                    "p2".into(),
+                    "UC1".into(),
+                    String::new(),
+                    "[]".into(),
+                    10_000
+                ),
             ],
             "an unreadable age falls back to the time it was first seen"
         );

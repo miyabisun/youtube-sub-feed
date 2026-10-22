@@ -1,6 +1,6 @@
-//! Channel community posts ("Posts" tab) via the unofficial InnerTube browse
+//! Channel community posts ("Posts" tab) via the unofficial `InnerTube` browse
 //! endpoint. The Data API has no posts resource, so this reads the same JSON
-//! the YouTube web client renders and may break when YouTube changes it.
+//! the `YouTube` web client renders and may break when `YouTube` changes it.
 
 use serde_json::Value;
 
@@ -10,7 +10,7 @@ pub struct Post {
     pub id: String,
     pub content: String,
     pub images: Vec<String>,
-    /// How long ago YouTube says it was published ("16 hours ago"); None when
+    /// How long ago `YouTube` says it was published ("16 hours ago"); None when
     /// the label is not in a recognised form.
     pub age_seconds: Option<i64>,
 }
@@ -24,7 +24,7 @@ const POSTS_TAB_PARAMS: &str = "EgVwb3N0c_IGBAoCSgA=";
 /// 2026-10-19). A browser UA keeps the response the one the web client gets.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                           (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
-/// ponytail: pinned web client version; refresh it if YouTube starts rejecting it.
+/// ponytail: pinned web client version; refresh it if `YouTube` starts rejecting it.
 const CLIENT_VERSION: &str = "2.20261015.00.00";
 
 /// Fetch and parse the first page of a channel's Posts tab, without signing in.

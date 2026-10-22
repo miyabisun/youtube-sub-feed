@@ -1,6 +1,6 @@
 use super::feed::{favorite_items, FavoriteItem};
 use crate::error::AppError;
-use crate::openapi::*;
+use crate::openapi::ErrorResponse;
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::http::header;
@@ -8,6 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
+use std::fmt::Write;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/rss", get(get_rss_feed))
@@ -37,7 +38,7 @@ async fn get_rss_feed(
     Query(query): Query<RssQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let items = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
 
         let user_id: i64 = match query.token {
             Some(ref token) => conn
@@ -91,13 +92,14 @@ fn build_rss_xml(items: &[FavoriteItem]) -> String {
         let desc = escape_xml(&item.channel_title);
         let date = escape_xml(&pub_date);
         xml.push_str("    <item>\n");
-        xml.push_str(&format!("      <title>{title}</title>\n"));
-        xml.push_str(&format!(
-            "      <link>https://www.youtube.com/watch?v={vid}</link>\n"
-        ));
-        xml.push_str(&format!("      <guid isPermaLink=\"false\">{vid}</guid>\n"));
-        xml.push_str(&format!("      <pubDate>{date}</pubDate>\n"));
-        xml.push_str(&format!("      <description>{desc}</description>\n"));
+        let _ = writeln!(xml, "      <title>{title}</title>");
+        let _ = writeln!(
+            xml,
+            "      <link>https://www.youtube.com/watch?v={vid}</link>"
+        );
+        let _ = writeln!(xml, "      <guid isPermaLink=\"false\">{vid}</guid>");
+        let _ = writeln!(xml, "      <pubDate>{date}</pubDate>");
+        let _ = writeln!(xml, "      <description>{desc}</description>");
         xml.push_str("    </item>\n");
     }
 
@@ -146,12 +148,12 @@ mod tests {
     use rusqlite::params;
     use tower::ServiceExt;
 
-    /// Build an AppState pre-seeded with one favorite channel (UC_fav) and one
-    /// non-favorite channel (UC_nofav) for user 1, whose rss_token is `tok-1`.
+    /// Build an `AppState` pre-seeded with one favorite channel (`UC_fav`) and one
+    /// non-favorite channel (`UC_nofav`) for user 1, whose `rss_token` is `tok-1`.
     fn setup_state() -> AppState {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email, rss_token) VALUES ('g1', 'test@example.com', 'tok-1')",
                 [],
@@ -188,7 +190,7 @@ mod tests {
         published_at: &str,
         is_livestream: i64,
     ) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -217,7 +219,7 @@ mod tests {
                 l.trim()
                     .strip_prefix("<guid isPermaLink=\"false\">")
                     .and_then(|r| r.strip_suffix("</guid>"))
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
             })
             .collect()
     }
@@ -259,7 +261,7 @@ mod tests {
         insert_video(&state, "v1", "UC_fav", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v2", "UC_fav", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (1, 'v2', 1)",
                 [],
@@ -280,7 +282,7 @@ mod tests {
         insert_video(&state, "v_members", "UC_fav", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v_public", "UC_fav", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
                 [],
@@ -302,7 +304,7 @@ mod tests {
         insert_video(&state, "v_short", "UC_fav", "2024-01-03T00:00:00Z", 0);
         insert_video(&state, "v_normal", "UC_fav", "2024-01-02T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
                 .unwrap();
             conn.execute(
@@ -331,7 +333,7 @@ mod tests {
     async fn rss_includes_livestreams_when_channel_enabled() {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email, rss_token) VALUES ('g1', 'test@example.com', 'tok-1')",
                 [],
@@ -358,11 +360,11 @@ mod tests {
     async fn rss_keeps_its_limit_and_newest_videos() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             for i in 0..105 {
                 conn.execute(
                     "INSERT INTO videos (id, channel_id, title, published_at) VALUES (?1, 'UC_fav', 'Video', ?2)",
-                    params![format!("v{i}"), 1700000000 + i],
+                    params![format!("v{i}"), 1_700_000_000 + i],
                 ).unwrap();
             }
         }
@@ -390,7 +392,7 @@ mod tests {
         let state = setup_state();
         insert_video(&state, "v_user1", "UC_fav", "2024-01-02T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email, rss_token) VALUES ('g2', 'user2@example.com', 'tok-2')",
                 [],

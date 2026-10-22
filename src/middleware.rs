@@ -10,15 +10,15 @@ pub struct UserId(pub i64);
 
 /// Authentication middleware.
 ///
-/// Production (is_production=true):
+/// Production (`is_production=true)`:
 ///   Reads the `Cf-Access-Authenticated-User-Email` header injected by Cloudflare
 ///   Access. If the header is absent the request is rejected (Access should have
 ///   blocked it already, but defence in depth).
 ///   - First user to appear (users table empty) is registered with role='master'
-///     and a fresh rss_token.
+///     and a fresh `rss_token`.
 ///   - Subsequent unregistered emails are rejected with 403.
 ///
-/// Development (is_production=false):
+/// Development (`is_production=false)`:
 ///   Cloudflare Access is not present, so:
 ///   - If the header IS present, the same production logic applies (useful for
 ///     integration tests that inject the header).
@@ -34,13 +34,13 @@ pub async fn auth_middleware(
         .headers()
         .get("Cf-Access-Authenticated-User-Email")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let user_id = match cf_email {
         Some(email) => resolve_or_register_user(&state, &email),
         None if !state.config.is_production => {
             // Dev bypass: use the first user in the DB.
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row("SELECT id FROM users ORDER BY id ASC LIMIT 1", [], |row| {
                 row.get::<_, i64>(0)
             })
@@ -62,10 +62,10 @@ pub async fn auth_middleware(
     }
 }
 
-/// Resolve user_id by email, or register as master on first call.
+/// Resolve `user_id` by email, or register as master on first call.
 /// Returns None if email is not registered and users already exist (→ 403 via caller).
 fn resolve_or_register_user(state: &AppState, email: &str) -> Option<i64> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
 
     // Existing user?
     if let Ok(id) = conn.query_row("SELECT id FROM users WHERE email = ?1", [email], |row| {
@@ -132,8 +132,8 @@ mod tests {
         AppState::test()
     }
 
-    /// Builds a router with auth_middleware applied and a dummy handler
-    /// that reads the injected UserId and returns it as a plain-text body.
+    /// Builds a router with `auth_middleware` applied and a dummy handler
+    /// that reads the injected `UserId` and returns it as a plain-text body.
     fn build_test_router(state: AppState) -> Router {
         async fn whoami(request: Request<axum::body::Body>) -> axum::response::Response {
             match request.extensions().get::<UserId>() {
@@ -154,7 +154,7 @@ mod tests {
     fn cf_access_header_resolves_existing_user() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
                 [],
@@ -174,7 +174,7 @@ mod tests {
         assert!(id.is_some(), "First email should be registered");
 
         let (role, email): (String, String) = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT role, email FROM users WHERE id = ?1",
                 [id.unwrap()],
@@ -190,7 +190,7 @@ mod tests {
     fn second_unregistered_email_is_rejected() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
                 [],
@@ -212,7 +212,7 @@ mod tests {
         // that UserId into the request so the downstream handler can serve it.
         let state = setup_state(); // is_production=false
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (email, role, created_at) VALUES ('dev@example.com', 'master', '2024-01-01T00:00:00Z')",
                 [],
@@ -269,7 +269,7 @@ mod tests {
         let mut state = setup_state();
         state.config.is_production = true;
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
                 [],
@@ -298,7 +298,7 @@ mod tests {
         let mut state = setup_state();
         state.config.is_production = true;
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
                 [],
@@ -325,7 +325,7 @@ mod tests {
         resolve_or_register_user(&state, "master@example.com");
 
         let rss_token: Option<String> = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT rss_token FROM users WHERE email = 'master@example.com'",
                 [],

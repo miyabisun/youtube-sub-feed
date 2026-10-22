@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::middleware::UserId;
-use crate::openapi::*;
+use crate::openapi::{ChannelItem, ChannelVideoItem, ErrorResponse, OkResponse};
 use crate::state::AppState;
 use crate::sync::channel_sync;
 use crate::sync::periodic_refresh::subscribe_all;
@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Queue every channel for repair; run bounded API and WebSub work independently.
+/// Queue every channel for repair; run bounded API and `WebSub` work independently.
 ///
 /// The sweep can take longer than a reverse proxy request budget, while Discord
 /// already owns completion reporting. Reserving the shared sweep slot before
@@ -72,25 +72,25 @@ pub async fn refresh_all(
 }
 
 fn list_channel_ids(state: &AppState) -> Result<Vec<String>, AppError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     let mut stmt = conn.prepare("SELECT id FROM channels ORDER BY id")?;
     let ids = stmt
         .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
     Ok(ids)
 }
 
-/// Validate a YouTube channel ID.
+/// Validate a `YouTube` channel ID.
 ///
-/// A valid YouTube channel ID is exactly 24 characters long:
+/// A valid `YouTube` channel ID is exactly 24 characters long:
 ///   - Starts with "UC"
 ///   - Followed by 22 characters of base64url alphabet ([A-Za-z0-9_-])
 ///
 /// This matches the format Google's API actually issues. Returns an error message
 /// string if invalid, Ok(()) if valid.
 ///
-/// Note: The browser resolves @handle / URL → UCID before POSTing, so only
+/// Note: The browser resolves @handle / URL → UCID before `POSTing`, so only
 /// UCID format needs to be validated server-side.
 pub(crate) fn validate_channel_id(channel_id: &str) -> Result<(), String> {
     if channel_id.is_empty() {
@@ -146,7 +146,7 @@ async fn get_channels(
 ) -> Result<Json<Value>, AppError> {
     let uid = user_id.0;
     let rows = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt = conn.prepare(
             "SELECT c.id, c.title, c.thumbnail_url, uc.show_livestreams, c.last_fetched_at,
               (SELECT GROUP_CONCAT(g.name, ', ')
@@ -209,7 +209,7 @@ async fn get_channel_videos(
     let uid = user_id.0;
 
     let rows = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt = conn.prepare(
             "SELECT v.id, v.title, v.published_at, v.duration,
                     v.is_short, v.is_livestream, v.livestream_ended_at,
@@ -241,13 +241,13 @@ async fn get_channel_videos(
     Ok(Json(Value::Array(rows)))
 }
 
-/// Request body for browser-side YouTube subscription sync.
+/// Request body for browser-side `YouTube` subscription sync.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct SyncChannelsBody {
-    /// Channel IDs obtained from YouTube Subscriptions.list (browser-side GIS token).
+    /// Channel IDs obtained from `YouTube` Subscriptions.list (browser-side GIS token).
     channel_ids: Vec<String>,
     /// Optional metadata (title, thumbnail) for newly added channels.
-    /// Key: channel_id, Value: { title, thumbnail_url }
+    /// Key: `channel_id`, Value: { title, `thumbnail_url` }
     meta: Option<std::collections::HashMap<String, SyncChannelMeta>>,
 }
 
@@ -290,8 +290,7 @@ async fn sync_channels(
         })
         .collect();
 
-    let result =
-        channel_sync::sync_subscriptions(&state, user_id.0, &body.channel_ids, &meta).await?;
+    let result = channel_sync::sync_subscriptions(&state, user_id.0, &body.channel_ids, &meta)?;
 
     // Subscribe newly added channels to WebSub hub (fire and forget)
     let added = result.added.clone();
@@ -334,7 +333,7 @@ async fn sync_channels(
 pub(crate) struct AddChannelBody {
     /// Channel ID (UC…). The browser resolves @handle/URL to UCID before posting.
     channel_id: String,
-    /// Channel title (from YouTube API response in browser).
+    /// Channel title (from `YouTube` API response in browser).
     title: Option<String>,
     /// Channel thumbnail URL.
     thumbnail_url: Option<String>,
@@ -369,7 +368,7 @@ async fn add_channel(
     let title = body.title.as_deref().unwrap_or(&channel_id).to_string();
 
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT OR IGNORE INTO channels (id, title, thumbnail_url, upload_playlist_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![channel_id, title, body.thumbnail_url, upload_playlist_id, now],
@@ -391,12 +390,12 @@ async fn add_channel(
 }
 
 /// Decides whether removing `user_id`'s subscription to `channel_id` orphans the
-/// channel — i.e. leaves no other subscribers, so the WebSub subscription should be
+/// channel — i.e. leaves no other subscribers, so the `WebSub` subscription should be
 /// torn down.
 ///
 /// The orphan decision is based on subscribers *other than* the caller, mirroring
 /// `sync_subscriptions`. If the caller is not actually subscribed, this returns
-/// `NotFound` rather than a count: it prevents a user from triggering WebSub
+/// `NotFound` rather than a count: it prevents a user from triggering `WebSub`
 /// unsubscribe (cross-user disruption / IDOR) on a channel they don't own.
 fn caller_removal_orphans_channel(
     conn: &rusqlite::Connection,
@@ -447,7 +446,7 @@ async fn remove_channel(
     // This also rejects (404) callers who are not subscribed, so a user can never drive
     // WebSub state changes for a channel they don't own.
     let becomes_orphan = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         caller_removal_orphans_channel(&conn, user_id.0, &id)?
     };
 
@@ -456,7 +455,7 @@ async fn remove_channel(
     // by channel_id and must find it with status='pending_unsubscribe' to honor the
     // unsubscribe — if the row is already gone it returns 404 and the hub won't retry.
     let hub_secret: Option<String> = if becomes_orphan {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let secret = conn
             .query_row(
                 "SELECT hub_secret FROM channel_subscriptions WHERE channel_id = ?1",
@@ -477,7 +476,7 @@ async fn remove_channel(
     };
 
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "DELETE FROM user_channels WHERE user_id = ?1 AND channel_id = ?2",
             rusqlite::params![user_id.0, id],
@@ -562,13 +561,13 @@ async fn update_channel(
     ] {
         if let Some(v) = val {
             if v != 0 && v != 1 {
-                return Err(AppError::BadRequest(format!("{} must be 0 or 1", name)));
+                return Err(AppError::BadRequest(format!("{name} must be 0 or 1")));
             }
         }
     }
 
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "UPDATE user_channels SET show_livestreams = COALESCE(?1, show_livestreams),
                                       is_favorite = COALESCE(?2, is_favorite),
@@ -1006,8 +1005,8 @@ mod tests {
         );
     }
 
-    /// Integration tests that drive the real add_channel / update_channel /
-    /// remove_channel handlers over HTTP (oneshot), through auth_middleware.
+    /// Integration tests that drive the real `add_channel` / `update_channel` /
+    /// `remove_channel` handlers over HTTP (oneshot), through `auth_middleware`.
     /// The acting user is the dev-bypass first DB user (user 1).
     mod handler {
         use crate::middleware::auth_middleware;
@@ -1020,17 +1019,17 @@ mod tests {
         fn setup_state() -> AppState {
             let state = AppState::test();
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute("INSERT INTO users (email) VALUES ('test@example.com')", [])
                     .unwrap();
             }
             state
         }
 
-        /// Subscribe user 1 to `channel_id` and create its (verified) WebSub
+        /// Subscribe user 1 to `channel_id` and create its (verified) `WebSub`
         /// subscription row with the given secret.
         fn subscribe_user1(state: &AppState, channel_id: &str, secret: &str) {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             let now = "2024-01-01T00:00:00Z";
             conn.execute(
                 "INSERT INTO channels (id, title, created_at) VALUES (?1, ?1, ?2)",
@@ -1125,7 +1124,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let (title, sub_count): (String, i64) = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let title = conn
                     .query_row(
                         "SELECT c.title FROM channels c
@@ -1157,7 +1156,7 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
 
             let title: String = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row("SELECT title FROM channels WHERE id = ?1", [cid], |row| {
                     row.get(0)
                 })
@@ -1173,7 +1172,7 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
 
             let count: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
                     .unwrap()
             };
@@ -1197,7 +1196,7 @@ mod tests {
             );
 
             let count: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT COUNT(*) FROM user_channels WHERE user_id = 1 AND channel_id = ?1",
                     [cid],
@@ -1226,7 +1225,7 @@ mod tests {
             );
 
             let val: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT show_livestreams FROM user_channels WHERE user_id = 1 AND channel_id = 'UCsettingsxxxxxxxxxxxxxx'",
                     [],
@@ -1248,7 +1247,7 @@ mod tests {
             );
 
             let val: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT is_favorite FROM user_channels WHERE user_id = 1 AND channel_id = 'UCfavoritexxxxxxxxxxxxxx'",
                     [],
@@ -1270,7 +1269,7 @@ mod tests {
             );
 
             let val: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT hide_shorts FROM user_channels WHERE user_id = 1 AND channel_id = 'UCshortsxxxxxxxxxxxxxxxx'",
                     [],
@@ -1286,7 +1285,7 @@ mod tests {
             let state = setup_state();
             subscribe_user1(&state, "UClistxxxxxxxxxxxxxxxxxx", "s");
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute(
                     "UPDATE user_channels SET hide_shorts = 1
                      WHERE user_id = 1 AND channel_id = 'UClistxxxxxxxxxxxxxxxxxx'",
@@ -1381,7 +1380,7 @@ mod tests {
             let state = setup_state();
             subscribe_user1(&state, "UCbyexxxxxxxxxxxxxxxxxxx", "bye_secret");
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute(
                     "INSERT INTO videos (id, channel_id, title) VALUES ('v1', 'UCbyexxxxxxxxxxxxxxxxxxx', 'V')",
                     [],
@@ -1395,7 +1394,7 @@ mod tests {
             );
 
             let (ch, vid, sub): (i64, i64, i64) = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let ch = conn
                     .query_row(
                         "SELECT COUNT(*) FROM channels WHERE id = 'UCbyexxxxxxxxxxxxxxxxxxx'",
@@ -1428,7 +1427,7 @@ mod tests {
             let state = setup_state();
             subscribe_user1(&state, "UCsharedxxxxxxxxxxxxxxxx", "shared_secret");
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute("INSERT INTO users (email) VALUES ('user2@example.com')", [])
                     .unwrap();
                 conn.execute(
@@ -1444,7 +1443,7 @@ mod tests {
             );
 
             let (ch, status, caller_sub): (i64, String, i64) = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let ch = conn
                     .query_row(
                         "SELECT COUNT(*) FROM channels WHERE id = 'UCsharedxxxxxxxxxxxxxxxx'",
@@ -1482,7 +1481,7 @@ mod tests {
             // WebSub teardown of a channel owned by someone else.
             let state = setup_state();
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute("INSERT INTO users (email) VALUES ('owner@example.com')", [])
                     .unwrap();
                 conn.execute(
@@ -1503,7 +1502,7 @@ mod tests {
             );
 
             let ch: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT COUNT(*) FROM channels WHERE id = 'UCownedxxxxxxxxxxxxxxxxx'",
                     [],
@@ -1542,7 +1541,7 @@ mod tests {
             // startup and manual refresh must check every channel's diagnostics.
             let state = AppState::test();
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute(
                     "INSERT INTO channels (id, title, created_at) VALUES
                        ('UC_subscribed', 'A', 0), ('UC_bare', 'B', 0)",

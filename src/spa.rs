@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-static CACHED_HTML: Mutex<Option<(String, u64)>> = Mutex::new(None);
+static CACHED_HTML: Mutex<Option<(String, u128)>> = Mutex::new(None);
 
 /// Read the built index.html from disk (with mtime-based cache in prod) and
 /// inject runtime values into the placeholder JavaScript variables.
@@ -15,11 +15,11 @@ static CACHED_HTML: Mutex<Option<(String, u64)>> = Mutex::new(None);
 pub fn get_index_html(gis_client_id: &str) -> Option<String> {
     let index_path = Path::new("client/build/index.html");
 
-    let is_prod = std::env::var("NODE_ENV")
-        .map(|v| v == "production")
-        .unwrap_or(false);
+    let is_prod = std::env::var("NODE_ENV").is_ok_and(|v| v == "production");
 
-    let mut cached = CACHED_HTML.lock().unwrap();
+    let mut cached = CACHED_HTML
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let metadata = fs::metadata(index_path).ok()?;
     let mtime = metadata
@@ -27,7 +27,7 @@ pub fn get_index_html(gis_client_id: &str) -> Option<String> {
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
-        .as_millis() as u64;
+        .as_millis();
 
     if let Some((ref html, ref cached_mtime)) = *cached {
         if is_prod || mtime == *cached_mtime {
@@ -55,7 +55,7 @@ fn inject_runtime_vars(html: &str, gis_client_id: &str) -> String {
     let safe_id = gis_client_id.replace('\\', "\\\\").replace('\'', "\\'");
     html.replace(
         "window.__GIS_CLIENT_ID__ = ''",
-        &format!("window.__GIS_CLIENT_ID__ = '{}'", safe_id),
+        &format!("window.__GIS_CLIENT_ID__ = '{safe_id}'"),
     )
 }
 
@@ -69,10 +69,10 @@ mod tests {
 
     use super::inject_runtime_vars;
 
-    const TEMPLATE: &str = r#"<script>
+    const TEMPLATE: &str = r"<script>
       window.__BASE_PATH__ = ''
       window.__GIS_CLIENT_ID__ = ''
-    </script>"#;
+    </script>";
 
     #[test]
     fn gis_client_id_is_injected_into_html() {

@@ -11,7 +11,7 @@
 
 use crate::error::AppError;
 use crate::middleware::UserId;
-use crate::openapi::*;
+use crate::openapi::{ErrorResponse, MeResponse};
 use crate::state::AppState;
 use axum::extract::{Extension, State};
 use axum::routing::get;
@@ -37,7 +37,7 @@ async fn me(
     Extension(user_id): Extension<UserId>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let email: String = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.query_row(
             "SELECT email FROM users WHERE id = ?1",
             [user_id.0],

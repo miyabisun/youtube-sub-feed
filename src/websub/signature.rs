@@ -6,6 +6,7 @@ type HmacSha1 = Hmac<Sha1>;
 
 /// Generate a fresh, cryptographically secure secret for use as hub.secret.
 /// Returns a 32-byte hex string (64 characters).
+#[must_use]
 pub fn generate_secret() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -23,6 +24,7 @@ fn compute_sha1(secret: &str, body: &[u8]) -> String {
 /// Verify an `X-Hub-Signature` header against the request body.
 /// The header value must be in the form `sha1=<hex>`.
 /// Uses constant-time comparison to prevent timing attacks.
+#[must_use]
 pub fn verify(header_value: &str, secret: &str, body: &[u8]) -> bool {
     let Some(received_hex) = header_value.strip_prefix("sha1=") else {
         return false;
@@ -79,7 +81,7 @@ mod tests {
         let body = b"some atom feed body";
         let known_sig = "8b41df86e801ef185f7c457d8f8e7f3301f44639";
 
-        assert!(verify(&format!("sha1={}", known_sig), secret, body));
+        assert!(verify(&format!("sha1={known_sig}"), secret, body));
     }
 
     #[test]
@@ -87,7 +89,7 @@ mod tests {
         let secret = "my_secret_key";
         let original_body = b"original";
         let sig = compute_sha1(secret, original_body);
-        let header = format!("sha1={}", sig);
+        let header = format!("sha1={sig}");
 
         assert!(!verify(&header, secret, b"tampered"));
     }
@@ -96,7 +98,7 @@ mod tests {
     fn test_verify_wrong_secret() {
         let body = b"body";
         let sig = compute_sha1("secret_a", body);
-        let header = format!("sha1={}", sig);
+        let header = format!("sha1={sig}");
 
         assert!(!verify(&header, "secret_b", body));
     }
@@ -119,7 +121,7 @@ mod tests {
         let expected = "b617318655057264e28bc0b6fb378c8ef146be00";
 
         assert_eq!(compute_sha1(&key, body), expected);
-        assert!(verify(&format!("sha1={}", expected), &key, body));
+        assert!(verify(&format!("sha1={expected}"), &key, body));
     }
 
     #[test]

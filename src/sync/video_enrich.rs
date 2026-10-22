@@ -9,7 +9,7 @@ const NEEDS_DETAILS: &str = "(details_attempted_at IS NULL OR details_attempted_
     AND (details_checked_at IS NULL OR shorts_classifier_version < ?1
          OR (is_livestream = 1 AND livestream_ended_at IS NULL AND details_checked_at <= ?2 - 86400))";
 
-/// Enrich the given videos with details from the YouTube Data
+/// Enrich the given videos with details from the `YouTube` Data
 /// API (duration / Shorts / livestream). No-op without an API key.
 ///
 /// Works in batches of 50 (one quota unit each): fetch → apply → mark checked,
@@ -25,7 +25,7 @@ pub async fn enrich_videos(state: &AppState, video_ids: &[String]) -> Result<(),
     // Re-read eligibility now, not before waiting for the current owner.
     let now = state.youtube_api.now();
     let ids = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT EXISTS(SELECT 1 FROM videos WHERE id = ?3 AND {NEEDS_DETAILS})"
         ))?;
@@ -44,7 +44,7 @@ pub async fn enrich_videos(state: &AppState, video_ids: &[String]) -> Result<(),
     };
     for chunk in ids.chunks(50) {
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             for id in chunk {
                 conn.execute(
                     "UPDATE videos SET details_attempted_at = ?1 WHERE id = ?2",
@@ -53,12 +53,7 @@ pub async fn enrich_videos(state: &AppState, video_ids: &[String]) -> Result<(),
             }
         }
         let details = fetch_video_details(state, chunk).await?;
-        apply_video_details(
-            &state.db.lock().unwrap(),
-            &details,
-            chunk,
-            state.youtube_api.now(),
-        )?;
+        apply_video_details(&state.conn(), &details, chunk, state.youtube_api.now())?;
         tracing::info!(videos = chunk.len(), "[enrich] batch saved");
     }
     Ok(())
@@ -111,8 +106,8 @@ pub fn apply_video_details(
                  WHERE id = ?7",
                 rusqlite::params![
                     d.duration,
-                    is_short as i64,
-                    d.is_livestream as i64,
+                    i64::from(is_short),
+                    i64::from(d.is_livestream),
                     ended_at,
                     now,
                     SHORTS_CLASSIFIER_VERSION,
@@ -149,13 +144,13 @@ pub fn pending_enrichment(conn: &Connection, now: i64) -> rusqlite::Result<Vec<S
     rows.collect()
 }
 
-/// Bounded catch-all on each API tick; independent of WebSub lease renewal.
+/// Bounded catch-all on each API tick; independent of `WebSub` lease renewal.
 pub async fn backfill_missing_details(state: &AppState) -> Result<(), FetchError> {
     if state.config.youtube_api_key.is_none() {
         return Ok(());
     }
     let ids = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         pending_enrichment(&conn, state.youtube_api.now())?
     };
     enrich_videos(state, &ids).await
@@ -176,7 +171,7 @@ mod tests {
     fn setup_conn() -> AppState {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("INSERT INTO channels (id, title) VALUES ('UC1', 'Ch')", [])
                 .unwrap();
             for id in ["v_short", "v_normal", "v_live", "v_deleted"] {
@@ -194,7 +189,7 @@ mod tests {
         state: &AppState,
         id: &str,
     ) -> (Option<String>, i64, i64, Option<i64>, Option<i64>) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.query_row(
             "SELECT duration, is_short, is_livestream, livestream_ended_at, details_checked_at
              FROM videos WHERE id = ?1",
@@ -224,7 +219,7 @@ mod tests {
             player_height: Some(1280),
         }];
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             apply_video_details(&conn, &details, &["v_short".to_string()], 1000).unwrap();
         }
         let (duration, is_short, _, _, checked) = video_row(&state, "v_short");
@@ -232,9 +227,7 @@ mod tests {
         assert_eq!(is_short, 1);
         assert_eq!(checked, Some(1000));
         let version: i64 = state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .query_row(
                 "SELECT shorts_classifier_version FROM videos WHERE id = 'v_short'",
                 [],
@@ -256,7 +249,7 @@ mod tests {
             player_height: None,
         }];
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             apply_video_details(&conn, &details, &["v_normal".to_string()], 1000).unwrap();
         }
         let (_, is_short, _, _, checked) = video_row(&state, "v_normal");
@@ -279,14 +272,14 @@ mod tests {
             player_height: None,
         }];
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             apply_video_details(&conn, &details, &["v_normal".to_string()], 1000).unwrap();
         }
         let (duration, _, _, _, checked) = video_row(&state, "v_normal");
         assert_eq!(duration, None);
         assert_eq!(checked, None);
 
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
         assert!(pending.contains(&"v_normal".to_string()));
     }
@@ -306,7 +299,7 @@ mod tests {
             player_height: Some(1280),
         }];
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             apply_video_details(&conn, &details, &["v_live".to_string()], 1000).unwrap();
         }
         let (duration, is_short, is_livestream, ended_at, checked) = video_row(&state, "v_live");
@@ -316,7 +309,7 @@ mod tests {
         assert_eq!(ended_at, None);
         assert_eq!(checked, Some(1000));
 
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
         assert!(pending.contains(&"v_live".to_string()));
     }
@@ -333,13 +326,13 @@ mod tests {
             player_height: Some(1280),
         }];
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             apply_video_details(&conn, &details, &["v_live".to_string()], 2000).unwrap();
         }
         let (duration, _, is_livestream, ended_at, checked) = video_row(&state, "v_live");
         assert_eq!(duration.as_deref(), Some("PT1H2M"));
         assert_eq!(is_livestream, 1);
-        assert_eq!(ended_at, Some(1705312800));
+        assert_eq!(ended_at, Some(1_705_312_800));
         assert_eq!(checked, Some(2000));
     }
 
@@ -350,7 +343,7 @@ mod tests {
         // day forever after a classifier version bump.
         let state = setup_conn();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE videos SET details_checked_at = 1,
                         shorts_classifier_version = ?1
@@ -363,7 +356,7 @@ mod tests {
         let (duration, _, _, _, checked) = video_row(&state, "v_deleted");
         assert_eq!(duration, None);
         assert_eq!(checked, Some(3000));
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let version: i64 = conn
             .query_row(
                 "SELECT shorts_classifier_version FROM videos WHERE id = 'v_deleted'",
@@ -382,7 +375,7 @@ mod tests {
     #[test]
     fn pending_enrichment_selects_unchecked_and_live_pending_rows_only() {
         let state = setup_conn();
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         // v_short: checked, regular → not pending
         conn.execute(
             "UPDATE videos SET details_checked_at = 1, shorts_classifier_version = ?1
@@ -399,14 +392,14 @@ mod tests {
         // v_normal, v_deleted: never checked → pending
 
         let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
-        let ids: HashSet<&str> = pending.iter().map(|s| s.as_str()).collect();
+        let ids: HashSet<&str> = pending.iter().map(std::string::String::as_str).collect();
         assert_eq!(ids, HashSet::from(["v_normal", "v_deleted", "v_live"]));
     }
 
     #[test]
     fn stale_shorts_classifier_version_requeues_a_checked_video() {
         let state = setup_conn();
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "UPDATE videos SET details_checked_at = 1,
                     shorts_classifier_version = ?1
@@ -416,7 +409,7 @@ mod tests {
         .unwrap();
 
         let pending = pending_enrichment(&conn, crate::util::now_unix()).unwrap();
-        let ids: HashSet<&str> = pending.iter().map(|s| s.as_str()).collect();
+        let ids: HashSet<&str> = pending.iter().map(std::string::String::as_str).collect();
         assert!(ids.contains("v_short"));
     }
 }

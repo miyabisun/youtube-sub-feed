@@ -5,11 +5,11 @@ pub mod videos;
 
 /// Derive a channel's uploads playlist ID from its "UC…" channel ID.
 ///
-/// YouTube identifies the uploads playlist by replacing the channel ID's "UC"
+/// `YouTube` identifies the uploads playlist by replacing the channel ID's "UC"
 /// prefix with "UU".
 pub fn derive_upload_playlist_id(channel_id: &str) -> String {
     let suffix = channel_id.get(2..).unwrap_or(channel_id);
-    format!("UU{}", suffix)
+    format!("UU{suffix}")
 }
 
 #[cfg(test)]

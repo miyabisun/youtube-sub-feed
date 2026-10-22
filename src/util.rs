@@ -1,5 +1,5 @@
 /// Current UTC time as Unix seconds, the canonical representation for every
-/// instant stored in SQLite.
+/// instant stored in `SQLite`.
 pub fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -24,7 +24,6 @@ pub fn row_timestamp_to_rfc3339(
 ) -> rusqlite::Result<Option<String>> {
     use rusqlite::types::ValueRef;
     match row.get_ref(index)? {
-        ValueRef::Null => Ok(None),
         ValueRef::Integer(value) => Ok(unix_to_rfc3339(value)),
         ValueRef::Text(value) => Ok(std::str::from_utf8(value)
             .ok()
@@ -42,9 +41,9 @@ mod tests {
     fn parses_only_absolute_rfc3339_timestamps() {
         assert_eq!(
             rfc3339_to_unix("2024-01-15T19:00:00+09:00"),
-            Some(1705312800)
+            Some(1_705_312_800)
         );
-        assert_eq!(rfc3339_to_unix("2024-01-15T10:00:00Z"), Some(1705312800));
+        assert_eq!(rfc3339_to_unix("2024-01-15T10:00:00Z"), Some(1_705_312_800));
         assert_eq!(rfc3339_to_unix("2024-01-15 10:00:00"), None);
         assert_eq!(rfc3339_to_unix("not-a-date"), None);
     }

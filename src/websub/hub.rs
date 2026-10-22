@@ -52,7 +52,7 @@ impl Hub {
     }
 
     /// Only needed when a final failure has no stored display name. This public
-    /// Atom topic needs no API key and uses the existing YouTube redirect policy.
+    /// Atom topic needs no API key and uses the existing `YouTube` redirect policy.
     pub(crate) async fn channel_title(
         &self,
         http: &reqwest::Client,
@@ -192,10 +192,8 @@ impl Hub {
 }
 
 fn retry_after(value: &str) -> Duration {
-    value
-        .parse::<u64>()
-        .map(Duration::from_secs)
-        .unwrap_or_else(|_| {
+    value.parse::<u64>().map_or_else(
+        |_| {
             chrono::DateTime::parse_from_rfc2822(value)
                 .ok()
                 .and_then(|at| {
@@ -204,7 +202,9 @@ fn retry_after(value: &str) -> Duration {
                         .ok()
                 })
                 .unwrap_or_default()
-        })
+        },
+        Duration::from_secs,
+    )
 }
 
 fn parse_expiration(html: &str) -> Result<Option<i64>, String> {

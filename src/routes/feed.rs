@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::middleware::UserId;
-use crate::openapi::*;
+use crate::openapi::{ErrorResponse, FeedItem, HistoryItem, OkResponse};
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query, State};
 use axum::routing::{get, patch};
@@ -180,7 +180,7 @@ async fn get_feed(
     );
 
     let rows = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(
@@ -217,7 +217,7 @@ async fn get_history(
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let offset = query.offset.unwrap_or(0).max(0);
     let rows = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt = conn.prepare(
             "SELECT v.id AS id, v.channel_id, v.title, v.published_at,
                     v.duration, v.is_short, v.is_livestream, v.livestream_ended_at,
@@ -274,7 +274,7 @@ async fn hide_video(
     Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     conn.execute(
         "INSERT INTO user_videos (user_id, video_id, is_hidden) VALUES (?1, ?2, 1)
          ON CONFLICT(user_id, video_id) DO UPDATE SET is_hidden = 1",
@@ -299,7 +299,7 @@ async fn unhide_video(
     Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     conn.execute(
         "DELETE FROM user_videos WHERE user_id = ?1 AND video_id = ?2",
         rusqlite::params![user_id.0, id],
@@ -324,7 +324,7 @@ async fn hide_post(
     Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     conn.execute(
         "INSERT INTO user_posts (user_id, post_id, is_hidden) VALUES (?1, ?2, 1)
          ON CONFLICT(user_id, post_id) DO UPDATE SET is_hidden = 1, created_at = unixepoch()
@@ -350,7 +350,7 @@ async fn unhide_post(
     Extension(user_id): Extension<UserId>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     conn.execute(
         "DELETE FROM user_posts WHERE user_id = ?1 AND post_id = ?2",
         rusqlite::params![user_id.0, id],
@@ -387,7 +387,7 @@ mod tests {
     fn setup_state() -> AppState {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -425,7 +425,7 @@ mod tests {
         published_at: &str,
         is_livestream: i64,
     ) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO videos (id, channel_id, title, published_at, is_livestream)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -510,7 +510,7 @@ mod tests {
 
     /// Create a group owned by user 1 containing `channel_id`, returning its id.
     fn insert_group_with_channel(state: &AppState, name: &str, channel_id: &str) -> i64 {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (1, ?1, 0, '2024-01-01T00:00:00Z')",
             params![name],
@@ -554,7 +554,7 @@ mod tests {
     }
 
     fn insert_post(state: &AppState, id: &str, channel_id: &str, published_at: i64) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "INSERT INTO posts (id, channel_id, content, image_urls, published_at)
              VALUES (?1, ?2, ?3, '[\"https://yt3.ggpht.com/a\",\"https://yt3.ggpht.com/b\"]', ?4)",
@@ -564,8 +564,8 @@ mod tests {
     }
 
     /// 2024-01-02 / 2024-01-04 as Unix seconds, between the videos below.
-    const JAN_2: i64 = 1704153600;
-    const JAN_4: i64 = 1704326400;
+    const JAN_2: i64 = 1_704_153_600;
+    const JAN_4: i64 = 1_704_326_400;
 
     fn insert_mixed(state: &AppState) {
         insert_video(state, "v1", "UC1", "2024-01-01T00:00:00Z", 0);
@@ -594,9 +594,7 @@ mod tests {
         let state = setup_state();
         insert_mixed(&state);
         state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .execute_batch(
                 "INSERT INTO users (google_id,email) VALUES ('g2','user2@example.com');
              INSERT INTO user_channels (user_id,channel_id) VALUES (2,'UC1'),(2,'UC2');",
@@ -640,7 +638,7 @@ mod tests {
         let state = setup_state();
         insert_mixed(&state);
         hide(&state, "v1").await;
-        state.db.lock().unwrap().execute_batch(
+        state.conn().execute_batch(
             "UPDATE user_videos SET created_at=40 WHERE video_id='v1';
              INSERT INTO user_videos (user_id,video_id,is_hidden,created_at) VALUES (1,'v3',1,20);
              INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30),(1,'p4',1,10);"
@@ -679,9 +677,7 @@ mod tests {
         let state = setup_state();
         insert_post(&state, "p1", "UC1", JAN_2);
         state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .execute(
                 "INSERT INTO user_posts (user_id,post_id,created_at) VALUES (1,'p1',10)",
                 [],
@@ -692,9 +688,7 @@ mod tests {
         post_action(&state, "p1", "hide", "test@example.com").await;
         assert!(feed_ids(&state, "?kinds=post").await.is_empty());
         let marked: i64 = state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .query_row(
                 "SELECT created_at FROM user_posts WHERE post_id='p1'",
                 [],
@@ -711,7 +705,7 @@ mod tests {
     fn posts_state_cascades_when_user_or_post_is_deleted() {
         let state = setup_state();
         insert_mixed(&state);
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute_batch(
             "INSERT INTO user_posts (user_id,post_id,is_hidden) VALUES (1,'p2',1),(1,'p4',1);
             DELETE FROM posts WHERE id='p2';",
@@ -794,7 +788,7 @@ mod tests {
     async fn feed_excludes_posts_of_unsubscribed_channels() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("INSERT INTO channels (id, title) VALUES ('UC3', 'Ch3')", [])
                 .unwrap();
         }
@@ -872,7 +866,7 @@ mod tests {
         insert_video(&state, "v_members", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v_normal", "UC1", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "UPDATE videos SET is_members_only = 1 WHERE id = 'v_members'",
                 [],
@@ -889,7 +883,7 @@ mod tests {
         insert_video(&state, "v_short", "UC1", "2024-01-03T00:00:00Z", 0);
         insert_video(&state, "v_normal", "UC1", "2024-01-02T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
                 .unwrap();
             conn.execute(
@@ -907,7 +901,7 @@ mod tests {
         let state = setup_state();
         insert_video(&state, "v_short", "UC1", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
                 .unwrap();
             conn.execute(
@@ -1006,7 +1000,7 @@ mod tests {
         insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute_batch(
                 "INSERT INTO user_videos (user_id, video_id, is_hidden, created_at) VALUES
                     (1, 'v1', 1, 10),
@@ -1031,7 +1025,7 @@ mod tests {
     async fn history_is_isolated_per_user_and_excludes_unhidden_rows() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
                 [],
@@ -1042,7 +1036,7 @@ mod tests {
         insert_video(&state, "v2", "UC1", "2024-01-02T00:00:00Z", 0);
         insert_video(&state, "v3", "UC1", "2024-01-03T00:00:00Z", 0);
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute_batch(
                 "INSERT INTO user_videos (user_id, video_id, is_hidden, created_at) VALUES
                     (1, 'v1', 1, 10),
@@ -1063,7 +1057,7 @@ mod tests {
     async fn feed_only_shows_subscribed_channels() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             // UC3 exists but user is not subscribed
             conn.execute(
                 "INSERT INTO channels (id, title, created_at) VALUES ('UC3', 'Ch3', '2024-01-01T00:00:00Z')",
@@ -1085,7 +1079,7 @@ mod tests {
     async fn hiding_a_video_is_isolated_per_user() {
         let state = setup_state();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
                 [],

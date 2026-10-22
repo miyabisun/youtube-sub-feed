@@ -36,7 +36,7 @@ impl Default for Api {
 impl Api {
     pub(crate) fn now(&self) -> i64 {
         self.epoch
-            .saturating_add(self.started.elapsed().as_secs() as i64)
+            .saturating_add(i64::try_from(self.started.elapsed().as_secs()).unwrap_or(i64::MAX))
     }
 
     #[cfg(test)]
@@ -48,7 +48,7 @@ impl Api {
     }
 }
 
-/// Per-video metadata the WebSub Atom payload does not carry.
+/// Per-video metadata the `WebSub` Atom payload does not carry.
 #[derive(Debug)]
 pub struct VideoDetails {
     pub id: String,
@@ -112,8 +112,8 @@ impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FetchError::QuotaExceeded => write!(f, "YouTube API quota exceeded"),
-            FetchError::Http(status) => write!(f, "YouTube API HTTP {}", status),
-            FetchError::Transport(msg) => write!(f, "YouTube API transport error: {}", msg),
+            FetchError::Http(status) => write!(f, "YouTube API HTTP {status}"),
+            FetchError::Transport(msg) => write!(f, "YouTube API transport error: {msg}"),
             FetchError::MalformedResponse => write!(f, "YouTube API malformed response"),
             FetchError::Deferred => write!(f, "YouTube API waiting for Retry-After"),
             FetchError::InvalidPageToken => write!(f, "YouTube API invalid page token"),
@@ -124,7 +124,7 @@ impl std::fmt::Display for FetchError {
 
 /// Parse a videos.list response.
 ///
-/// - Missing/non-array `items` → MalformedResponse (structural failure, the
+/// - Missing/non-array `items` → `MalformedResponse` (structural failure, the
 ///   whole batch must not be marked as checked).
 /// - An item without an `id` is skipped.
 /// - A missing `contentDetails.duration` stays None — never coerced to "PT0S".
@@ -141,11 +141,11 @@ pub fn parse_video_details(data: &Value) -> Result<Vec<VideoDetails>, FetchError
                 id: id.to_string(),
                 duration: item["contentDetails"]["duration"]
                     .as_str()
-                    .map(|s| s.to_string()),
+                    .map(std::string::ToString::to_string),
                 is_livestream: item.get("liveStreamingDetails").is_some(),
                 livestream_ended_at: item["liveStreamingDetails"]["actualEndTime"]
                     .as_str()
-                    .map(|s| s.to_string()),
+                    .map(std::string::ToString::to_string),
                 // Google Discovery represents int64 fields as JSON strings.
                 // Keep accepting numbers too so fixtures and proxy-normalized
                 // responses remain compatible.
@@ -167,7 +167,7 @@ pub async fn fetch_video_details(
     state: &AppState,
     video_ids: &[String],
 ) -> Result<Vec<VideoDetails>, FetchError> {
-    debug_assert!(video_ids.len() <= 50);
+    debug_assert!(video_ids.len() <= 50, "videos.list accepts at most 50 IDs");
     if video_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -210,7 +210,10 @@ pub async fn fetch_channel_video_counts(
     state: &AppState,
     channel_ids: &[String],
 ) -> Result<Vec<ChannelVideoCount>, FetchError> {
-    debug_assert!(channel_ids.len() <= 50);
+    debug_assert!(
+        channel_ids.len() <= 50,
+        "channels.list accepts at most 50 IDs"
+    );
     if channel_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -227,10 +230,10 @@ pub async fn fetch_channel_video_counts(
     parse_channel_video_counts(&data)
 }
 
-/// Parse a playlistItems.list response into the same entry shape a WebSub Atom
+/// Parse a playlistItems.list response into the same entry shape a `WebSub` Atom
 /// push carries, so both discovery paths feed one insertion routine.
 ///
-/// - Missing/non-array `items` → MalformedResponse (the channel must not read
+/// - Missing/non-array `items` → `MalformedResponse` (the channel must not read
 ///   as "no uploads" when the body was not a list response at all).
 /// - An item without `snippet.resourceId.videoId` is skipped.
 /// - `contentDetails.videoPublishedAt` is the video's own publication time;
@@ -307,7 +310,7 @@ impl From<rusqlite::Error> for FetchError {
 /// Persist before sending: even failed requests can cost quota. This ledger is
 /// this server's estimate, not the Google project's authoritative usage counter.
 fn reserve_request(state: &AppState, now: i64) -> Result<i64, FetchError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     // A fixed UTC day is inspectable and restart-safe. A Pacific quota day
     // spans two UTC dates, so deployment allocates against that upper bound.
     let utc_midnight = now.div_euclid(86400) * 86400;
@@ -329,7 +332,7 @@ fn reserve_request(state: &AppState, now: i64) -> Result<i64, FetchError> {
     if state
         .config
         .youtube_api_daily_budget
-        .is_some_and(|budget| requests as u64 >= budget)
+        .is_some_and(|budget| u64::try_from(requests).unwrap_or(0) >= budget)
     {
         conn.execute(
             "UPDATE youtube_api_state SET quota_until = ?1 WHERE id = 1",
@@ -350,7 +353,7 @@ fn retry_after_seconds(value: Option<&str>, now: i64) -> u64 {
             value.parse().ok().or_else(|| {
                 chrono::DateTime::parse_from_rfc2822(value)
                     .ok()
-                    .map(|at| at.timestamp().saturating_sub(now).max(0) as u64)
+                    .map(|at| u64::try_from(at.timestamp().saturating_sub(now)).unwrap_or(0))
             })
         })
         .unwrap_or(0)
@@ -430,7 +433,7 @@ async fn get_json_with_retry(
             // Conservative: crosses the next Pacific midnight even on a 25-hour
             // DST day, without adding a timezone database dependency.
             let until = state.youtube_api.now() + 25 * 3600;
-            state.db.lock().unwrap().execute(
+            state.conn().execute(
                 "UPDATE youtube_api_state SET quota_until = ?1 WHERE id = 1",
                 [until],
             )?;
@@ -451,7 +454,7 @@ async fn get_json_with_retry(
                     .youtube_api
                     .now()
                     .saturating_add(i64::try_from(delay).unwrap_or(i64::MAX));
-                state.db.lock().unwrap().execute(
+                state.conn().execute(
                     "UPDATE youtube_api_state SET retry_until = ?1 WHERE id = 1",
                     [until],
                 )?;
@@ -495,9 +498,7 @@ mod tests {
         );
         assert_eq!(reserve_request(&state, midnight + 86400), Ok(1));
         let window: i64 = state
-            .db
-            .lock()
-            .unwrap()
+            .conn()
             .query_row("SELECT window_started FROM youtube_api_state", [], |row| {
                 row.get(0)
             })

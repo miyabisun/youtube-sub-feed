@@ -153,7 +153,7 @@ async fn scan_channels(
 ) -> Result<(), FetchError> {
     let now = state.youtube_api.now();
     let mut targets = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let targets = channel_targets(&conn)?;
         if force {
             conn.execute("UPDATE channel_catchup SET repair_after = 0", [])?;
@@ -232,7 +232,7 @@ async fn scan_channels(
             // Persist attempts before IO so a bad channel rotates behind healthy
             // channels, including after a restart. Successful progress is separate.
             let head = kind != "backfill" || target.page_token.is_none();
-            state.db.lock().unwrap().execute(
+            state.conn().execute(
                 if kind == "backfill" {
                     "UPDATE channel_catchup SET backfill_attempted_at = ?1 WHERE channel_id = ?2"
                 } else {
@@ -255,7 +255,7 @@ async fn scan_channels(
                 Ok(page) => save_page(
                     state,
                     &target,
-                    page,
+                    &page,
                     head,
                     counts.get(&target.channel_id).copied(),
                     now,
@@ -278,7 +278,7 @@ async fn scan_channels(
                 }
                 Err(error) => {
                     if error == FetchError::InvalidPageToken && !head {
-                        state.db.lock().unwrap().execute(
+                        state.conn().execute(
                             "UPDATE channel_catchup SET page_token = NULL, backfill_after = 0 WHERE channel_id = ?1", [&target.channel_id],
                         )?;
                     }
@@ -295,12 +295,12 @@ async fn scan_channels(
 fn save_page(
     state: &AppState,
     target: &ChannelTarget,
-    page: PlaylistPage,
+    page: &PlaylistPage,
     head: bool,
     observed_count: Option<u64>,
     now: i64,
 ) -> Result<Vec<String>, FetchError> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.conn();
     let tx = conn.unchecked_transaction()?;
     let entries = partition_new_entries(&tx, &target.channel_id, &page.entries, now)?;
     let ids = entries.iter().map(|entry| entry.video_id.clone()).collect();

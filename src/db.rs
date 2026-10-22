@@ -13,7 +13,9 @@ pub fn open(path: &str) -> Connection {
     )
     .expect("Failed to set PRAGMA");
 
-    migrate(&conn);
+    if let Err(e) = migrate(&conn) {
+        panic!("Migration failed: {e}");
+    }
     create_tables(&conn);
     add_user_channels_hide_shorts(&conn);
     drop_videos_thumbnail_url(&conn);
@@ -60,11 +62,11 @@ fn add_videos_details_attempted_at(conn: &Connection) {
     }
 }
 
-/// Track when a video's details were last fetched from the YouTube Data API.
+/// Track when a video's details were last fetched from the `YouTube` Data API.
 ///
 /// NULL means "never attempted": the enrichment backfill re-queries only those
-/// rows, so videos deleted from YouTube (absent from API responses) stop being
-/// re-queried once their batch succeeds. Runs after migrate_timestamps_to_unix
+/// rows, so videos deleted from `YouTube` (absent from API responses) stop being
+/// re-queried once their batch succeeds. Runs after `migrate_timestamps_to_unix`
 /// because that migration rebuilds `videos` without this column. Idempotent.
 fn add_videos_details_checked_at(conn: &Connection) {
     if column_exists(conn, "videos", "details_checked_at") {
@@ -118,7 +120,7 @@ fn add_channels_video_count(conn: &Connection) {
 
 /// One-shot migration: decode XML entities in legacy `videos.title` rows.
 ///
-/// Pre-fix WebSub callbacks stored Atom titles verbatim (e.g. "S&amp;P500"),
+/// Pre-fix `WebSub` callbacks stored Atom titles verbatim (e.g. "S&amp;P500"),
 /// which caused the browser to render the literal "S&amp;P500" because the
 /// frontend re-escapes the `&`. New rows are now decoded at ingest in
 /// `websub::atom`, so this pass only exists to clean up rows from before
@@ -134,8 +136,8 @@ fn add_channels_video_count(conn: &Connection) {
 /// proportional to the number of dirty rows once the backlog is drained.
 ///
 /// Numeric character references (`&#39;`, `&#x27;`) are intentionally not
-/// handled here: SQLite has no built-in regex and these are rare enough in
-/// real YouTube feeds that adding a Rust-side scan is not worth the cost.
+/// handled here: `SQLite` has no built-in regex and these are rare enough in
+/// real `YouTube` feeds that adding a Rust-side scan is not worth the cost.
 /// New rows go through `websub::atom::decode_xml_entities`, which does
 /// handle them.
 ///
@@ -190,7 +192,7 @@ fn add_videos_is_members_only(conn: &Connection) {
 ///
 /// Thumbnails are derived from the video ID on the client side, so storing
 /// the URL adds no information and creates failure modes (NULL columns when
-/// videos arrive via WebSub push that doesn't carry thumbnail metadata).
+/// videos arrive via `WebSub` push that doesn't carry thumbnail metadata).
 /// Idempotent: a no-op once the column has been dropped.
 fn drop_videos_thumbnail_url(conn: &Connection) {
     let column_exists = column_exists(conn, "videos", "thumbnail_url");
@@ -211,7 +213,7 @@ fn drop_videos_thumbnail_url(conn: &Connection) {
 fn drop_users_oauth_token_columns(conn: &Connection) {
     for col in &["access_token", "refresh_token", "token_expires_at"] {
         if column_exists(conn, "users", col) {
-            match conn.execute(&format!("ALTER TABLE users DROP COLUMN {}", col), []) {
+            match conn.execute(&format!("ALTER TABLE users DROP COLUMN {col}"), []) {
                 Ok(_) => tracing::info!("[migrate] Dropped obsolete users.{} column", col),
                 Err(e) => tracing::warn!("[migrate] Failed to drop users.{}: {}", col, e),
             }
@@ -220,7 +222,7 @@ fn drop_users_oauth_token_columns(conn: &Connection) {
 }
 
 /// One-shot migration: add a UNIQUE index on users.email (replacing the old
-/// idx_users_google_id index). Email is now the primary user identifier since
+/// `idx_users_google_id` index). Email is now the primary user identifier since
 /// Cloudflare Access provides it via the `Cf-Access-Authenticated-User-Email`
 /// header. Idempotent: a no-op if the index already exists.
 fn add_users_email_unique_index(conn: &Connection) {
@@ -256,7 +258,7 @@ fn add_users_email_unique_index(conn: &Connection) {
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    let sql = format!("PRAGMA table_info({})", table);
+    let sql = format!("PRAGMA table_info({table})");
     let Ok(mut stmt) = conn.prepare(&sql) else {
         return false;
     };
@@ -268,10 +270,13 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     // and rustc rejects it. Binding to `found` finishes the borrow before
     // the return value is produced.
     #[allow(clippy::let_and_return)]
-    let found = names.filter_map(|r| r.ok()).any(|n| n == column);
+    let found = names
+        .filter_map(std::result::Result::ok)
+        .any(|n| n == column);
     found
 }
 
+#[must_use]
 pub fn open_memory() -> Connection {
     let conn = Connection::open_in_memory().expect("Failed to open in-memory database");
 
@@ -441,8 +446,7 @@ fn migrate_timestamps_to_unix(conn: &Connection) {
     let needs_rebuild = CORE_TIMESTAMPS.iter().any(|(table, columns)| {
         columns.iter().any(|column| {
             column_declaration(conn, table, column)
-                .map(|(kind, not_null)| kind != "INTEGER" || not_null)
-                .unwrap_or(true)
+                .is_none_or(|(kind, not_null)| kind != "INTEGER" || not_null)
         })
     });
     if !needs_rebuild {
@@ -604,8 +608,7 @@ fn migrate_sessions_to_unix(conn: &Connection) {
     }
     let needs_rebuild = ["expires_at", "created_at"].iter().any(|column| {
         column_declaration(conn, "sessions", column)
-            .map(|(kind, not_null)| kind != "INTEGER" || not_null)
-            .unwrap_or(true)
+            .is_none_or(|(kind, not_null)| kind != "INTEGER" || not_null)
     });
     if !needs_rebuild {
         conn.execute_batch(&format!(
@@ -637,18 +640,18 @@ fn migrate_sessions_to_unix(conn: &Connection) {
         .expect("Failed to restore foreign keys");
 }
 
-fn migrate(conn: &Connection) {
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let has_auth_table = conn.prepare("SELECT 1 FROM auth LIMIT 0").is_ok();
     if !has_auth_table {
-        return; // New database or already migrated
+        return Ok(()); // New database or already migrated
     }
 
     tracing::info!("[migrate] Migrating from single-user to multi-user schema...");
 
     // Disable FK checks during migration (required for table recreation)
-    conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
 
-    conn.execute_batch("BEGIN TRANSACTION;").unwrap();
+    conn.execute_batch("BEGIN TRANSACTION;")?;
 
     let result = (|| -> Result<(), rusqlite::Error> {
         // 1. Create users table from auth data (first user becomes master)
@@ -796,17 +799,17 @@ fn migrate(conn: &Connection) {
 
     match result {
         Ok(()) => {
-            conn.execute_batch("COMMIT;").unwrap();
+            conn.execute_batch("COMMIT;")?;
             tracing::info!("[migrate] Migration completed successfully");
         }
         Err(e) => {
-            conn.execute_batch("ROLLBACK;").unwrap();
-            panic!("Migration failed: {}", e);
+            conn.execute_batch("ROLLBACK;")?;
+            return Err(e);
         }
     }
 
     // Re-enable FK checks
-    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
 }
 
 #[cfg(test)]
@@ -903,8 +906,7 @@ mod tests {
         for name in &expected {
             assert!(
                 tables.contains(&name.to_string()),
-                "Table '{}' not found",
-                name
+                "Table '{name}' not found"
             );
         }
 
@@ -1537,10 +1539,10 @@ mod tests {
         conn.execute("DELETE FROM groups WHERE id = ?1", [group_id])
             .unwrap();
 
-        let cg_count: i64 = conn
+        let group_link_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channel_groups", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(cg_count, 0, "channel_groups row should be deleted");
+        assert_eq!(group_link_count, 0, "channel_groups row should be deleted");
 
         let ch_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
@@ -1914,7 +1916,7 @@ mod tests {
         ).unwrap();
 
         // Run the same migration chain as open().
-        migrate(&conn);
+        migrate(&conn).unwrap();
         create_tables(&conn);
         add_user_channels_hide_shorts(&conn);
         drop_videos_thumbnail_url(&conn);
@@ -2007,7 +2009,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(session_expiry, 1767225600);
+        assert_eq!(session_expiry, 1_767_225_600);
     }
 
     #[test]
@@ -2135,7 +2137,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(absolute, Some(1705312800));
+        assert_eq!(absolute, Some(1_705_312_800));
         let (hide_shorts, subscription_created_at): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT hide_shorts, created_at FROM user_channels
@@ -2145,7 +2147,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hide_shorts, 1);
-        assert_eq!(subscription_created_at, Some(1704067200));
+        assert_eq!(subscription_created_at, Some(1_704_067_200));
         for id in ["naive", "invalid"] {
             let value: Option<i64> = conn
                 .query_row("SELECT published_at FROM videos WHERE id=?1", [id], |row| {

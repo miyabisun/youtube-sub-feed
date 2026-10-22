@@ -7,7 +7,7 @@ pub struct SyncResult {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     /// Channels that were removed and became orphaned (no remaining subscribers),
-    /// together with their WebSub hub_secret. The caller should send hub::unsubscribe
+    /// together with their `WebSub` `hub_secret`. The caller should send `hub::unsubscribe`
     /// for each of these so the hub stops pushing after the lease would otherwise expire.
     ///
     /// Not serialized to the JSON response — used internally by the caller.
@@ -17,9 +17,9 @@ pub struct SyncResult {
 
 /// Synchronize a user's channel list against a set of remote channel IDs.
 ///
-/// This is a pure diff function: it does NOT call any YouTube API.
+/// This is a pure diff function: it does NOT call any `YouTube` API.
 /// The caller provides `remote_ids` (channel IDs obtained from
-/// YouTube Subscriptions.list, typically fetched by the browser via GIS).
+/// `YouTube` Subscriptions.list, typically fetched by the browser via GIS).
 ///
 /// - Channels in `remote_ids` but not in local `user_channels` are inserted
 ///   (channels master row is upserted) and returned in `added`.
@@ -28,13 +28,13 @@ pub struct SyncResult {
 ///   are batch-deleted. Removed IDs are returned in `removed`.
 ///
 /// The `titles` slice, if provided, is used to populate `channels.title` for
-/// newly added channels. The browser fetches title/thumbnail from the YouTube
+/// newly added channels. The browser fetches title/thumbnail from the `YouTube`
 /// subscriptions response and passes them in the sync request body.
-pub async fn sync_subscriptions(
+pub fn sync_subscriptions<S: std::hash::BuildHasher>(
     state: &AppState,
     user_id: i64,
     remote_ids: &[String],
-    titles: &std::collections::HashMap<String, ChannelMeta>,
+    titles: &std::collections::HashMap<String, ChannelMeta, S>,
 ) -> Result<SyncResult, AppError> {
     // Deduplicate remote_ids up front so that duplicate entries in the caller's
     // list (which should not happen but can) do not inflate `added` counts or
@@ -49,16 +49,16 @@ pub async fn sync_subscriptions(
     let removed_orphan_secrets: Vec<(String, String)>;
 
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
 
         let local_ids = {
             let mut stmt = conn
                 .prepare("SELECT channel_id FROM user_channels WHERE user_id = ?1")
-                .map_err(|e| AppError::Internal(format!("Failed to prepare query: {}", e)))?;
+                .map_err(|e| AppError::Internal(format!("Failed to prepare query: {e}")))?;
             let ids = stmt
                 .query_map([user_id], |row| row.get(0))
-                .map_err(|e| AppError::Internal(format!("Failed to query user channels: {}", e)))?
-                .filter_map(|r| r.ok())
+                .map_err(|e| AppError::Internal(format!("Failed to query user channels: {e}")))?
+                .filter_map(std::result::Result::ok)
                 .collect::<std::collections::HashSet<String>>();
             ids
         };
@@ -78,7 +78,7 @@ pub async fn sync_subscriptions(
 
         removed_orphan_secrets = mark_orphaned_subscriptions_pending(&conn, user_id, &to_remove);
 
-        conn.execute_batch("BEGIN")?;
+        let tx = conn.unchecked_transaction()?;
 
         let result = (|| -> Result<(), rusqlite::Error> {
             // Iterate over the deduplicated remote_set (not the original slice)
@@ -88,8 +88,9 @@ pub async fn sync_subscriptions(
                     let upload_playlist_id = crate::youtube::derive_upload_playlist_id(channel_id);
                     let (title, thumbnail_url) = titles
                         .get(channel_id)
-                        .map(|m| (m.title.as_str(), m.thumbnail_url.as_deref()))
-                        .unwrap_or((channel_id.as_str(), None));
+                        .map_or((channel_id.as_str(), None), |m| {
+                            (m.title.as_str(), m.thumbnail_url.as_deref())
+                        });
                     conn.execute(
                         "INSERT OR IGNORE INTO channels (id, title, thumbnail_url, upload_playlist_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
                         rusqlite::params![channel_id, title, thumbnail_url, upload_playlist_id, now],
@@ -121,11 +122,8 @@ pub async fn sync_subscriptions(
         })();
 
         match result {
-            Ok(()) => conn.execute_batch("COMMIT")?,
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e.into());
-            }
+            Ok(()) => tx.commit()?,
+            Err(e) => return Err(e.into()),
         }
     }
 
@@ -144,7 +142,7 @@ pub async fn sync_subscriptions(
 }
 
 /// For each channel in `to_remove` that becomes orphaned (no other subscribers),
-/// collect its WebSub `hub_secret` and mark its subscription row
+/// collect its `WebSub` `hub_secret` and mark its subscription row
 /// `verification_status = 'pending_unsubscribe'`.
 ///
 /// This UPDATE MUST run BEFORE the channel (and, via CASCADE, its subscription
@@ -189,7 +187,7 @@ fn mark_orphaned_subscriptions_pending(
     removed_orphan_secrets
 }
 
-/// Metadata for a channel, supplied by the browser (from YouTube subscriptions response).
+/// Metadata for a channel, supplied by the browser (from `YouTube` subscriptions response).
 #[derive(Debug, Default)]
 pub struct ChannelMeta {
     pub title: String,
@@ -215,7 +213,7 @@ mod tests {
     fn setup() -> AppState {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -246,15 +244,13 @@ mod tests {
         let state = setup();
         let remote = vec!["UC_existing".to_string(), "UC_new".to_string()];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.added, vec!["UC_new"]);
         assert!(result.removed.is_empty());
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM user_channels WHERE user_id = 1",
                 [],
@@ -271,15 +267,13 @@ mod tests {
         // Remote no longer contains UC_existing
         let remote = vec!["UC_only_remote".to_string()];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.added, vec!["UC_only_remote"]);
         assert_eq!(result.removed, vec!["UC_existing"]);
 
         let ch_count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM channels WHERE id = 'UC_existing'",
                 [],
@@ -295,15 +289,13 @@ mod tests {
         let state = setup();
         let remote: Vec<String> = vec![];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert!(result.added.is_empty());
         assert_eq!(result.removed, vec!["UC_existing"]);
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))
                 .unwrap()
         };
@@ -315,9 +307,7 @@ mod tests {
         let state = setup();
         let remote = vec!["UC_existing".to_string()];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert!(result.added.is_empty());
         assert!(result.removed.is_empty());
@@ -327,7 +317,7 @@ mod tests {
     async fn remote_all_new_local_empty_all_added() {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -336,9 +326,7 @@ mod tests {
         }
         let remote = vec!["UC_a".to_string(), "UC_b".to_string(), "UC_c".to_string()];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.added.len(), 3);
         assert!(result.removed.is_empty());
@@ -357,9 +345,7 @@ mod tests {
             "UC_new".to_string(),
         ];
 
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         // UC_new must be added exactly once — duplicates in remote must not
         // inflate the added vector.
@@ -371,7 +357,7 @@ mod tests {
         assert!(result.removed.is_empty());
 
         let count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM user_channels WHERE user_id = 1",
                 [],
@@ -386,7 +372,7 @@ mod tests {
     async fn channel_shared_by_multiple_users_is_not_deleted_on_one_unsub() {
         let state = setup();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g2', 'user2@example.com')",
                 [],
@@ -402,14 +388,12 @@ mod tests {
 
         // User 1 unsubscribes (remote is empty for them)
         let remote: Vec<String> = vec![];
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.removed, vec!["UC_existing"]);
 
         let ch_count: i64 = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM channels WHERE id = 'UC_existing'",
                 [],
@@ -427,7 +411,7 @@ mod tests {
     async fn meta_title_and_thumbnail_are_used_for_new_channels() {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -445,10 +429,10 @@ mod tests {
         );
         let remote = vec!["UC_new".to_string()];
 
-        sync_subscriptions(&state, 1, &remote, &meta).await.unwrap();
+        sync_subscriptions(&state, 1, &remote, &meta).unwrap();
 
         let (title, thumb): (String, Option<String>) = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT title, thumbnail_url FROM channels WHERE id = 'UC_new'",
                 [],
@@ -464,7 +448,7 @@ mod tests {
     async fn upload_playlist_id_derived_from_channel_id_uu_prefix() {
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -473,12 +457,10 @@ mod tests {
         }
 
         let remote = vec!["UC_x5XG1OV2P6uZZ5FSM9Ttw".to_string()];
-        sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         let playlist_id: String = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT upload_playlist_id FROM channels WHERE id = 'UC_x5XG1OV2P6uZZ5FSM9Ttw'",
                 [],
@@ -492,7 +474,7 @@ mod tests {
     // --- WebSub unsubscribe candidate tests ---
 
     fn setup_with_subscription(state: &AppState, channel_id: &str, secret: &str) {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let now = "2024-01-01T00:00:00Z";
         conn.execute(
             "INSERT OR IGNORE INTO channels (id, title, created_at) VALUES (?1, ?2, ?3)",
@@ -520,7 +502,7 @@ mod tests {
         // (stopping pushes promptly rather than waiting for the lease to expire).
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -531,9 +513,7 @@ mod tests {
 
         // Remote is empty → UC_existing is removed, channel becomes orphaned.
         let remote: Vec<String> = vec![];
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.removed, vec!["UC_existing"]);
         assert_eq!(
@@ -553,7 +533,7 @@ mod tests {
         // the remaining subscriber).
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'user1@example.com')",
                 [],
@@ -568,7 +548,7 @@ mod tests {
         setup_with_subscription(&state, "UC_shared", "shared_secret");
         // User 2 also subscribes to UC_shared
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (2, 'UC_shared', '2024-01-01T00:00:00Z')",
                 [],
@@ -578,9 +558,7 @@ mod tests {
 
         // User 1 syncs with empty remote → removes UC_shared for user 1 only.
         let remote: Vec<String> = vec![];
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.removed, vec!["UC_shared"]);
         assert!(
@@ -595,7 +573,7 @@ mod tests {
         // In that case removed_orphan_secrets should remain empty for it — no crash.
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -615,9 +593,7 @@ mod tests {
         }
 
         let remote: Vec<String> = vec![];
-        let result = sync_subscriptions(&state, 1, &remote, &no_meta())
-            .await
-            .unwrap();
+        let result = sync_subscriptions(&state, 1, &remote, &no_meta()).unwrap();
 
         assert_eq!(result.removed, vec!["UC_no_sub"]);
         assert!(
@@ -635,7 +611,7 @@ mod tests {
         // CASCADE delete performed later by sync_subscriptions).
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'test@example.com')",
                 [],
@@ -645,7 +621,7 @@ mod tests {
         setup_with_subscription(&state, "UC_bye", "bye_secret");
 
         let secrets = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             super::mark_orphaned_subscriptions_pending(&conn, 1, &["UC_bye".to_string()])
         };
 
@@ -656,7 +632,7 @@ mod tests {
         );
 
         let status: String = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_bye'",
                 [],
@@ -677,7 +653,7 @@ mod tests {
         // subscriber).
         let state = AppState::test();
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO users (google_id, email) VALUES ('g1', 'user1@example.com')",
                 [],
@@ -691,7 +667,7 @@ mod tests {
         }
         setup_with_subscription(&state, "UC_shared", "shared_secret");
         {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO user_channels (user_id, channel_id, created_at) VALUES (2, 'UC_shared', '2024-01-01T00:00:00Z')",
                 [],
@@ -700,13 +676,13 @@ mod tests {
         }
 
         let secrets = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             super::mark_orphaned_subscriptions_pending(&conn, 1, &["UC_shared".to_string()])
         };
         assert!(secrets.is_empty(), "shared channel is not an orphan");
 
         let status: String = {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.query_row(
                 "SELECT verification_status FROM channel_subscriptions WHERE channel_id = 'UC_shared'",
                 [],

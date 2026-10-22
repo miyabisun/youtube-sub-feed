@@ -20,6 +20,7 @@ pub struct WarningCooldown {
 }
 
 impl WarningCooldown {
+    #[must_use]
     pub fn new(window_secs: u64) -> Self {
         Self {
             window: Duration::from_secs(window_secs),
@@ -31,7 +32,10 @@ impl WarningCooldown {
     /// `now`. Admitting records `now` as that reason's latest report.
     /// A monotonic clock keeps wall-clock corrections from changing the window.
     pub fn admit(&self, reason: &'static str, now: Instant) -> bool {
-        let mut last_sent = self.last_sent.lock().unwrap();
+        let mut last_sent = self
+            .last_sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match last_sent.get(reason) {
             Some(&sent_at) if now.saturating_duration_since(sent_at) < self.window => false,
             _ => {
@@ -54,16 +58,15 @@ pub async fn notify_warning(
     title: &str,
     description: &str,
 ) {
-    let webhook_url = match &config.discord_webhook_url {
-        Some(url) => url,
-        None => return,
+    let Some(webhook_url) = &config.discord_webhook_url else {
+        return;
     };
 
     let body = json!({
         "embeds": [{
             "title": title,
             "description": description,
-            "color": 0xffa000,
+            "color": 0x00ff_a000,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         }]
     });
@@ -116,7 +119,7 @@ mod tests {
 
         assert!(cooldown.admit("HMAC mismatch", now));
         assert!(
-            cooldown.admit("HMAC mismatch", now + Duration::from_secs(3600)),
+            cooldown.admit("HMAC mismatch", now + Duration::from_hours(1)),
             "the window is exclusive at its far end"
         );
         assert!(

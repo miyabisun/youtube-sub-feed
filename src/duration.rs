@@ -1,13 +1,13 @@
 use regex_lite::Regex;
 use std::sync::LazyLock;
 
-static ISO_DURATION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?").unwrap());
+static ISO_DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?").expect("literal regex is valid")
+});
 
 pub fn parse_iso_duration(iso: &str) -> u64 {
-    let caps = match ISO_DURATION_RE.captures(iso) {
-        Some(c) => c,
-        None => return 0,
+    let Some(caps) = ISO_DURATION_RE.captures(iso) else {
+        return 0;
     };
     let hours: u64 = caps.get(1).map_or(0, |m| m.as_str().parse().unwrap_or(0));
     let minutes: u64 = caps.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
@@ -15,6 +15,7 @@ pub fn parse_iso_duration(iso: &str) -> u64 {
     hours * 3600 + minutes * 60 + seconds
 }
 
+#[must_use]
 pub fn is_short_duration(iso: &str) -> bool {
     let seconds = parse_iso_duration(iso);
     seconds > 0 && seconds <= 180

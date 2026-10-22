@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::middleware::UserId;
-use crate::openapi::*;
+use crate::openapi::{ErrorResponse, GroupItem, OkResponse};
 use crate::state::AppState;
 use axum::extract::{Extension, Path, State};
 use axum::routing::{get, patch, put};
@@ -20,7 +20,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Validate a group name from a request body: required (non-empty) and at most
-/// 50 characters. Shared by create_group and update_group.
+/// 50 characters. Shared by `create_group` and `update_group`.
 fn validate_group_name(name: Option<String>) -> Result<String, AppError> {
     let name = name
         .filter(|n| !n.is_empty())
@@ -50,7 +50,7 @@ async fn get_groups(
     Extension(user_id): Extension<UserId>,
 ) -> Result<Json<Value>, AppError> {
     let rows = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt =
             conn.prepare("SELECT id, name, sort_order, created_at FROM groups WHERE user_id = ?1 ORDER BY sort_order ASC, id ASC")?;
         let rows = stmt
@@ -95,7 +95,7 @@ async fn create_group(
 
     let uid = user_id.0;
     let row = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let max_order: i64 = conn.query_row(
             "SELECT COALESCE(MAX(sort_order), -1) FROM groups WHERE user_id = ?1",
             [uid],
@@ -148,7 +148,7 @@ async fn update_group(
     let name = validate_group_name(body.name)?;
 
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "UPDATE groups SET name = ?1 WHERE id = ?2 AND user_id = ?3",
             rusqlite::params![name, id, user_id.0],
@@ -159,7 +159,7 @@ async fn update_group(
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct ReorderBody {
-    /// グループIDの配列 (インデックス順に sort_order を割り当て)
+    /// グループIDの配列 (インデックス順に `sort_order` を割り当て)
     order: Vec<i64>,
 }
 
@@ -180,18 +180,15 @@ async fn reorder_groups(
     Json(body): Json<ReorderBody>,
 ) -> Result<Json<Value>, AppError> {
     {
-        let conn = state.db.lock().unwrap();
-        conn.execute_batch("BEGIN")?;
-        for (i, id) in body.order.iter().enumerate() {
-            if let Err(e) = conn.execute(
+        let conn = state.conn();
+        let tx = conn.unchecked_transaction()?;
+        for (i, id) in (0_i64..).zip(&body.order) {
+            tx.execute(
                 "UPDATE groups SET sort_order = ?1 WHERE id = ?2 AND user_id = ?3",
-                rusqlite::params![i as i64, id, user_id.0],
-            ) {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e.into());
-            }
+                rusqlite::params![i, id, user_id.0],
+            )?;
         }
-        conn.execute_batch("COMMIT")?;
+        tx.commit()?;
     }
     Ok(Json(json!({"ok": true})))
 }
@@ -213,7 +210,7 @@ async fn delete_group(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         conn.execute(
             "DELETE FROM groups WHERE id = ?1 AND user_id = ?2",
             rusqlite::params![id, user_id.0],
@@ -239,7 +236,7 @@ async fn get_group_channels(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let channel_ids = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
         let mut stmt =
             conn.prepare("SELECT cg.channel_id FROM channel_groups cg JOIN groups g ON cg.group_id = g.id WHERE cg.group_id = ?1 AND g.user_id = ?2")?;
         let ids = stmt
@@ -279,7 +276,7 @@ async fn set_group_channels(
     Json(body): Json<SetChannelsBody>,
 ) -> Result<Json<Value>, AppError> {
     {
-        let conn = state.db.lock().unwrap();
+        let conn = state.conn();
 
         // Verify group belongs to user
         let owns: bool = conn
@@ -288,28 +285,21 @@ async fn set_group_channels(
                 rusqlite::params![id, user_id.0],
                 |row| row.get::<_, i64>(0),
             )
-            .map(|c| c > 0)
-            .unwrap_or(false);
+            .is_ok_and(|c| c > 0);
 
         if !owns {
             return Err(AppError::NotFound("Group not found".to_string()));
         }
 
-        conn.execute_batch("BEGIN")?;
-        if let Err(e) = (|| -> Result<(), rusqlite::Error> {
-            conn.execute("DELETE FROM channel_groups WHERE group_id = ?1", [id])?;
-            for channel_id in &body.channel_ids {
-                conn.execute(
-                    "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
-                    rusqlite::params![channel_id, id],
-                )?;
-            }
-            Ok(())
-        })() {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(e.into());
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM channel_groups WHERE group_id = ?1", [id])?;
+        for channel_id in &body.channel_ids {
+            tx.execute(
+                "INSERT INTO channel_groups (channel_id, group_id) VALUES (?1, ?2)",
+                rusqlite::params![channel_id, id],
+            )?;
         }
-        conn.execute_batch("COMMIT")?;
+        tx.commit()?;
     }
     Ok(Json(json!({"ok": true})))
 }
@@ -465,11 +455,11 @@ mod tests {
         conn.execute("DELETE FROM groups WHERE id = ?1", params![group_id])
             .unwrap();
 
-        let cg_count: i64 = conn
+        let group_link_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM channel_groups", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            cg_count, 0,
+            group_link_count, 0,
             "channel_groups should be empty after group delete"
         );
 
@@ -480,7 +470,7 @@ mod tests {
     }
 
     /// Integration tests that drive the real group handlers over HTTP (oneshot)
-    /// through auth_middleware. The acting user is the dev-bypass first DB user
+    /// through `auth_middleware`. The acting user is the dev-bypass first DB user
     /// (user 1). A second user (user 2) owns the "foreign" resources used to
     /// prove per-user isolation / IDOR protection.
     mod handler {
@@ -495,7 +485,7 @@ mod tests {
         fn setup_state() -> AppState {
             let state = AppState::test();
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute(
                     "INSERT INTO users (google_id, email) VALUES ('g1', 'user1@example.com')",
                     [],
@@ -512,7 +502,7 @@ mod tests {
 
         /// Insert a group owned by `user_id` and return its id.
         fn insert_group_for(state: &AppState, user_id: i64, name: &str, sort_order: i64) -> i64 {
-            let conn = state.db.lock().unwrap();
+            let conn = state.conn();
             conn.execute(
                 "INSERT INTO groups (user_id, name, sort_order, created_at) VALUES (?1, ?2, ?3, '2024-01-01T00:00:00Z')",
                 rusqlite::params![user_id, name, sort_order],
@@ -567,7 +557,7 @@ mod tests {
             }
 
             let orders: Vec<i64> = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let mut stmt = conn
                     .prepare(
                         "SELECT sort_order FROM groups WHERE user_id = 1 ORDER BY sort_order ASC",
@@ -606,7 +596,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             let name: String = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row("SELECT name FROM groups WHERE id = ?1", [foreign], |row| {
                     row.get(0)
                 })
@@ -627,7 +617,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             let count: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT COUNT(*) FROM groups WHERE id = ?1",
                     [foreign],
@@ -654,7 +644,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             let sort_order: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT sort_order FROM groups WHERE id = ?1",
                     [foreign],
@@ -685,7 +675,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             let orders: Vec<(i64, i64)> = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let mut stmt = conn
                     .prepare("SELECT id, sort_order FROM groups WHERE user_id = 1")
                     .unwrap();
@@ -703,7 +693,7 @@ mod tests {
             let state = setup_state();
             let group_id = insert_group_for(&state, 1, "G1", 0);
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 for cid in ["UC1", "UC2"] {
                     conn.execute(
                         "INSERT INTO channels (id, title, created_at) VALUES (?1, ?1, '2024-01-01T00:00:00Z')",
@@ -734,7 +724,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             let ids: Vec<String> = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 let mut stmt = conn
                     .prepare("SELECT channel_id FROM channel_groups WHERE group_id = ?1")
                     .unwrap();
@@ -747,13 +737,53 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn set_group_channels_failure_keeps_previous_assignments_and_next_request_works() {
+            let state = setup_state();
+            let group_id = insert_group_for(&state, 1, "G1", 0);
+            {
+                let conn = state.conn();
+                conn.execute(
+                    "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'UC1', '2024-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO channel_groups (channel_id, group_id) VALUES ('UC1', ?1)",
+                    [group_id],
+                )
+                .unwrap();
+            }
+            let uri = format!("/api/groups/{group_id}/channels");
+
+            // The unknown channel violates the foreign key after UC1 was deleted.
+            let resp = send(&state, "PUT", &uri, r#"{"channelIds":["UNKNOWN"]}"#).await;
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let kept: i64 = state
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM channel_groups WHERE channel_id = 'UC1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, 1, "the failed replace should roll back the delete");
+
+            let resp = send(&state, "PUT", &uri, r#"{"channelIds":[]}"#).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "no transaction should be left open"
+            );
+        }
+
+        #[tokio::test]
         async fn set_group_channels_rejects_foreign_group_with_404() {
             // IDOR guard: user 1 must not be able to assign channels to a group
             // owned by user 2. The handler checks ownership and returns NotFound.
             let state = setup_state();
             let foreign = insert_group_for(&state, 2, "User2 Group", 0);
             {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.execute(
                     "INSERT INTO channels (id, title, created_at) VALUES ('UC1', 'C', '2024-01-01T00:00:00Z')",
                     [],
@@ -776,7 +806,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
             let count: i64 = {
-                let conn = state.db.lock().unwrap();
+                let conn = state.conn();
                 conn.query_row(
                     "SELECT COUNT(*) FROM channel_groups WHERE group_id = ?1",
                     [foreign],
