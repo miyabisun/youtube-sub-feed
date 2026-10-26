@@ -14,6 +14,13 @@
          trade-off of using Google's hosted GIS SDK. -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Cloudflare Access guards the site, and a manifest fetch omits cookies unless asked. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <!-- Installed app on Android Chrome: the system buttons sit over the window background,
+         fixed at install from the manifest background_color, and take their contrast from
+         theme-color. Keep both on Sumi (--c-bg, dark) whatever the OS theme. This must
+         precede the page-mirroring meta that lib/theme-color.js appends, so it wins there. -->
+    <meta name="theme-color" media="(display-mode: standalone)" content="#191919" />
   </head>
   <body>
     <div id="app"></div>

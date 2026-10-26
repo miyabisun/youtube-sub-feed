@@ -226,6 +226,28 @@ mod tests {
                 "GET /favicon.svg must not contain __GIS_CLIENT_ID__ injection"
             );
         }
+
+        #[tokio::test]
+        async fn web_app_manifest_is_served_as_json() {
+            require_built_asset("client/build/manifest.webmanifest");
+            let resp = get_response("/manifest.webmanifest").await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let content_type = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            assert!(
+                content_type.contains("manifest+json"),
+                "GET /manifest.webmanifest must have a manifest content-type, got: {content_type}"
+            );
+            let body = body_string(resp).await;
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+                "GET /manifest.webmanifest must be JSON, not the SPA index"
+            );
+        }
     }
 
     // API Endpoints Spec
