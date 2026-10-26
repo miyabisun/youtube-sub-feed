@@ -12,8 +12,8 @@ pub mod sync;
 pub(crate) mod util;
 pub mod websub;
 pub(crate) mod youtube;
-// NOTE: auth.rs (OAuth URL generation) has been removed — authentication is delegated to
-//       Cloudflare Access (Cf-Access-Authenticated-User-Email header).
+// NOTE: auth.rs (OAuth URL generation) has been removed — users are identified by the
+//       Tailscale Serve identity header (Tailscale-User-Login).
 // NOTE: sync::token (server-side token refresh) has been removed — browser-side GIS only.
 // NOTE: session module has been removed — no server-side session cookies needed.
 // NOTE: sync::video_fetcher has been removed — new videos arrive via WebSub push only.

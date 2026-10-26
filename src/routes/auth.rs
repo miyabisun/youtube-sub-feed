@@ -1,13 +1,13 @@
 // OAuth routes removed (login, callback, logout).
 //
-// Authentication is now delegated to Cloudflare Access.
+// Access is limited to the tailnet, and Tailscale Serve identifies the user.
 // The /api/auth/me endpoint is kept so the frontend can detect whether it is
-// running behind Cloudflare Access and obtain the current user's email.
+// reached through Serve and obtain the current user's email.
 //
 // The frontend checks /api/auth/me on load; if 401 is returned it means
 // - dev: DB is empty (no user yet) → show empty state
-// - prod: Cloudflare Access rejected the request (shouldn't happen if Access
-//   is correctly configured to gate the application)
+// - prod: the request carried no Tailscale-User-Login header (a tagged device,
+//   or a path that bypasses Serve)
 
 use crate::error::AppError;
 use crate::middleware::UserId;

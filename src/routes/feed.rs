@@ -374,7 +374,7 @@ mod tests {
     // All tests drive the real `get_feed` / `hide_video` / `unhide_video`
     // handlers over HTTP (oneshot). Requests pass through `auth_middleware`,
     // so the acting user comes from the dev-bypass (first DB user = user 1)
-    // unless a `Cf-Access-Authenticated-User-Email` header selects another.
+    // unless a `Tailscale-User-Login` header selects another.
 
     use super::routes;
     use crate::middleware::auth_middleware;
@@ -456,11 +456,11 @@ mod tests {
         feed_ids_as(state, query, None).await
     }
 
-    /// GET /api/feed as a specific user, identified via the Cf-Access header.
+    /// GET /api/feed as a specific user, identified via the login header.
     async fn feed_ids_as(state: &AppState, query: &str, email: Option<&str>) -> Vec<String> {
         let mut builder = Request::builder().uri(format!("/api/feed{query}"));
         if let Some(email) = email {
-            builder = builder.header("Cf-Access-Authenticated-User-Email", email);
+            builder = builder.header("Tailscale-User-Login", email);
         }
         let resp = app(state)
             .oneshot(builder.body(axum::body::Body::empty()).unwrap())
@@ -483,7 +483,7 @@ mod tests {
     ) -> serde_json::Value {
         let mut builder = Request::builder().uri(format!("/api/history{query}"));
         if let Some(email) = email {
-            builder = builder.header("Cf-Access-Authenticated-User-Email", email);
+            builder = builder.header("Tailscale-User-Login", email);
         }
         let resp = app(state)
             .oneshot(builder.body(axum::body::Body::empty()).unwrap())
@@ -580,7 +580,7 @@ mod tests {
                 Request::builder()
                     .method("PATCH")
                     .uri(format!("/api/posts/{id}/{action}"))
-                    .header("Cf-Access-Authenticated-User-Email", email)
+                    .header("Tailscale-User-Login", email)
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -1098,7 +1098,7 @@ mod tests {
 
         // User 1: hidden.
         assert!(feed_ids(&state, "").await.is_empty());
-        // User 2 (via Cf-Access header): still visible.
+        // User 2 (via the login header): still visible.
         assert_eq!(
             feed_ids_as(&state, "", Some("user2@example.com")).await,
             vec!["v1"]

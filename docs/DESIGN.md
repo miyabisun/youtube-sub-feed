@@ -223,8 +223,8 @@ Domain components on top of the Sumi recipes:
 - **Toast:** fixed bottom-center pill, non-interactive. Success confirms
   briefly and gets out of the way (~0.5s); errors persist longer (~3s) and
   use the danger role (danger-subtle background, danger text/border).
-- **Login:** a single centered card explaining the Cloudflare Access
-  requirement. No form — authentication happens outside the app.
+- **Login:** a single centered card explaining that the app is opened from
+  the tailnet. No form — identification happens outside the app.
 
 ## Do's and Don'ts
 

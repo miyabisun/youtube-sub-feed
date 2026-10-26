@@ -1,28 +1,27 @@
 # デプロイ手順
 
-## 前提: Cloudflare Access の設定
+## 前提: Tailscale Serve の設定
 
-[Cloudflareの公開アプリ設定](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/)に従い、
-自分のドメインからアプリへTunnelで転送し、許可するメールアドレスをAccessのポリシーへ指定します。
+このアプリは tailnet の中から使い、本人の識別に **Tailscale Serve** を使います。
+Serve は tailnet の利用者の端末からの要求に `Tailscale-User-Login` ヘッダー (ログイン名) を付け、
+クライアントが送った同名のヘッダーを取り除きます。このヘッダーをサーバーが読み取り、ユーザーを特定します。
+詳細は [Tailscale Serve](https://tailscale.com/kb/1312/serve) の identity headers を参照してください。
+tag 付きの端末からの要求にはヘッダーが付かないので、本番では 401 になります。
 
-このアプリは認証に **Cloudflare Access** を使用します。
-Cloudflare Zero Trust でアプリケーションを作成し、アクセスポリシーを設定してください。
-Cloudflare Access は認証済みリクエストに `Cf-Access-Authenticated-User-Email` ヘッダーを付与します。
-このヘッダーをサーバーが読み取り、ユーザーを特定します。
-
-> **セキュリティ重要**: アプリの **3000 番ポートを外部から直接到達可能な状態にしないこと**。
-> 必ず Cloudflare Tunnel / Cloudflare Access 経由でのみアクセスできるように設定してください。
-> `Cf-Access-Authenticated-User-Email` ヘッダーはアプリ側で無検証で信頼するため、
-> ポートが直接公開されるとヘッダー偽装で任意ユーザーになりすませます。
+> **セキュリティ重要**: アプリの **3000 番ポートへ Serve を経ずに届く経路を作らないこと**。
+> 例えば Tailscale の sidecar コンテナの network namespace でアプリを動かし、ホストへポートを publish しません。
+> `Tailscale-User-Login` ヘッダーはアプリ側で無検証で信頼するため、
+> Serve を経ない経路があるとヘッダー偽装で任意ユーザーになりすませます。
 
 ## WebSub callback
 
-`/api/websub/callback`の正確なパスだけに、AccessのBypassポリシーを設定します。
-Google Hubは対話ログインできないため、このパスのGETによる購読確認とPOST通知を通す必要があります。
+`/api/websub/callback`の正確なパスだけを、公開インターネットから HTTPS で受けられるようにします
+(例: Cloudflare Tunnel の ingress をこのパスだけに絞る)。
+Google Hubはtailnetに入れないため、このパスのGETによる購読確認とPOST通知を外から通す必要があります。
 アプリは保存した購読secretでPOSTの署名を検証します。
-画面や他のAPIまで認証を除外せず、callbackの公開とoriginポートの公開を区別してください。
-詳細は[Accessのパス設定](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)と
-[YouTubeのpush通知](https://developers.google.com/youtube/v3/guides/push_notifications)を参照してください。
+公開の経路は送り手が付けたヘッダーをそのまま渡すので、画面や他のAPIへは通さないでください。
+callbackの公開とoriginポートの公開を区別してください。
+詳細は[YouTubeのpush通知](https://developers.google.com/youtube/v3/guides/push_notifications)を参照してください。
 
 ## Docker ビルド
 
@@ -205,13 +204,13 @@ Google Cloud Consoleで同じprojectの日次使用量と残quotaも確認して
 アプリのログやUTC日次予算だけでは、ブラウザや他アプリも含むproject全体の利用量は分かりません。
 ログはコンテナ再作成で失われます。APIキーやURL、環境変数全体を診断出力に含めないでください。
 
-認証済みブラウザからフィードを開き、取り込んだ動画が表示されることを確認します。
-内部経路のAPI応答だけではCloudflare経由の利用確認になりません。
+tailnet の端末のブラウザからフィードを開き、取り込んだ動画が表示されることを確認します。
+内部経路のAPI応答だけでは Serve 経由の利用確認になりません。
 Hubの全購読成功だけに依存せず、API巡回・取り込み・通常のフィード・API予算を照合します。
 
 ## 初回セットアップ
 
-1. コンテナ起動後、Cloudflare Access 経由で最初にアクセスしたユーザーが **マスターユーザー** として自動登録されます。
+1. コンテナ起動後、Tailscale Serve 経由で最初にアクセスしたユーザーが **マスターユーザー** として自動登録されます。
 2. ヘッダーメニューの「チャンネル同期 (YouTube)」でGoogleアカウントを認可し、購読一覧を取り込みます。
    手動追加は「チャンネル」でUCから始まるチャンネルIDを入力します。
 3. チャンネルを追加すると WebSub サブスクリプションが自動的に登録され、新着動画がプッシュ通知されます。
@@ -225,11 +224,11 @@ listenerは`0.0.0.0`なので、開発モードを公開ネットワークへ露
 
 ```bash
 curl --fail http://localhost:3000/api/auth/me \
-  -H 'Cf-Access-Authenticated-User-Email: dev@example.com'
+  -H 'Tailscale-User-Login: dev@example.com'
 ```
 
 ブラウザで`http://localhost:3000`を開くと、このDBの最初のユーザーを使います。
-これは自分の隔離環境での初期化です。本番はヘッダーを手動で作らず、Accessによる認証を使ってください。
+これは自分の隔離環境での初期化です。本番はヘッダーを手動で作らず、Serve による識別を使ってください。
 
 ## Discord通知
 

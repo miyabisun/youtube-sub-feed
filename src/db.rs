@@ -223,8 +223,8 @@ fn drop_users_oauth_token_columns(conn: &Connection) {
 
 /// One-shot migration: add a UNIQUE index on users.email (replacing the old
 /// `idx_users_google_id` index). Email is now the primary user identifier since
-/// Cloudflare Access provides it via the `Cf-Access-Authenticated-User-Email`
-/// header. Idempotent: a no-op if the index already exists.
+/// the identity header (`Tailscale-User-Login`) carries it. Idempotent: a no-op
+/// if the index already exists.
 fn add_users_email_unique_index(conn: &Connection) {
     // Drop the old google_id unique index if it exists (it would conflict with
     // nullable google_id values from newly created users).
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn google_id_is_nullable_in_new_schema() {
-        // google_id is nullable since Cloudflare Access identifies by email.
+        // google_id is nullable since users are identified by email.
         let conn = open_memory();
         let result = conn.execute(
             "INSERT INTO users (email) VALUES ('no_google@example.com')",

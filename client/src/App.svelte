@@ -23,9 +23,9 @@
     checking = false
 
     // /api/auth/me returns 401 when:
-    // - Production: Cloudflare Access did not authenticate (shouldn't happen if CF Access is configured)
+    // - Production: no Tailscale-User-Login header (not opened through Tailscale Serve)
     // - Development: DB is empty (no users yet)
-    // In both cases, show the login page which explains the CF Access requirement.
+    // In both cases, show the login page which explains how to open the app.
     if (!authenticated && router.index !== 4) {
       navigate('/login')
     }

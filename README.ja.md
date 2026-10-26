@@ -7,9 +7,11 @@ YouTubeの登録チャンネルの動画を、公開日時順に閲覧するWeb�
 
 ## Dockerで起動する
 
-Linux amd64で動くDocker、公開ドメイン、ログイン用のCloudflare Accessが必要です。
-アプリはAccessから届くメールアドレスのヘッダーを信頼し、その正当性を自分では検証しません。
-サーバーのポートへ直接到達できないようにし、利用者をAccess経由で接続させてください。
+Linux amd64で動くDockerと、[Tailscale](https://tailscale.com/)のtailnetが必要です。
+利用者は[Tailscale Serve](https://tailscale.com/kb/1312/serve)を通して開きます。Serveはtailnetの利用者の端末からの要求に`Tailscale-User-Login`ヘッダーを付け、クライアントが送った同名のヘッダーを取り除きます。
+アプリはこのヘッダーを信頼し、その正当性を自分では検証しません。
+サーバーのポートへServeを経ずに到達できないようにしてください。
+公開インターネットから届く必要があるのはWebSubのcallbackだけです。
 [デプロイ手順](docs/deploy.md)に従い、この経路とアクセスポリシーを設定します。
 
 次の内容で`.env`を作り、公開URLを自分のドメインへ置き換えます。
@@ -31,12 +33,11 @@ docker run -d \
   ghcr.io/miyabisun/youtube-sub-feed:latest
 ```
 
-この例は同じホスト上のTunnel接続プログラムから`http://localhost:3000`へ転送します。
-接続プログラムもコンテナで動かす場合は、非公開のDockerネットワークで接続してください。
-WebSubのcallbackだけはAccessログインなしでGET/POSTを受け付ける必要があります。
-他の画面・APIは保護を維持します。[callback設定](docs/deploy.md#websub-callback)を参照してください。
+このホストで`tailscale serve --bg 3000`を実行し、tailnetへ公開します。
+Tailscaleもコンテナで動かす場合は、アプリをそのコンテナのnetwork namespaceに入れ、ホストへポートをpublishしないでください。
+公開インターネットからのGET/POSTはWebSubのcallbackの正確なパスだけへ通します。[callback設定](docs/deploy.md#websub-callback)を参照してください。
 
-公開URLを開きます。Accessが許可したメールアドレスでログインしてください。
+tailnetにログインした端末から、ServeのURL（`https://<host>.<tailnet>.ts.net`）を開きます。
 最初の認証済みユーザーがマスターユーザーになります。空のDBに既定のアカウントはありません。
 配布イメージでも`NODE_ENV=production`の明示が必要です。
 
@@ -111,7 +112,7 @@ NODE_ENV=production ./target/release/youtube-sub-feed
 ```
 
 起動前に`.env`を編集します。DBの既定パスは`./feed.db`です。
-本番ではDockerと同じAccess設定を使います。
+本番ではDockerと同じTailscale Serveの設定を使います。
 ローカル開発用の`./bin/dev`は画面をビルド・監視し、Rustサーバーを起動します。
 開発モードはDB内の最初のユーザーを使うため、空のDBでは自動ログインできません。
 初期設定と隔離方法は[ローカル開発](docs/deploy.md#ローカル開発)を参照してください。

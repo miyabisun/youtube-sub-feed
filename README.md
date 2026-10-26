@@ -8,10 +8,11 @@ Organize videos into groups, hide watched items, and filter Shorts or livestream
 
 ## Run with Docker
 
-You need Docker on a Linux amd64 host, a domain, and Cloudflare Access for sign-in.
-The app trusts the email header supplied by Access; it does not verify that header itself.
-Keep the origin port private and route users through Access.
-Use [Cloudflare’s guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/) to configure the hostname and Access policy.
+You need Docker on a Linux amd64 host and a [Tailscale](https://tailscale.com/) tailnet.
+Users open the app through [Tailscale Serve](https://tailscale.com/kb/1312/serve), which adds the `Tailscale-User-Login` header for a tailnet user's device and strips it from client requests.
+The app trusts that header; it does not verify it itself.
+Keep the origin port private so every request goes through Serve.
+The WebSub callback is the only path that must be reachable from the public internet.
 App-specific setup is in the [deployment guide (Japanese)](docs/deploy.md).
 
 Create a `.env` file. Replace the example origin with your domain:
@@ -33,11 +34,11 @@ docker run -d \
   ghcr.io/miyabisun/youtube-sub-feed:latest
 ```
 
-Run the tunnel connector on this host, forwarding to `http://localhost:3000`. For a containerized connector, use a private Docker network.
-Allow public GET/POST requests to the exact WebSub callback path, without Access login.
-Keep the rest of the app protected; see [callback setup](docs/deploy.md#websub-callback).
+Expose it on the tailnet with `tailscale serve --bg 3000` on this host.
+To run Tailscale in a container instead, put the app in that container's network namespace and publish no host port.
+Route public GET/POST requests to the exact WebSub callback path only; see [callback setup](docs/deploy.md#websub-callback).
 
-Open your public URL and sign in with an email allowed by your Access policy.
+Open the Serve URL (`https://<host>.<tailnet>.ts.net`) from a device signed in to your tailnet.
 The first authenticated user becomes the master user. An empty database has no default account.
 Setting `NODE_ENV=production` is required even with a release image.
 
@@ -119,7 +120,7 @@ NODE_ENV=production ./target/release/youtube-sub-feed
 ```
 
 Edit `.env` before starting; the default database path is `./feed.db`.
-Production uses the same Access setup as Docker. For local development, `./bin/dev` watches the frontend and starts the Rust server.
+Production uses the same Tailscale Serve setup as Docker. For local development, `./bin/dev` watches the frontend and starts the Rust server.
 Development mode reuses the first existing DB user; it does not create one automatically.
 See [local development](docs/deploy.md#ローカル開発) for initial setup and isolation.
 After building the frontend, check the backend with `cargo fmt --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings` and `cargo test --locked`.
@@ -141,7 +142,7 @@ A release build does not automatically set `NODE_ENV=production`.
 | `YOUTUBE_API_KEY` | For video enrichment and catch-up scans | Disabled | YouTube Data API key. Surrounding whitespace is removed; empty disables those features. Other values are not validated at startup; invalid keys fail at the API. WebSub push can still work without a key. |
 | `YOUTUBE_API_DAILY_BUDGET` | No | No local cap | This server's request budget in a persistent UTC-day window, not the Google project's quota. Empty disables the cap; 0 stops API requests; an invalid nonnegative integer fails startup. Allocate against the actual project quota and other uses; see [quota operation](docs/deploy.md#実project予算との照合と休止). |
 | `CATCHUP_INTERVAL_MINUTES` | For periodic catch-up checks | Disabled | Positive integer minutes between `videoCount` checks. Whitespace is trimmed; empty, zero, negative, unparseable, or values exceeding `u64::MAX / 60` disable periodic checks. Requires `YOUTUBE_API_KEY`; startup/manual each run one bounded pass when periodic checks are disabled. Enable periodic checks to drain the remaining work. |
-| `NODE_ENV` | Set `production` for production user handling | Development mode | Exactly `production` disables the first-DB-user fallback for requests without the Access email header and keeps cached SPA HTML. Every other value, including empty or misspelled values, enables development behavior. This does not configure Cloudflare Access itself. |
+| `NODE_ENV` | Set `production` for production user handling | Development mode | Exactly `production` disables the first-DB-user fallback for requests without the `Tailscale-User-Login` header and keeps cached SPA HTML. Every other value, including empty or misspelled values, enables development behavior. This does not configure Tailscale Serve itself. |
 | `RUST_LOG` | No | `info` | Log level or target filter, e.g. `debug` or `youtube_sub_feed=debug`. Empty selects `error`. Invalid filter syntax prints a warning to stderr and disables logs. `LOG_LEVEL` is not read. |
 
 Without `PUBLIC_BASE_URL`, feed links take the protocol from `X-Forwarded-Proto`.

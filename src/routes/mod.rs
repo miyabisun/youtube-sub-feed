@@ -24,7 +24,7 @@ use utoipa_swagger_ui::SwaggerUi;
     info(
         title = "YouTube Sub Feed API",
         version = "0.2.0",
-        description = "YouTubeの登録チャンネルの最新動画を公開日時の降順で一覧表示するWebアプリのAPI。\n\n## 認証\n\nCloudflare Access による認証。`Cf-Access-Authenticated-User-Email` ヘッダでユーザー識別。\nローカル開発では最初の DB ユーザーが自動的に使用される。\n\n## データベース\n\n| テーブル | 説明 |\n|---|---|\n| channels | 登録チャンネル |\n| videos | 動画 (FK: channels, CASCADE DELETE) |\n| groups | チャンネルグループ |\n| channel_groups | チャンネル×グループ (多対多) |\n| users | ユーザー (email 識別) |\n| channel_subscriptions | WebSub 購読情報 |",
+        description = "YouTubeの登録チャンネルの最新動画を公開日時の降順で一覧表示するWebアプリのAPI。\n\n## 認証\n\ntailnet 内からだけ接続する。Tailscale Serve が付ける `Tailscale-User-Login` ヘッダでユーザー識別。\nローカル開発では最初の DB ユーザーが自動的に使用される。\n\n## データベース\n\n| テーブル | 説明 |\n|---|---|\n| channels | 登録チャンネル |\n| videos | 動画 (FK: channels, CASCADE DELETE) |\n| groups | チャンネルグループ |\n| channel_groups | チャンネル×グループ (多対多) |\n| users | ユーザー (email 識別) |\n| channel_subscriptions | WebSub 購読情報 |",
     ),
     paths(
         auth::me,
@@ -75,7 +75,7 @@ use utoipa_swagger_ui::SwaggerUi;
         groups::SetChannelsBody,
     )),
     tags(
-        (name = "認証", description = "Cloudflare Access 認証・ユーザー識別"),
+        (name = "認証", description = "Tailscale Serve のヘッダーによるユーザー識別"),
         (name = "動画フィード", description = "動画一覧の取得・非表示/復元"),
         (name = "チャンネル", description = "登録チャンネルの管理・手動追加・同期"),
         (name = "グループ", description = "チャンネルグループの管理・並び替え・割り当て"),
@@ -93,7 +93,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(rss::routes())
         .merge(websub::routes());
 
-    // auth::me is protected (requires Cf-Access header / dev bypass)
+    // auth::me is protected (requires the Tailscale-User-Login header / dev bypass)
     let protected = Router::new()
         .merge(auth::routes())
         .merge(feed::routes())
@@ -257,7 +257,7 @@ mod tests {
 
     // API Endpoints Spec
     //
-    // Auth is Cloudflare Access (Cf-Access-Authenticated-User-Email header).
+    // Auth is the Tailscale Serve identity header (Tailscale-User-Login).
     // /api/health, /api/rss, /api/websub/callback are public; every other /api/*
     // route sits behind auth_middleware. These tests drive the *real* Router from
     // build_router (via oneshot), so the routing/auth wiring is what's verified —
@@ -268,7 +268,7 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        /// Router configured as production (Cloudflare Access enforced) with an
+        /// Router configured as production (login header required) with an
         /// empty users table, so protected routes have no dev-bypass fallback.
         fn production_router() -> axum::Router {
             let mut state = AppState::test();
@@ -292,7 +292,7 @@ mod tests {
 
         #[tokio::test]
         async fn protected_routes_reject_unauthenticated_requests_with_401() {
-            // Without a Cf-Access header in production, auth_middleware must reject
+            // Without the login header in production, auth_middleware must reject
             // every protected route before the handler runs.
             let protected: &[(&str, &str)] = &[
                 ("GET", "/api/auth/me"),

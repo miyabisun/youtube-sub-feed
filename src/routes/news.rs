@@ -104,7 +104,7 @@ mod tests {
     // - Respects user's livestream filter
     // - Sorted by published_at DESC, limited to 50
     // - Protected route: user comes from auth middleware's UserId extension
-    //   (news-server injects Cf-Access-Authenticated-User-Email itself).
+    //   (news-server injects Tailscale-User-Login itself).
     //
     // These tests drive the real `get_news` handler over HTTP (oneshot) with an
     // injected UserId extension, so the handler's shared query is under test.

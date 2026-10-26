@@ -11,15 +11,16 @@ pub struct UserId(pub i64);
 /// Authentication middleware.
 ///
 /// Production (`is_production=true)`:
-///   Reads the `Cf-Access-Authenticated-User-Email` header injected by Cloudflare
-///   Access. If the header is absent the request is rejected (Access should have
-///   blocked it already, but defence in depth).
+///   Reads the `Tailscale-User-Login` header that Tailscale Serve adds for requests
+///   from a tailnet user's device (and strips when a client sends it). If the
+///   header is absent the request is rejected (a tagged device, or a path that
+///   bypasses Serve).
 ///   - First user to appear (users table empty) is registered with role='master'
 ///     and a fresh `rss_token`.
 ///   - Subsequent unregistered emails are rejected with 403.
 ///
 /// Development (`is_production=false)`:
-///   Cloudflare Access is not present, so:
+///   Tailscale Serve is not in front, so:
 ///   - If the header IS present, the same production logic applies (useful for
 ///     integration tests that inject the header).
 ///   - If the header is absent, the first user in the DB (ORDER BY id LIMIT 1)
@@ -30,13 +31,13 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let cf_email = request
+    let login = request
         .headers()
-        .get("Cf-Access-Authenticated-User-Email")
+        .get("Tailscale-User-Login")
         .and_then(|v| v.to_str().ok())
         .map(std::string::ToString::to_string);
 
-    let user_id = match cf_email {
+    let user_id = match login {
         Some(email) => resolve_or_register_user(&state, &email),
         None if !state.config.is_production => {
             // Dev bypass: use the first user in the DB.
@@ -112,9 +113,9 @@ fn resolve_or_register_user(state: &AppState, email: &str) -> Option<i64> {
 
 // Auth Middleware Spec
 //
-// Cloudflare Access-based authentication (production).
-// Dev bypass via first DB user when Cf-Access header is absent (development only).
-// - Production: Cf-Access-Authenticated-User-Email header required
+// Tailscale Serve identity header (production).
+// Dev bypass via first DB user when the header is absent (development only).
+// - Production: Tailscale-User-Login header required
 // - First email (empty users table) → registered as master
 // - Subsequent unregistered emails → 403
 // - dev: no header → first DB user used (devbypass)
@@ -151,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn cf_access_header_resolves_existing_user() {
+    fn login_email_resolves_existing_user() {
         let state = setup_state();
         {
             let conn = state.conn();
@@ -206,8 +207,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dev_bypass_uses_first_db_user_when_no_cf_header() {
-        // Behaviour: in dev mode (is_production=false) with no Cf-Access header,
+    async fn dev_bypass_uses_first_db_user_when_no_login_header() {
+        // Behaviour: in dev mode (is_production=false) with no login header,
         // auth_middleware falls through to the first user in the DB and injects
         // that UserId into the request so the downstream handler can serve it.
         let state = setup_state(); // is_production=false
@@ -242,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn dev_bypass_rejects_with_unauthorized_when_db_empty() {
-        // Behaviour: in dev mode with no Cf-Access header and an empty users table,
+        // Behaviour: in dev mode with no login header and an empty users table,
         // auth_middleware finds no user to fall back to and returns 401 Unauthorized.
         let state = setup_state();
 
@@ -261,11 +262,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_rejects_request_without_cf_access_header() {
+    async fn production_rejects_request_without_login_header() {
         // Security-critical: in production (is_production=true) the dev bypass is
-        // disabled, so a request without the Cloudflare Access header must be
-        // rejected with 401 even when a user exists in the DB. (Access should have
-        // blocked it upstream; this is defence in depth.)
+        // disabled, so a request without the Tailscale Serve login header must be
+        // rejected with 401 even when a user exists in the DB.
         let mut state = setup_state();
         state.config.is_production = true;
         {
@@ -287,14 +287,42 @@ mod tests {
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
-            "production must reject requests lacking the Cf-Access header"
+            "production must reject requests lacking the login header"
         );
     }
 
     #[tokio::test]
-    async fn production_resolves_user_from_cf_access_header() {
-        // Counterpart to the rejection test: with a valid Cf-Access header in
-        // production, the matching user is resolved and the request proceeds.
+    async fn production_resolves_user_from_tailscale_login_header() {
+        // Counterpart to the rejection test: with the Tailscale Serve login header
+        // in production, the matching user is resolved and the request proceeds.
+        let mut state = setup_state();
+        state.config.is_production = true;
+        {
+            let conn = state.conn();
+            conn.execute(
+                "INSERT INTO users (email, role, created_at) VALUES ('alice@example.com', 'master', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let app = build_test_router(state);
+        let req = Request::builder()
+            .uri("/whoami")
+            .header("Tailscale-User-Login", "alice@example.com")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"1", "resolved user id should be injected");
+    }
+
+    #[tokio::test]
+    async fn production_ignores_the_retired_cloudflare_access_header() {
+        // The site is no longer behind Cloudflare Access, and the remaining Tunnel
+        // path forwards client headers as sent, so this header proves nothing.
         let mut state = setup_state();
         state.config.is_production = true;
         {
@@ -314,9 +342,7 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(body.as_ref(), b"1", "resolved user id should be injected");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]
