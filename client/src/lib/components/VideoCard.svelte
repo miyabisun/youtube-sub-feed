@@ -1,19 +1,15 @@
 <script>
   import { relativeTime } from '$lib/relative-time.js'
   import { formatDuration } from '$lib/format-duration.js'
-  import { link } from '$lib/router.svelte.js'
+  import { link, openWatch } from '$lib/router.svelte.js'
   import { videoThumbnail } from '$lib/youtube-thumbnail.js'
-  import { isWatchActivation } from '$lib/video-watch.js'
+  import { isWatchActivation, opensInApp } from '$lib/video-watch.js'
+  import { youtubeUrl } from '$lib/youtube-url.js'
 
   let { video, onwatch = null } = $props()
 
-  let videoUrl = $derived(getVideoUrl(video))
+  let videoUrl = $derived(youtubeUrl(video))
   let label = $derived(getLabel(video))
-
-  function getVideoUrl(v) {
-    if (v.is_short) return `https://www.youtube.com/shorts/${v.id}`
-    return `https://www.youtube.com/watch?v=${v.id}`
-  }
 
   function getLabel(v) {
     if (v.is_short) return 'Shorts'
@@ -29,8 +25,14 @@
     return ''
   }
 
+  // A plain tap plays here. The href stays for new-tab gestures, which still
+  // open YouTube itself.
   function handleWatch(event) {
     if (!isWatchActivation(event)) return
+    if (opensInApp(event)) {
+      event.preventDefault()
+      openWatch(video)
+    }
     onwatch?.(video.id)
   }
 </script>

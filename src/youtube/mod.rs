@@ -1,5 +1,6 @@
 // OAuth-based modules (subscriptions, token handling) stay removed.
 // `videos` is the API-key-only client used for video detail enrichment.
+pub mod comments;
 pub mod posts;
 pub mod videos;
 

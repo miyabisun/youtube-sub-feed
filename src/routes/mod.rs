@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod channels;
+pub mod comments;
 pub mod feed;
 pub mod groups;
 pub mod news;
@@ -33,6 +34,7 @@ use utoipa_swagger_ui::SwaggerUi;
         feed::unhide_video,
         feed::hide_post,
         feed::unhide_post,
+        comments::get_comments,
         channels::get_channels,
         channels::get_channel_videos,
         channels::add_channel,
@@ -57,6 +59,8 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::PostItem,
         openapi::HistoryItem,
         openapi::PostHistoryItem,
+        openapi::CommentItem,
+        openapi::CommentsResponse,
         openapi::ChannelItem,
         openapi::ChannelVideoItem,
         openapi::GroupItem,
@@ -93,6 +97,7 @@ pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .merge(auth::routes())
         .merge(feed::routes())
+        .merge(comments::routes())
         .merge(channels::routes())
         .merge(groups::routes())
         .merge(news::routes())

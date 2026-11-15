@@ -105,6 +105,8 @@ pub enum FetchError {
     MalformedResponse,
     Deferred,
     InvalidPageToken,
+    /// The uploader turned comments off for this video.
+    CommentsDisabled,
     Database,
 }
 
@@ -117,6 +119,7 @@ impl std::fmt::Display for FetchError {
             FetchError::MalformedResponse => write!(f, "YouTube API malformed response"),
             FetchError::Deferred => write!(f, "YouTube API waiting for Retry-After"),
             FetchError::InvalidPageToken => write!(f, "YouTube API invalid page token"),
+            FetchError::CommentsDisabled => write!(f, "YouTube comments are disabled"),
             FetchError::Database => write!(f, "YouTube API progress could not be saved"),
         }
     }
@@ -371,7 +374,7 @@ fn persist_pause(state: &AppState, column: &str, until: i64) -> Result<(), Fetch
 /// Three attempts at most, with bounded local backoff. Long Retry-After releases
 /// the worker and persists a shared pause instead of sleeping through many ticks.
 /// URLs and response bodies can carry credentials: never log either of them.
-async fn get_json_with_retry(
+pub(crate) async fn get_json_with_retry(
     state: &AppState,
     endpoint: &str,
     query: &[(&str, &str)],
@@ -448,6 +451,9 @@ async fn get_json_with_retry(
         }
         if status.as_u16() == 400 && reason == "invalidPageToken" {
             return Err(FetchError::InvalidPageToken);
+        }
+        if status.as_u16() == 403 && reason == "commentsDisabled" {
+            return Err(FetchError::CommentsDisabled);
         }
         if status.as_u16() == 429
             || status.is_server_error()

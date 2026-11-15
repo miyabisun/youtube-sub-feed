@@ -2,6 +2,7 @@
   import { relativeTime } from '$lib/relative-time.js'
   import { link } from '$lib/router.svelte.js'
   import Icon from '$lib/components/Icon.svelte'
+  import ClampedText from '$lib/components/ClampedText.svelte'
 
   let { post, onhide = null, onrestore = null } = $props()
 
@@ -16,19 +17,6 @@
       pending = false
     }
   }
-
-  let body = $state(null)
-  let clamped = $state(false)
-  let expanded = $state(false)
-
-  $effect(() => {
-    if (!body || expanded) return
-    const measure = () => (clamped = body.scrollHeight > body.clientHeight + 1)
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(body)
-    return () => observer.disconnect()
-  })
 </script>
 
 <article class="post-card">
@@ -50,12 +38,7 @@
     {/if}
   </div>
   {#if post.content}
-    <p class="content" class:expanded bind:this={body}>{post.content}</p>
-    {#if clamped || expanded}
-      <button class="more" onclick={() => (expanded = !expanded)} aria-expanded={expanded}>
-        {expanded ? '閉じる' : '続きを読む'}
-      </button>
-    {/if}
+    <ClampedText text={post.content} />
   {/if}
   {#if post.images.length === 1}
     <img class="image single" src={post.images[0]} alt="投稿の画像" loading="lazy" />
@@ -154,29 +137,6 @@
 		opacity: 0.5
 		cursor: wait
 
-.content
-	margin: 0
-	white-space: pre-wrap
-	overflow-wrap: anywhere
-	line-height: 1.6
-	display: -webkit-box
-	-webkit-line-clamp: 6
-	-webkit-box-orient: vertical
-	overflow: hidden
-
-	&.expanded
-		display: block
-		-webkit-line-clamp: unset
-
-.more
-	align-self: flex-start
-	padding: 0
-	background: none
-	border: none
-	color: var(--c-link)
-	font-size: var(--fs-sm)
-	cursor: pointer
-
 .image
 	display: block
 	width: 100%
@@ -201,9 +161,6 @@
 		scroll-snap-align: start
 
 @media (min-width: 768px)
-	.content:not(.expanded)
-		-webkit-line-clamp: 4
-
 	.single
 		max-height: 280px
 

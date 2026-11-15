@@ -6,6 +6,7 @@
   import Toast from '$lib/components/Toast.svelte'
   import Icon from '$lib/components/Icon.svelte'
   import { toUserMessage } from '$lib/sync-error-message.js'
+  import { requestGisToken } from '$lib/gis.js'
 
   let groups = $derived(getGroups())
   let menuOpen = $state(false)
@@ -62,7 +63,10 @@
     }
 
     try {
-      const accessToken = await getGisToken(clientId)
+      const { accessToken } = await requestGisToken(
+        clientId,
+        'https://www.googleapis.com/auth/youtube.readonly',
+      )
       const { channelIds, meta } = await fetchAllSubscriptions(accessToken)
 
       if (channelIds.length === 0) {
@@ -122,35 +126,6 @@
     } finally {
       refreshing = false
     }
-  }
-
-  /**
-   * Request a short-lived online access_token via GIS token client.
-   * Does NOT request offline access — no refresh_token is ever issued.
-   * Returns the access_token string.
-   */
-  function getGisToken(clientId) {
-    return new Promise((resolve, reject) => {
-      if (!window.google?.accounts?.oauth2) {
-        reject(new Error('GIS SDK がロードされていません。ページをリロードしてください。'))
-        return
-      }
-      const client = window.google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/youtube.readonly',
-        callback: (response) => {
-          if (response.error) {
-            reject(new Error(response.error_description || response.error))
-          } else {
-            resolve(response.access_token)
-          }
-        },
-        error_callback: (err) => {
-          reject(new Error(err?.message || 'token request cancelled'))
-        },
-      })
-      client.requestAccessToken()
-    })
   }
 
   /**

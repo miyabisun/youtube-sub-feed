@@ -9,7 +9,7 @@
   import Toast from '$lib/components/Toast.svelte'
   import Icon from '$lib/components/Icon.svelte'
   import { swipeNav } from '$lib/swipe.js'
-  import { navigate } from '$lib/router.svelte.js'
+  import { navigate, router } from '$lib/router.svelte.js'
   import { startAutoReload } from '$lib/auto-reload.js'
   import { createVideoHider } from '$lib/video-watch.js'
   import { feedKinds, kindsParam } from '$lib/feed-kinds.svelte.js'
@@ -95,7 +95,12 @@
     untrack(() => loadVideos(true))
   })
 
-  $effect(() => startAutoReload(() => loadVideos(true)))
+  // A reload restarts the list from its first page. While a video plays over
+  // it, leave the list alone so closing the player lands where it was opened.
+  $effect(() => {
+    if (router.watch) return
+    return startAutoReload(() => loadVideos(true))
+  })
 
   $effect(() => {
     if (!sentinel) return

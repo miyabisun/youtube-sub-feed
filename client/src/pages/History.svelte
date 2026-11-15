@@ -62,7 +62,7 @@
 <section class="history" aria-labelledby="history-title">
   <header class="history-header">
     <h1 id="history-title">視聴履歴</h1>
-    <p>YouTubeで開いた動画と、「もう見た」にした動画・投稿</p>
+    <p>再生した動画と、「もう見た」にした動画・投稿</p>
   </header>
 
   {#if loading}
