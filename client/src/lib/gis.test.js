@@ -44,6 +44,17 @@ describe('createTokenCache', () => {
     expect(await t.cache.get()).toBe('T2')
   })
 
+  test('peeks at a live token without ever asking for one', async () => {
+    const t = setup([{ accessToken: 'T1', expiresIn: 3600 }])
+    expect(t.cache.peek()).toBeNull()
+    expect(t.requests()).toBe(0)
+    await t.cache.get()
+    expect(t.cache.peek()).toBe('T1')
+    t.advance(3600_000)
+    expect(t.cache.peek()).toBeNull()
+    expect(t.requests()).toBe(1)
+  })
+
   test('does not cache a failed request', async () => {
     let attempts = 0
     const cache = createTokenCache(

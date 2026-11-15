@@ -57,16 +57,19 @@ Without the key, API catch-up and detail-based classification are unavailable.
 Without periodic catch-up, startup/manual refresh runs only one bounded pass.
 A new channel may show no videos until push delivery or API retrieval.
 
-## Watch and comment
+## Watch, like and comment
 
 Tap a video to play it in YouTube's player inside the app; the YouTube app and new tabs stay closed.
 Closing the player, or going back, returns you to the same place in the list. A video opened from the feed is marked as watched.
 Ctrl/Cmd-click and middle-click open YouTube in a new tab.
 
 Read and write comments below the player. Your comment goes to the open video, and you can edit or delete it there.
-Google asks for permission to write comments the first time you send one.
+The thumb button below the player likes the open video; press it again to take the like off.
+Google asks for permission to write the first time you send a like or a comment.
 
-- Reading comments needs `YOUTUBE_API_KEY`; sending needs `GIS_CLIENT_ID` ([deployment guide, Japanese](docs/deploy.md)).
+- Reading comments needs `YOUTUBE_API_KEY`; liking and sending comments need `GIS_CLIENT_ID` ([deployment guide, Japanese](docs/deploy.md)).
+- Likes are sent through the YouTube Data API. Google's [API reference](https://developers.google.com/youtube/v3/docs/videos/rate) says a rating set this way does not affect the video's official like count.
+- Comments cannot be liked: the API has no method for it.
 - Videos whose owner disallows embedding do not play; use the top-right button to open YouTube.
 - Replies to comments are not shown.
 
@@ -83,7 +86,7 @@ Post times are estimated from labels such as "3 days ago". Members-only posts ar
 
 For sync, [create a Google web client ID](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid).
 Use your app’s public origin. Allow the `https://www.googleapis.com/auth/youtube.readonly` scope for sync,
-and `https://www.googleapis.com/auth/youtube.force-ssl` to send comments.
+and `https://www.googleapis.com/auth/youtube.force-ssl` to like videos and send comments.
 Set the resulting ID as `GIS_CLIENT_ID`; enable YouTube Data API v3 in the Google project.
 API catch-up uses a separate API key from that project, set as `YOUTUBE_API_KEY`.
 See the [deployment guide (Japanese)](docs/deploy.md) for quota planning and Discord alerts. Browser sync uses a public GIS client ID, with no client secret.

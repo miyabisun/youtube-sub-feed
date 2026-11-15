@@ -1,18 +1,16 @@
 <script module>
-  import config from '$lib/config.js'
-  import { createTokenCache, requestGisToken } from '$lib/gis.js'
-  import { COMMENT_SCOPE } from '$lib/comments.js'
-
   // Kept for the visit, per video: closing the player by accident loses neither
   // a half-written comment nor the handle on the ones already posted.
   const drafts = new Map()
   const posted = new Map()
-  const tokens = createTokenCache(() => requestGisToken(config.gisClientId, COMMENT_SCOPE))
 </script>
 
 <script>
   import { untrack } from 'svelte'
+  import config from '$lib/config.js'
   import fetcher from '$lib/fetcher.js'
+  import { tokens } from '$lib/viewer-token.js'
+  import { sendAsViewer } from '$lib/youtube-write.js'
   import { relativeTime } from '$lib/relative-time.js'
   import {
     COMMENT_MAX_LENGTH,
@@ -21,7 +19,6 @@
     deleteCommentRequest,
     insertCommentRequest,
     postedComment,
-    sendComment,
     updateCommentRequest,
   } from '$lib/comments.js'
   import Icon from '$lib/components/Icon.svelte'
@@ -85,7 +82,7 @@
     sending = true
     sendError = null
     try {
-      const thread = await sendComment(insertCommentRequest(videoId, text), { tokens })
+      const thread = await sendAsViewer(insertCommentRequest(videoId, text), { tokens })
       mine = [postedComment(thread), ...mine]
       text = ''
     } catch (error) {
@@ -111,7 +108,7 @@
     busy = true
     itemError = null
     try {
-      const updated = await sendComment(updateCommentRequest(editing.id, editing.text), { tokens })
+      const updated = await sendAsViewer(updateCommentRequest(editing.id, editing.text), { tokens })
       const next = updated ? postedComment(updated).text : editing.text.trim()
       mine = mine.map((own) => (own.id === editing.id ? { ...own, text: next } : own))
       editing = null
@@ -127,7 +124,7 @@
     busy = true
     itemError = null
     try {
-      await sendComment(deleteCommentRequest(id), { tokens })
+      await sendAsViewer(deleteCommentRequest(id), { tokens })
       mine = mine.filter((own) => own.id !== id)
       confirmingDelete = null
     } catch (error) {

@@ -15,6 +15,9 @@ export function requestGisToken(clientId, scope) {
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: clientId,
       scope,
+      // Ask only the first time: once access is granted, the popup closes by
+      // itself instead of making the viewer pick their account on every visit.
+      prompt: '',
       callback: (response) => {
         if (response.error) {
           reject(new Error(response.error_description || response.error))
@@ -51,6 +54,10 @@ export function createTokenCache(request, now = Date.now) {
       token = accessToken
       expiresAt = now() + expiresIn * 1000 - EXPIRY_MARGIN_MS
       return token
+    },
+    /** The token if one is live, without ever opening the consent popup. */
+    peek() {
+      return token && now() < expiresAt ? token : null
     },
     invalidate() {
       token = null

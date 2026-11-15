@@ -44,6 +44,8 @@ export async function setup(
     gisClientId = 'test-client',
     comments = 'ok',
     post = 'ok',
+    rate = 'ok',
+    ratings = {},
     groups = [],
     channels = [],
   } = {},
@@ -63,7 +65,10 @@ export async function setup(
     deletes: [],
     scopes: [],
     commentGets: [],
-    state: { gis, comments, post },
+    rates: [],
+    ratingGets: [],
+    ratings: { ...ratings },
+    state: { gis, comments, post, rate },
   }
   page.on('pageerror', (error) => expect.soft(error.message, 'uncaught page error').toBe(''))
   await page.route('**/*', async (route) => {
@@ -221,6 +226,32 @@ export async function setup(
       if (url.pathname.endsWith('/comments') && req.method() === 'DELETE') {
         log.deletes.push(url.searchParams.get('id'))
         return route.fulfill({ status: 204, headers: cors, body: '' })
+      }
+      if (url.pathname.endsWith('/videos/rate') && req.method() === 'POST') {
+        const id = url.searchParams.get('id')
+        const rating = url.searchParams.get('rating')
+        log.rates.push({ id, rating, auth })
+        const refusal = {
+          quota: [403, 'quotaExceeded'],
+          disabled: [403, 'videoRatingDisabled'],
+          unauthorized: [401, 'authError'],
+        }[log.state.rate]
+        if (refusal)
+          return route.fulfill({
+            status: refusal[0],
+            headers: cors,
+            json: { error: { errors: [{ reason: refusal[1] }] } },
+          })
+        log.ratings[id] = rating
+        return route.fulfill({ status: 204, headers: cors, body: '' })
+      }
+      if (url.pathname.endsWith('/videos/getRating') && req.method() === 'GET') {
+        const id = url.searchParams.get('id')
+        log.ratingGets.push({ id, auth })
+        return route.fulfill({
+          headers: cors,
+          json: { items: [{ videoId: id, rating: log.ratings[id] ?? 'none' }] },
+        })
       }
       return route.fulfill({ status: 500, headers: cors, json: {} })
     }

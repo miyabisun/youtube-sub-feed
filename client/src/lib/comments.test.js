@@ -6,10 +6,9 @@ import {
   updateCommentRequest,
   deleteCommentRequest,
   postedComment,
-  CommentError,
   commentErrorMessage,
-  sendComment,
 } from './comments.js'
+import { WriteError } from './youtube-write.js'
 
 describe('canSubmit', () => {
   test('requires something other than whitespace', () => {
@@ -96,7 +95,7 @@ describe('postedComment', () => {
 })
 
 describe('commentErrorMessage', () => {
-  const message = (status, reason) => commentErrorMessage(new CommentError(status, reason))
+  const message = (status, reason) => commentErrorMessage(new WriteError(status, reason))
 
   test('explains disabled comments', () => {
     expect(message(403, 'commentsDisabled')).toBe('この動画はコメントを受け付けていません')
@@ -130,65 +129,5 @@ describe('commentErrorMessage', () => {
     expect(commentErrorMessage(new TypeError('Failed to fetch'))).toBe(
       '送信できませんでした。通信を確かめてください',
     )
-  })
-})
-
-describe('sendComment', () => {
-  const request = { url: 'https://example.test/x', init: { method: 'POST', body: '{}' } }
-
-  function tokens(values) {
-    const calls = { get: 0, invalidate: 0 }
-    return {
-      calls,
-      get: async () => values[calls.get++],
-      invalidate: () => calls.invalidate++,
-    }
-  }
-
-  test('sends with the bearer token and returns the parsed body', async () => {
-    const seen = []
-    const fetchFn = async (url, init) => {
-      seen.push({ url, init })
-      return { ok: true, status: 200, json: async () => ({ id: 'c1' }) }
-    }
-    const body = await sendComment(request, { tokens: tokens(['T1']), fetchFn })
-    expect(body).toEqual({ id: 'c1' })
-    expect(seen[0].url).toBe('https://example.test/x')
-    expect(seen[0].init.headers.Authorization).toBe('Bearer T1')
-    expect(seen[0].init.headers['Content-Type']).toBe('application/json')
-    expect(seen[0].init.body).toBe('{}')
-  })
-
-  test('returns null for an empty success body (delete)', async () => {
-    const fetchFn = async () => ({ ok: true, status: 204, json: async () => Promise.reject() })
-    expect(await sendComment(request, { tokens: tokens(['T1']), fetchFn })).toBeNull()
-  })
-
-  test('throws the API reason and drops a rejected token', async () => {
-    const store = tokens(['T1'])
-    const fetchFn = async () => ({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { errors: [{ reason: 'authError' }] } }),
-    })
-    await expect(sendComment(request, { tokens: store, fetchFn })).rejects.toMatchObject({
-      status: 401,
-      reason: 'authError',
-    })
-    expect(store.calls.invalidate).toBe(1)
-  })
-
-  test('keeps the token on failures that are not about authorization', async () => {
-    const store = tokens(['T1'])
-    const fetchFn = async () => ({
-      ok: false,
-      status: 403,
-      json: async () => ({ error: { errors: [{ reason: 'commentsDisabled' }] } }),
-    })
-    await expect(sendComment(request, { tokens: store, fetchFn })).rejects.toMatchObject({
-      status: 403,
-      reason: 'commentsDisabled',
-    })
-    expect(store.calls.invalidate).toBe(0)
   })
 })

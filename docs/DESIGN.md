@@ -123,7 +123,12 @@ Domain components on top of the Sumi recipes:
 - **Watch view:** a 48px bar (quiet back button, one-line ellipsized
   title, quiet external-link button to YouTube), the video on a black
   stage, and one text column with the comment box and the comments. The
-  video always gets the most the screen allows. Upright screen: the video
+  column opens with the caption meta row (channel link, relative time),
+  which ends in the like toggle: a quiet 40px icon button whose thumb is
+  an outline when off and filled in the accent when on, so shape carries
+  the state. What a like has to say (ratings turned off, a failure) is one
+  caption line under that row. The video always gets the most the screen
+  allows. Upright screen: the video
   spans the width, and the bar and the video stay fixed while the comments
   scroll beneath; a portrait video instead takes the height of the screen.
   Screen on its side: the video and the comments stand side by side — the

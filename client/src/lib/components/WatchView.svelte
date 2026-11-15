@@ -3,10 +3,16 @@
   import { embedUrl, youtubeUrl } from '$lib/youtube-url.js'
   import { observePlayer } from '$lib/youtube-player.js'
   import { relativeTime } from '$lib/relative-time.js'
+  import config from '$lib/config.js'
   import Icon from '$lib/components/Icon.svelte'
   import Comments from '$lib/components/Comments.svelte'
+  import LikeButton from '$lib/components/LikeButton.svelte'
 
   let { id, video = null } = $props()
+
+  // Liking needs the viewer's Google token, as sending a comment does.
+  let canLike = $derived(!!config.gisClientId)
+  let likeNotice = $state(null)
 
   let dialog = $state(null)
   let frame = $state(null)
@@ -99,10 +105,24 @@
         <a href={externalUrl} target="_blank" rel="noopener">YouTube で開く</a>
       </p>
     {/if}
-    {#if video?.channel_title}
-      <p class="meta">
-        <a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>
-        {#if video.published_at}<span>{relativeTime(video.published_at)}</span>{/if}
+    {#if video?.channel_title || canLike}
+      <div class="meta">
+        {#if video?.channel_title}
+          <a class="channel" href={link(`/channel/${video.channel_id}`)}>{video.channel_title}</a>
+          {#if video.published_at}<span>{relativeTime(video.published_at)}</span>{/if}
+        {/if}
+        {#if canLike}
+          <span class="like-slot"><LikeButton videoId={id} bind:notice={likeNotice} /></span>
+        {/if}
+      </div>
+    {/if}
+    {#if likeNotice}
+      <p
+        class="like-notice"
+        class:error={likeNotice.failed}
+        role={likeNotice.failed ? 'alert' : undefined}
+      >
+        {likeNotice.text}
       </p>
     {/if}
     <Comments videoId={id} />
@@ -213,6 +233,18 @@
 
 .meta span
 	flex: none
+
+// The like ends the row whether or not the channel is known.
+.meta .like-slot
+	margin-left: auto
+
+.like-notice
+	margin: 0 0 var(--sp-3)
+	font-size: var(--fs-sm)
+	color: var(--c-text-muted)
+
+	&.error
+		color: var(--c-danger)
 
 .channel
 	min-width: 0
