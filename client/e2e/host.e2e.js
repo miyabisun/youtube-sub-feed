@@ -96,3 +96,45 @@ test('in the app a watch address still plays here', async ({ browser }) => {
   check('a loaded watch address hands nothing over', (await handedOver(page)).length === 0)
   await context.close()
 })
+
+// The host keeps one part of the page on screen above YouTube: the element
+// marked `data-video-host-keep`. Here that is the header, wherever it shows.
+test('the header is the one part marked for the host to keep on screen', async ({ browser }) => {
+  for (const width of [400, 1024]) {
+    const { context, page } = await setup(browser, {
+      width,
+      groups: [
+        { id: 1, name: 'ブルアカ' },
+        { id: 2, name: '情報' },
+      ],
+    })
+    for (const path of ['/', '/group/1', '/group/2', '/history', '/channels', '/settings']) {
+      await page.goto(BASE + path)
+      await page.waitForSelector('.menu-button')
+      const kept = await page.evaluate(() =>
+        [...document.querySelectorAll('[data-video-host-keep]')].map((el) => {
+          const shown = (selector) => !!el.querySelector(selector)?.getClientRects().length
+          const box = el.getBoundingClientRect()
+          return {
+            groups: shown('.nav-tabs') || shown('.group-select'),
+            menu: shown('.menu-button'),
+            atTop: box.top === 0 && box.left === 0 && box.width === window.innerWidth,
+          }
+        }),
+      )
+      check(
+        `${width}px ${path}: one marked element at the top edge holds the group switch and the menu`,
+        kept.length === 1 && kept[0].groups && kept[0].menu && kept[0].atTop,
+        JSON.stringify(kept),
+      )
+    }
+    await page.goto(BASE + '/login')
+    await page.waitForSelector('main')
+    check(
+      `${width}px: a page without the header marks nothing`,
+      (await page.locator('header').count()) === 0 &&
+        (await page.locator('[data-video-host-keep]').count()) === 0,
+    )
+    await context.close()
+  }
+})

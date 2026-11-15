@@ -171,7 +171,8 @@
   }
 </script>
 
-<header>
+<!-- data-video-host-keep: the part a host app keeps on screen while it shows a video (README). -->
+<header data-video-host-keep>
   <select class="group-select" value={selectValue} onchange={onGroupSelect}>
     <option value="">すべて</option>
     {#each groups as group}

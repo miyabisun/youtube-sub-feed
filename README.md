@@ -74,6 +74,7 @@ Google asks for permission to write the first time you send a like or a comment.
 - Videos whose owner disallows embedding do not play; use the top-right button to open YouTube.
 - Replies to comments are not shown.
 - Inside [subfeed-browser](https://github.com/miyabisun/subfeed-browser), an Android browser built for this feed, a tap hands the video to the app, which plays it on YouTube's own page; likes and comments happen there.
+  The header carries `data-video-host-keep`. It marks the part a host app is to keep on screen above the video, closing the video when that part is pressed; other browsers ignore it.
 
 ## Read channel posts
 
