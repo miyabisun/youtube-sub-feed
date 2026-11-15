@@ -116,19 +116,23 @@ Domain components on top of the Sumi recipes:
   chrome, and use scrim-on-image colors per the template's image-viewer
   exception.
 - **Watch view:** a 48px bar (quiet back button, one-line ellipsized
-  title, quiet external-link button to YouTube), the player edge to edge
-  on black, then one text column (max 720px) with the comment box and the
-  comments. On phones the bar and a landscape player stay fixed while the
-  comments scroll; a portrait video instead takes the height of the screen.
-  At ≥768px the player is sized so that it, the comment box and its send
-  action share one screen. The comment box is a multi-line field that grows
-  with its text. Comments are plain text on the page background with the
-  post card's caption meta row (24px circular avatar, author, time); the
-  viewer's own comments sit on a surface panel and carry quiet edit and
-  delete icon buttons, deletion using the two-step inline confirm. States
-  that are normal (comments turned off, nothing configured to read or send
-  them) are a muted caption, never the danger role; failures use danger
-  text beside the control that retries them and keep what was typed.
+  title, quiet external-link button to YouTube), the video on a black
+  stage, and one text column with the comment box and the comments. The
+  video always gets the most the screen allows. Upright screen: the video
+  spans the width, and the bar and the video stay fixed while the comments
+  scroll beneath; a portrait video instead takes the height of the screen.
+  Screen on its side: the video and the comments stand side by side — the
+  video takes the height under the bar, the comments scroll in their own
+  column (never narrower than 320px), and the way back, the comments and
+  the comment box are all on screen with the video; nothing overlays the
+  video. The comment box is a multi-line field that grows with its text.
+  Comments are plain text on the page background with the post card's
+  caption meta row (24px circular avatar, author, time); the viewer's own
+  comments sit on a surface panel and carry quiet edit and delete icon
+  buttons, deletion using the two-step inline confirm. States that are
+  normal (comments turned off, nothing configured to read or send them)
+  are a muted caption, never the danger role; failures use danger text
+  beside the control that retries them and keep what was typed.
 - **Status badges (thumbnail top-left):** caption size, bold, tinted
   subtle background + 1px border in the data color. LIVE (live color,
   pulsing in Sumi only), Shorts (shorts color), 配信アーカイブ (neutral

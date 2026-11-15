@@ -79,15 +79,17 @@
     </a>
   </header>
 
-  <div class="player">
-    <iframe
-      bind:this={frame}
-      src={embedUrl(id, window.location.origin)}
-      title={title || '動画プレイヤー'}
-      allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-      allowfullscreen
-      referrerpolicy="strict-origin-when-cross-origin"
-    ></iframe>
+  <div class="stage">
+    <div class="player">
+      <iframe
+        bind:this={frame}
+        src={embedUrl(id, window.location.origin)}
+        title={title || '動画プレイヤー'}
+        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+        allowfullscreen
+        referrerpolicy="strict-origin-when-cross-origin"
+      ></iframe>
+    </div>
   </div>
 
   <div class="body">
@@ -161,12 +163,15 @@
 	overflow: hidden
 	text-overflow: ellipsis
 
-// Never taller than the screen below the bar, whatever the window's shape.
+// The video always gets the most the screen allows: the full width when the
+// screen is upright, the full height under the bar when it lies on its side.
+.stage
+	background: #000
+
 .player
 	width: min(100%, calc((100dvh - 48px) * 16 / 9))
 	aspect-ratio: 16 / 9
 	margin: 0 auto
-	background: #000
 
 	iframe
 		display: block
@@ -174,7 +179,8 @@
 		height: 100%
 		border: 0
 
-// Portrait video: as tall as the screen allows, centred.
+// Portrait video: as tall as the screen allows, leaving a strip that shows
+// there is more below.
 .short .player
 	width: auto
 	height: calc(100dvh - 48px - 96px)
@@ -219,22 +225,43 @@
 		color: var(--c-text)
 		text-decoration: underline
 
-// Phone held upright, landscape video: the bar and player stay while the
-// comments scroll.
-@media (max-width: 767px) and (orientation: portrait)
+// Upright screen, landscape video: the bar and the video stay while the
+// comments scroll beneath them.
+@media (orientation: portrait)
 	.watch:not(.short) .bar
 		position: sticky
 		top: 0
 		z-index: 2
 
-	.watch:not(.short) .player
+	.watch:not(.short) .stage
 		position: sticky
 		top: 48px
 		z-index: 1
 
-// Wide and tall screens: the player, the comment box and its send button
-// share one screen.
-@media (min-width: 768px) and (min-height: 600px)
-	.watch:not(.short) .player
-		width: min(100%, 1280px, calc((100dvh - 48px - 232px) * 16 / 9))
+// Screen on its side: the video and the comments stand side by side, so the
+// way back, the comments and the comment box are all on screen with the video.
+// The video keeps everything except the narrowest column comments can use.
+@media (orientation: landscape)
+	.watch[open]
+		display: grid
+		grid-template-columns: auto minmax(320px, 1fr)
+		grid-template-rows: 48px minmax(0, 1fr)
+		overflow: hidden
+
+	.bar
+		grid-column: 1 / -1
+
+	.stage
+		display: grid
+		place-items: center
+
+	.player
+		width: min(100vw - 320px, calc((100dvh - 48px) * 16 / 9))
+
+	.short .player
+		height: calc(100dvh - 48px)
+
+	.body
+		width: 100%
+		overflow-y: auto
 </style>
