@@ -55,6 +55,11 @@ and blue (novel-server) siblings. It marks interactive chrome only: the
 active group tab underline, primary buttons, focused inputs, the shared
 focus ring, the loading spinner.
 
+Focus is one accent line. A text field (input, textarea, select) recolours
+its own border and draws no ring — a ring around an accent border reads as
+a double line. The shared ring belongs to controls without a field border:
+buttons, links, checkboxes.
+
 Themes follow novel-server's Sumi-first convention: `:root` in
 `client/src/global.sass` IS the Sumi (dark) theme, and Washi (light,
 e-paper) is applied via `@media (prefers-color-scheme: light)` — the OS

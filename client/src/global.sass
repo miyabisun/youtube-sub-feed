@@ -113,6 +113,13 @@ button
 :focus:not(:focus-visible)
 	outline: none
 
+// A text field counts as :focus-visible even on a tap, and each one recolours
+// its own border on :focus. That accent border is its focus mark; a ring around
+// it would draw a second line.
+textarea, select, input:not([type="checkbox"], [type="radio"])
+	&:focus-visible
+		outline: none
+
 // Washi (light, e-paper) — OS-driven override of the Sumi defaults above.
 @media (prefers-color-scheme: light)
 	\:root
