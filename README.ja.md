@@ -34,7 +34,7 @@ docker run -d \
 ```
 
 このホストで`tailscale serve --bg 3000`を実行し、tailnetへ公開します。
-Tailscaleもコンテナで動かす場合は、アプリをそのコンテナのnetwork namespaceに入れ、ホストへポートをpublishしないでください。
+Tailscaleもコンテナで動かす場合は、アプリと同じ非公開のDockerネットワークに置いてServeから`http://<コンテナ名>:3000`へ渡し、ホストへポートをpublishしないでください。
 公開インターネットからのGET/POSTはWebSubのcallbackの正確なパスだけへ通します。[callback設定](docs/deploy.md#websub-callback)を参照してください。
 
 tailnetにログインした端末から、ServeのURL（`https://<host>.<tailnet>.ts.net`）を開きます。

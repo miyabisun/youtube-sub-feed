@@ -35,7 +35,7 @@ docker run -d \
 ```
 
 Expose it on the tailnet with `tailscale serve --bg 3000` on this host.
-To run Tailscale in a container instead, put the app in that container's network namespace and publish no host port.
+To run Tailscale in a container instead, put it on the same private Docker network as the app, point Serve at `http://<container>:3000`, and publish no host port.
 Route public GET/POST requests to the exact WebSub callback path only; see [callback setup](docs/deploy.md#websub-callback).
 
 Open the Serve URL (`https://<host>.<tailnet>.ts.net`) from a device signed in to your tailnet.
