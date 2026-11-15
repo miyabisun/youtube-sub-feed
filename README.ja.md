@@ -71,6 +71,7 @@ Ctrl・Cmdを押しながらのクリックと中クリックは、YouTubeを新
 - コメントへの高評価はAPIに無いため、付けられません。
 - 投稿者が埋め込みを禁止した動画は再生できません。右上のボタンでYouTubeを開いてください。
 - コメントへの返信は表示しません。
+- [subfeed-browser](https://github.com/miyabisun/subfeed-browser)（Androidの自作ブラウザ）の中で開くと、動画のタップはアプリへ渡され、YouTube自身の画面で再生します。高評価とコメントもYouTubeの画面で行います。
 
 ## チャンネルの投稿を読む
 

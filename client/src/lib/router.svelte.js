@@ -1,4 +1,5 @@
 import { watchIdFromSearch, searchWithWatch } from './watch-url.js'
+import { hasVideoHost, openVideoMessage } from './video-host.js'
 
 export function getBasePath() {
   return (window.__BASE_PATH__ || '').replace(/\/+$/, '')
@@ -60,8 +61,15 @@ export function navigate(path) {
   syncRoute()
 }
 
-/** Open a video over the current page; the browser back button closes it. */
+/**
+ * Open a video over the current page; the browser back button closes it.
+ * Inside a host app the video is handed over instead and this page stays put.
+ */
 export function openWatch(video) {
+  if (hasVideoHost()) {
+    window.postMessage(openVideoMessage(video), window.location.origin)
+    return
+  }
   _watchVideo = video
   const { pathname, search } = window.location
   history.pushState({ watch: video.id }, '', pathname + searchWithWatch(search, video.id))

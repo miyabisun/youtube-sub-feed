@@ -72,6 +72,7 @@ Google asks for permission to write the first time you send a like or a comment.
 - Comments cannot be liked: the API has no method for it.
 - Videos whose owner disallows embedding do not play; use the top-right button to open YouTube.
 - Replies to comments are not shown.
+- Inside [subfeed-browser](https://github.com/miyabisun/subfeed-browser), an Android browser built for this feed, a tap hands the video to the app, which plays it on YouTube's own page; likes and comments happen there.
 
 ## Read channel posts
 

@@ -79,6 +79,10 @@ export async function setup(
         return route.fulfill({ json: { email: 'me@example.test' } })
       if (url.pathname === '/api/groups') return route.fulfill({ json: groups })
       if (url.pathname === '/api/channels') return route.fulfill({ json: channels })
+      if (/^\/api\/channels\/[\w-]+\/videos$/.test(url.pathname))
+        return route.fulfill({
+          json: url.searchParams.get('offset') === '0' ? feed().slice(0, 3) : [],
+        })
       if (/^\/api\/groups\/\d+\/channels$/.test(url.pathname)) return route.fulfill({ json: [] })
       if (url.pathname === '/api/feed') {
         log.feed++
