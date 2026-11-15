@@ -296,6 +296,8 @@ textarea
 	border: 1px solid var(--c-border)
 	border-radius: var(--radius-sm)
 	font: inherit
+	// Written text stays at the body size even inside the smaller list.
+	font-size: var(--fs-lg)
 	line-height: 1.6
 	resize: vertical
 	// Grow with the text instead of scrolling inside a two-line box.
@@ -352,10 +354,12 @@ textarea
 .error
 	color: var(--c-danger)
 
+// Read at body-sm: a comment is one of many, and more of them fit a screen.
 .list
 	display: flex
 	flex-direction: column
 	gap: var(--sp-4)
+	font-size: var(--fs-sm)
 
 .comment
 	display: flex

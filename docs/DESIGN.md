@@ -131,10 +131,12 @@ Domain components on top of the Sumi recipes:
   column (never narrower than 320px), and the way back, the comments and
   the comment box are all on screen with the video; nothing overlays the
   video. The comment box is a multi-line field that grows with its text.
-  Comments are plain text on the page background with the post card's
-  caption meta row (24px circular avatar, author, time); the viewer's own
-  comments sit on a surface panel and carry quiet edit and delete icon
-  buttons, deletion using the two-step inline confirm. States that are
+  Comments are plain body-sm text on the page background with the post
+  card's caption meta row (24px circular avatar, author, time) — smaller
+  than the body-size text being written, so more of them fit a screen.
+  The viewer's own comments sit on a surface panel and carry quiet edit
+  and delete icon buttons, deletion using the two-step inline confirm.
+  States that are
   normal (comments turned off, nothing configured to read or send them)
   are a muted caption, never the danger role; failures use danger text
   beside the control that retries them and keep what was typed.

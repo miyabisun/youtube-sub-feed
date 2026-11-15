@@ -69,6 +69,15 @@ test('a video plays in the app, takes a comment for itself, and closes back to t
       (await page.locator('.comment').first().innerText()).includes('<b>not html</b>'),
   )
   check('no page-level horizontal scroll at 400px', await noHScroll(page))
+  const sizes = await page.evaluate(() => {
+    const size = (selector) => getComputedStyle(document.querySelector(selector)).fontSize
+    return { read: size('.comment .content'), write: size('dialog.watch textarea') }
+  })
+  check(
+    'comments read smaller than the text being written',
+    sizes.read === '14px' && sizes.write === '16px',
+    JSON.stringify(sizes),
+  )
 
   // sticky player while comments scroll
   await page.evaluate(() => document.querySelector('dialog.watch').scrollTo(0, 600))
