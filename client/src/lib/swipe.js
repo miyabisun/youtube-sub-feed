@@ -1,3 +1,15 @@
+const SLOP = 5
+
+/**
+ * The axis a touch belongs to once it has moved by (dx, dy): `null` inside
+ * the slop, then whichever way it went further. Every gesture locks on this
+ * one rule, so a diagonal is a sideways swipe or a vertical move, never both.
+ */
+export function lockAxis(dx, dy) {
+  if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return null
+  return Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical'
+}
+
 export function swipeNav(node, opts) {
   let startX, startY, locked, horizontal
   const { onLeft, onRight } = opts
@@ -16,9 +28,10 @@ export function swipeNav(node, opts) {
     const dy = touch.clientY - startY
 
     if (!locked) {
-      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return
+      const axis = lockAxis(dx, dy)
+      if (!axis) return
       locked = true
-      horizontal = Math.abs(dx) > Math.abs(dy)
+      horizontal = axis === 'horizontal'
     }
     if (!horizontal) return
 
@@ -73,9 +86,10 @@ export function swipeable(node, opts) {
     const dy = touch.clientY - startY
 
     if (!locked) {
-      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return
+      const axis = lockAxis(dx, dy)
+      if (!axis) return
       locked = true
-      horizontal = Math.abs(dx) > Math.abs(dy)
+      horizontal = axis === 'horizontal'
     }
     if (!horizontal) return
 

@@ -10,7 +10,7 @@
   import Icon from '$lib/components/Icon.svelte'
   import { swipeNav } from '$lib/swipe.js'
   import { navigate } from '$lib/router.svelte.js'
-  import { startAutoReload } from '$lib/auto-reload.js'
+  import { PULL_HOLD, pullToRefresh, shouldRefresh } from '$lib/pull-refresh.js'
   import { createVideoHider } from '$lib/video-watch.js'
   import { feedKinds, kindsParam } from '$lib/feed-kinds.svelte.js'
 
@@ -24,6 +24,9 @@
   let hasMore = $state(true)
   let toast = $state(null)
   let sentinel = $state(null)
+  // How far the pull strip is open under the finger, and whether a pull's reload is running.
+  let pull = $state(0)
+  let refreshing = $state(false)
   let requestSeq = 0
 
   const LIMIT = 100
@@ -95,7 +98,13 @@
     untrack(() => loadVideos(true))
   })
 
-  $effect(() => startAutoReload(() => loadVideos(true)))
+  // The list reloads when asked to — a pull, a group, a kind — and never on its own.
+  async function refresh() {
+    if (loading) return
+    refreshing = true
+    await loadVideos(true)
+    refreshing = false
+  }
 
   $effect(() => {
     if (!sentinel) return
@@ -115,7 +124,27 @@
 <div
   class="feed"
   use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}
+  use:pullToRefresh={{ onPull: (px) => (pull = px), onRefresh: refresh, busy: () => loading }}
 >
+  <div
+    class="pull"
+    class:dragging={pull > 0}
+    class:ready={shouldRefresh(pull)}
+    style:height="{refreshing ? PULL_HOLD : pull}px"
+    role="status"
+  >
+    {#if refreshing}
+      <span class="pull-state"><Spinner inline />更新中</span>
+    {:else if pull > 0}
+      <span class="pull-state">
+        <Icon>
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <polyline points="6 13 12 19 18 13" />
+        </Icon>
+        {shouldRefresh(pull) ? '離して更新' : '引いて更新'}
+      </span>
+    {/if}
+  </div>
   <div class="kind-bar" role="group" aria-label="表示する種類">
     {#each [['video', '動画'], ['post', '投稿']] as [kind, label] (kind)}
       <button
@@ -174,6 +203,36 @@
 	padding: var(--sp-3) var(--sp-4)
 	max-width: 640px
 	margin: 0 auto
+
+// The pull below is this page's own. Keep the browser's overscroll inside the
+// list, so its pull-to-refresh — a reload of the whole page — never joins in.
+:global(main):has(> .feed)
+	overscroll-behavior-y: contain
+
+.pull
+	display: flex
+	align-items: flex-end
+	justify-content: center
+	overflow: hidden
+	color: var(--c-text-sub)
+	font-size: var(--fs-xs)
+	transition: height 0.2s ease
+
+	&.dragging
+		transition: none
+
+	&.ready
+		color: var(--c-text)
+
+		:global(.icon)
+			transform: rotate(180deg)
+
+.pull-state
+	display: flex
+	align-items: center
+	gap: var(--sp-2)
+	padding-bottom: var(--sp-3)
+	white-space: nowrap
 
 .video-list
 	display: flex

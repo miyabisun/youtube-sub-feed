@@ -136,6 +136,17 @@ Domain components on top of the Sumi recipes:
   state lasts for the session (group switches and swipes keep it) and
   every launch starts with all kinds on. With every kind off, the feed
   shows a short empty guide instead of items.
+- **Pull to refresh:** the feed reloads when the user pulls it down from
+  its top, and never by itself (user decision, 2026-11-16, task cc88f537:
+  pull to refresh instead of automatic refresh). The pull opens a strip in
+  the flow above the kind toggles, so the list moves with the finger and
+  nothing floats over the header or the cards; at rest the strip takes no
+  space. It holds one caption line in neutral chrome — a glyph and a short
+  state name — quiet per the template's gesture rule. Shape and words carry
+  the state, not hue or motion: the arrow points down while letting go
+  would do nothing and up once it would refresh, and the loading spinner
+  has its state name beside it, because nothing animates in Washi. A failed
+  refresh keeps the list and reports through the Toast.
 - **Post card:** a channel post shares the feed grid with video cards but
   reads as text, not a thumbnail: a surface panel (1px border, md radius)
   with a caption meta row (24px circular channel avatar, channel link,

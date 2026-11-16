@@ -13,6 +13,7 @@ export const IDS = [
   'gggggggggg7',
   'hhhhhhhhhh8',
 ]
+export const NEW_ID = 'nnnnnnnnnn9'
 const feed = () =>
   IDS.map((id, i) => ({
     kind: 'video',
@@ -43,16 +44,19 @@ export async function setup(
     groups = [],
     channels = [],
     failSettings = false,
+    touch = width < 768,
   } = {},
 ) {
   const context = await browser.newContext({
     viewport: { width, height },
     colorScheme: scheme,
-    hasTouch: width < 768,
+    hasTouch: touch,
     isMobile: width < 768,
   })
   const page = await context.newPage()
-  const log = { hide: [], feed: 0, youtube: [], settings: [] }
+  const log = { hide: [], feed: 0, feedQueries: [], youtube: [], settings: [] }
+  // How /api/feed answers from now on: a spec changes these while the page is open.
+  const server = { failFeed: false, holdFeed: null, newVideo: false }
   page.on('pageerror', (error) => expect.soft(error.message, 'uncaught page error').toBe(''))
   await context.route('**/*', async (route) => {
     const req = route.request()
@@ -78,12 +82,12 @@ export async function setup(
       if (/^\/api\/groups\/\d+\/channels$/.test(url.pathname)) return route.fulfill({ json: [] })
       if (url.pathname === '/api/feed') {
         log.feed++
-        return route.fulfill({
-          json:
-            url.searchParams.get('offset') === '0'
-              ? feed().filter((v) => !log.hide.includes(v.id))
-              : [],
-        })
+        log.feedQueries.push(url.search)
+        await server.holdFeed
+        if (server.failFeed) return route.fulfill({ status: 500, json: { error: 'down' } })
+        const first = feed().filter((v) => !log.hide.includes(v.id))
+        if (server.newVideo) first.unshift({ ...feed()[1], id: NEW_ID, title: '新しい動画' })
+        return route.fulfill({ json: url.searchParams.get('offset') === '0' ? first : [] })
       }
       if (url.pathname === '/api/history')
         return route.fulfill({
@@ -123,7 +127,52 @@ export async function setup(
       return route.fulfill({ contentType: 'image/png', body: PNG })
     return route.abort()
   })
-  return { context, page, log }
+  return { context, page, log, server }
+}
+
+// What the host app (subfeed-browser) does to every page before its scripts
+// run, plus a recorder of what the page hands over.
+export async function hosted(page) {
+  await page.addInitScript(() => {
+    window.__handedOver = []
+    window.addEventListener('message', (event) => {
+      if (event.source === window && event.data?.source === 'youtube-sub-feed')
+        window.__handedOver.push(event.data)
+    })
+    const mark = () => {
+      if (!document.documentElement) return false
+      document.documentElement.dataset.videoHost = '1'
+      return true
+    }
+    if (!mark())
+      new MutationObserver((_, observer) => mark() && observer.disconnect()).observe(document, {
+        childList: true,
+      })
+  })
+}
+
+// A finger on the screen: real touch input, so the browser scrolls and the
+// page's own gestures both see it. Returns with the finger still down unless
+// `release` is left on; call the returned function to lift it.
+export async function drag(page, from, to, { steps = 10, release = true } = {}) {
+  const cdp = await page.context().newCDPSession(page)
+  const touch = (type, points) =>
+    cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points })
+  await touch('touchStart', [{ x: from.x, y: from.y }])
+  for (let i = 1; i <= steps; i++) {
+    await touch('touchMove', [
+      { x: from.x + ((to.x - from.x) * i) / steps, y: from.y + ((to.y - from.y) * i) / steps },
+    ])
+    await page.waitForTimeout(16)
+  }
+  // `cancel`: the browser takes the touch away, as it does when its own
+  // long-press menu opens.
+  const lift = async ({ cancel = false } = {}) => {
+    await touch(cancel ? 'touchCancel' : 'touchEnd', [])
+    await cdp.detach()
+  }
+  if (release) await lift()
+  return lift
 }
 
 export const noHScroll = (page) =>

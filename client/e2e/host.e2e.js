@@ -1,27 +1,8 @@
 // Inside the app that hosts this page (subfeed-browser), opening a video is
 // the app's job: the page marks it watched and hands the video over.
 import { test } from '@playwright/test'
-import { BASE, IDS, check, setup } from './harness.js'
+import { BASE, IDS, check, hosted, setup } from './harness.js'
 
-// What the host does to every page before its scripts run, plus a recorder.
-async function hosted(page) {
-  await page.addInitScript(() => {
-    window.__handedOver = []
-    window.addEventListener('message', (event) => {
-      if (event.source === window && event.data?.source === 'youtube-sub-feed')
-        window.__handedOver.push(event.data)
-    })
-    const mark = () => {
-      if (!document.documentElement) return false
-      document.documentElement.dataset.videoHost = '1'
-      return true
-    }
-    if (!mark())
-      new MutationObserver((_, observer) => mark() && observer.disconnect()).observe(document, {
-        childList: true,
-      })
-  })
-}
 const handedOver = (page) => page.evaluate(() => window.__handedOver)
 const until = (page, count) => page.waitForFunction((n) => window.__handedOver.length === n, count)
 

@@ -58,6 +58,13 @@ Without the key, API catch-up and detail-based classification are unavailable.
 Without periodic catch-up, startup/manual refresh runs only one bounded pass.
 A new channel may show no videos until push delivery or API retrieval.
 
+## Refresh the feed
+
+The feed does not reload on its own: not on a timer, and not when you come back to its tab or app.
+On a touch screen, pull the feed down from its top and let go. A strip above the list shows whether letting go will refresh, and stays while the newest items load.
+Switching the group, or the **動画** (Videos) and **投稿** (Posts) toggles, also loads the list again.
+Without a touch screen, reload the page.
+
 ## Open a video
 
 A video card is a link: its thumbnail and title open the video on YouTube in a new tab, Shorts at their Shorts address.

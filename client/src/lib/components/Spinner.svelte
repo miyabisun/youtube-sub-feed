@@ -1,4 +1,9 @@
-<div class="spinner"></div>
+<script>
+  // `inline` drops the block margin, for a spinner that sits beside a label.
+  let { inline = false } = $props()
+</script>
+
+<div class="spinner" class:inline></div>
 
 <style lang="sass">
 .spinner
@@ -9,6 +14,9 @@
 	border-radius: 50%
 	animation: spin 0.8s linear infinite
 	margin: var(--sp-5) auto
+
+	&.inline
+		margin: 0
 
 @keyframes spin
 	to
