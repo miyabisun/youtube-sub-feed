@@ -21,6 +21,7 @@ pub fn open(path: &str) -> Connection {
     drop_videos_thumbnail_url(&conn);
     add_videos_is_members_only(&conn);
     migrate_timestamps_to_unix(&conn);
+    add_user_channels_hide_posts(&conn);
     add_videos_details_checked_at(&conn);
     add_videos_details_attempted_at(&conn);
     add_videos_shorts_classifier_version(&conn);
@@ -47,6 +48,27 @@ fn add_user_channels_hide_shorts(conn: &Connection) {
         Ok(_) => tracing::info!("[migrate] Added user_channels.hide_shorts column"),
         Err(e) => tracing::warn!(
             "[migrate] Failed to add user_channels.hide_shorts column: {}",
+            e
+        ),
+    }
+}
+
+/// Add the per-user, per-channel community-post suppression preference.
+///
+/// Existing subscriptions keep showing posts because the column defaults to
+/// zero. Idempotent so it is safe to run at every startup. Runs after the
+/// timestamp rebuild, which recreates `user_channels` from a fixed column list.
+fn add_user_channels_hide_posts(conn: &Connection) {
+    if column_exists(conn, "user_channels", "hide_posts") {
+        return;
+    }
+    match conn.execute(
+        "ALTER TABLE user_channels ADD COLUMN hide_posts INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => tracing::info!("[migrate] Added user_channels.hide_posts column"),
+        Err(e) => tracing::warn!(
+            "[migrate] Failed to add user_channels.hide_posts column: {}",
             e
         ),
     }
@@ -349,6 +371,7 @@ const SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS users (
             is_favorite INTEGER NOT NULL DEFAULT 0,
             show_livestreams INTEGER NOT NULL DEFAULT 0,
             hide_shorts INTEGER NOT NULL DEFAULT 0,
+            hide_posts INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER DEFAULT (unixepoch()),
             PRIMARY KEY (user_id, channel_id),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -1253,16 +1276,17 @@ mod tests {
         )
         .unwrap();
 
-        let (is_favorite, show_livestreams, hide_shorts): (i64, i64, i64) = conn
+        let (is_favorite, show_livestreams, hide_shorts, hide_posts): (i64, i64, i64, i64) = conn
             .query_row(
-                "SELECT is_favorite, show_livestreams, hide_shorts FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
+                "SELECT is_favorite, show_livestreams, hide_shorts, hide_posts FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(is_favorite, 0);
         assert_eq!(show_livestreams, 0);
         assert_eq!(hide_shorts, 0);
+        assert_eq!(hide_posts, 0);
     }
 
     #[test]
@@ -1295,6 +1319,129 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (1, 1, 0, 123));
+    }
+
+    #[test]
+    fn add_user_channels_hide_posts_preserves_existing_subscriptions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_channels (
+                user_id INTEGER NOT NULL,
+                channel_id TEXT NOT NULL,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                show_livestreams INTEGER NOT NULL DEFAULT 0,
+                hide_shorts INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER,
+                PRIMARY KEY (user_id, channel_id)
+            );
+            INSERT INTO user_channels
+                (user_id, channel_id, is_favorite, show_livestreams, hide_shorts, created_at)
+            VALUES (7, 'UClegacy', 1, 1, 1, 123), (8, 'UClegacy', 0, 0, 0, 456);",
+        )
+        .unwrap();
+
+        super::add_user_channels_hide_posts(&conn);
+        conn.execute(
+            "UPDATE user_channels SET hide_posts = 1 WHERE user_id = 8",
+            [],
+        )
+        .unwrap();
+        super::add_user_channels_hide_posts(&conn);
+
+        let rows: Vec<(i64, i64, i64, i64, i64, i64)> = conn
+            .prepare(
+                "SELECT user_id, is_favorite, show_livestreams, hide_shorts, hide_posts, created_at
+                 FROM user_channels ORDER BY user_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![(7, 1, 1, 1, 0, 123), (8, 0, 0, 0, 1, 456)]);
+    }
+
+    #[test]
+    fn open_adds_hide_posts_off_to_a_database_file_created_before_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "youtube-sub-feed-hide-posts-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("feed.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            super::create_tables(&conn);
+            conn.execute_batch(
+                "ALTER TABLE user_channels DROP COLUMN hide_posts;
+                 INSERT INTO channels (id,title) VALUES ('UC1','A'),('UC2','B');
+                 INSERT INTO users (email) VALUES ('legacy@example.com');
+                 INSERT INTO user_channels (user_id,channel_id,hide_shorts)
+                 VALUES (1,'UC1',1),(1,'UC2',0);",
+            )
+            .unwrap();
+        }
+
+        let conn = super::open(path.to_str().unwrap());
+
+        let rows: Vec<(String, i64, i64)> = conn
+            .prepare("SELECT channel_id, hide_shorts, hide_posts FROM user_channels ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(conn);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            rows,
+            vec![("UC1".to_string(), 1, 0), ("UC2".to_string(), 0, 0)]
+        );
+    }
+
+    #[test]
+    fn timestamp_rebuild_followed_by_hide_posts_keeps_shorts_ng_and_defaults_posts_ng_off() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::create_tables(&conn);
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE user_channels;
+             CREATE TABLE user_channels (
+                user_id INTEGER NOT NULL, channel_id TEXT NOT NULL,
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                show_livestreams INTEGER NOT NULL DEFAULT 0,
+                hide_shorts INTEGER NOT NULL DEFAULT 0, created_at TEXT,
+                PRIMARY KEY (user_id, channel_id));
+             INSERT INTO channels (id,title) VALUES ('UC1','Ch');
+             INSERT INTO users (email) VALUES ('legacy@example.com');
+             INSERT INTO user_channels (user_id,channel_id,hide_shorts,created_at)
+             VALUES (1,'UC1',1,'2024-01-01T00:00:00Z');
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+
+        super::migrate_timestamps_to_unix(&conn);
+        super::add_user_channels_hide_posts(&conn);
+
+        let row: (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT hide_shorts, hide_posts, created_at FROM user_channels
+                 WHERE user_id = 1 AND channel_id = 'UC1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (1, 0, Some(1_704_067_200)));
     }
 
     #[test]

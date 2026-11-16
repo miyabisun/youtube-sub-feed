@@ -42,6 +42,7 @@ export async function setup(
     gisClientId = 'test-client',
     groups = [],
     channels = [],
+    failSettings = false,
   } = {},
 ) {
   const context = await browser.newContext({
@@ -51,7 +52,7 @@ export async function setup(
     isMobile: width < 768,
   })
   const page = await context.newPage()
-  const log = { hide: [], feed: 0, youtube: [] }
+  const log = { hide: [], feed: 0, youtube: [], settings: [] }
   page.on('pageerror', (error) => expect.soft(error.message, 'uncaught page error').toBe(''))
   await context.route('**/*', async (route) => {
     const req = route.request()
@@ -61,6 +62,15 @@ export async function setup(
         return route.fulfill({ json: { email: 'me@example.test' } })
       if (url.pathname === '/api/groups') return route.fulfill({ json: groups })
       if (url.pathname === '/api/channels') return route.fulfill({ json: channels })
+      // A channel's settings: kept here as the server keeps them, so a reload shows them.
+      const settings = url.pathname.match(/^\/api\/channels\/([\w-]+)$/)
+      if (settings && req.method() === 'PATCH') {
+        const body = req.postDataJSON()
+        log.settings.push({ id: settings[1], body })
+        if (failSettings) return route.fulfill({ status: 500, json: { error: 'refused' } })
+        Object.assign(channels.find((c) => c.id === settings[1]) ?? {}, body)
+        return route.fulfill({ json: { ok: true } })
+      }
       if (/^\/api\/channels\/[\w-]+\/videos$/.test(url.pathname))
         return route.fulfill({
           json: (url.searchParams.get('offset') ?? '0') === '0' ? feed().slice(0, 3) : [],

@@ -19,6 +19,22 @@
 
   const LIMIT = 100
 
+  // The per-user switches of a channel, in the order they are shown.
+  const SETTINGS = [
+    { field: 'is_favorite', label: 'お気に入り' },
+    { field: 'show_livestreams', label: 'ライブ表示' },
+    {
+      field: 'hide_shorts',
+      label: 'ショートNG',
+      description: 'ONにすると、このチャンネルのShortsを動画一覧・RSS・新着から除外します。',
+    },
+    {
+      field: 'hide_posts',
+      label: '投稿NG',
+      description: 'ONにすると、このチャンネルの投稿を動画一覧・視聴履歴から除外します。',
+    },
+  ]
+
   async function loadData(reset = false) {
     if (reset) {
       videos = []
@@ -114,41 +130,27 @@
           >
         </div>
         <div class="channel-settings">
-          <button
-            class="toggle-btn"
-            class:active={channel.is_favorite}
-            role="switch"
-            aria-checked={!!channel.is_favorite}
-            onclick={() => toggleSetting('is_favorite')}
-          >
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            お気に入り
-          </button>
-          <button
-            class="toggle-btn"
-            class:active={channel.show_livestreams}
-            role="switch"
-            aria-checked={!!channel.show_livestreams}
-            onclick={() => toggleSetting('show_livestreams')}
-          >
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            ライブ表示
-          </button>
-          <button
-            class="toggle-btn"
-            class:active={channel.hide_shorts}
-            role="switch"
-            aria-checked={!!channel.hide_shorts}
-            aria-describedby="shorts-ng-description"
-            onclick={() => toggleSetting('hide_shorts')}
-          >
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-            ショートNG
-          </button>
+          {#each SETTINGS as setting (setting.field)}
+            <button
+              class="toggle-btn"
+              class:active={channel[setting.field]}
+              role="switch"
+              aria-checked={!!channel[setting.field]}
+              aria-describedby={setting.description ? `${setting.field}-description` : undefined}
+              onclick={() => toggleSetting(setting.field)}
+            >
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              {setting.label}
+            </button>
+          {/each}
         </div>
-        <p id="shorts-ng-description" class="setting-description">
-          ONにすると、このチャンネルのShortsを動画一覧・RSS・新着から除外します。
-        </p>
+        {#each SETTINGS as setting (setting.field)}
+          {#if setting.description}
+            <p id="{setting.field}-description" class="setting-description">
+              {setting.description}
+            </p>
+          {/if}
+        {/each}
       </div>
     {/if}
 

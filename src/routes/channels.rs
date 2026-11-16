@@ -152,7 +152,7 @@ async fn get_channels(
               (SELECT GROUP_CONCAT(g.name, ', ')
                FROM channel_groups cg JOIN groups g ON cg.group_id = g.id
                WHERE cg.channel_id = c.id AND g.user_id = ?1) as group_names,
-              uc.is_favorite, uc.hide_shorts
+              uc.is_favorite, uc.hide_shorts, uc.hide_posts
             FROM channels c
             JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
             ORDER BY c.title COLLATE NOCASE",
@@ -168,6 +168,7 @@ async fn get_channels(
                     "group_names": row.get::<_, Option<String>>(5)?,
                     "is_favorite": row.get::<_, i64>(6)?,
                     "hide_shorts": row.get::<_, i64>(7)?,
+                    "hide_posts": row.get::<_, i64>(8)?,
                 }))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -528,6 +529,8 @@ pub(crate) struct UpdateChannelBody {
     is_favorite: Option<i64>,
     /// Shortsをフィードから除外 (0: 表示, 1: 除外)
     hide_shorts: Option<i64>,
+    /// 投稿をフィードと視聴履歴から除外 (0: 表示, 1: 除外)
+    hide_posts: Option<i64>,
 }
 
 #[utoipa::path(
@@ -535,7 +538,7 @@ pub(crate) struct UpdateChannelBody {
     path = "/api/channels/{id}",
     tag = "チャンネル",
     summary = "チャンネル設定更新",
-    description = "show_livestreams, is_favorite, hide_shorts を更新する（ユーザー単位の設定）。",
+    description = "show_livestreams, is_favorite, hide_shorts, hide_posts を更新する（ユーザー単位の設定）。",
     params(("id" = String, Path, description = "チャンネルID")),
     request_body(content = UpdateChannelBody),
     responses(
@@ -550,15 +553,16 @@ async fn update_channel(
     Path(id): Path<String>,
     Json(body): Json<UpdateChannelBody>,
 ) -> Result<Json<Value>, AppError> {
-    if body.show_livestreams.is_none() && body.is_favorite.is_none() && body.hide_shorts.is_none() {
-        return Err(AppError::BadRequest("No fields to update".to_string()));
-    }
-
-    for (val, name) in [
+    let fields = [
         (body.show_livestreams, "show_livestreams"),
         (body.is_favorite, "is_favorite"),
         (body.hide_shorts, "hide_shorts"),
-    ] {
+        (body.hide_posts, "hide_posts"),
+    ];
+    if fields.iter().all(|(val, _)| val.is_none()) {
+        return Err(AppError::BadRequest("No fields to update".to_string()));
+    }
+    for (val, name) in fields {
         if let Some(v) = val {
             if v != 0 && v != 1 {
                 return Err(AppError::BadRequest(format!("{name} must be 0 or 1")));
@@ -571,12 +575,14 @@ async fn update_channel(
         conn.execute(
             "UPDATE user_channels SET show_livestreams = COALESCE(?1, show_livestreams),
                                       is_favorite = COALESCE(?2, is_favorite),
-                                      hide_shorts = COALESCE(?3, hide_shorts)
-             WHERE user_id = ?4 AND channel_id = ?5",
+                                      hide_shorts = COALESCE(?3, hide_shorts),
+                                      hide_posts = COALESCE(?4, hide_posts)
+             WHERE user_id = ?5 AND channel_id = ?6",
             rusqlite::params![
                 body.show_livestreams,
                 body.is_favorite,
                 body.hide_shorts,
+                body.hide_posts,
                 user_id.0,
                 id
             ],
@@ -1349,6 +1355,103 @@ mod tests {
             assert!(error_message(resp)
                 .await
                 .contains("hide_shorts must be 0 or 1"));
+        }
+
+        #[tokio::test]
+        async fn update_channel_sets_hide_posts_and_leaves_other_settings() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCpostsxxxxxxxxxxxxxxxxx", "s");
+            assert_eq!(
+                patch_channel(&state, "UCpostsxxxxxxxxxxxxxxxxx", r#"{"hide_shorts":1}"#).await,
+                StatusCode::OK
+            );
+
+            assert_eq!(
+                patch_channel(&state, "UCpostsxxxxxxxxxxxxxxxxx", r#"{"hide_posts":1}"#).await,
+                StatusCode::OK
+            );
+
+            let read = || -> (i64, i64) {
+                let conn = state.conn();
+                conn.query_row(
+                    "SELECT hide_posts, hide_shorts FROM user_channels WHERE user_id = 1 AND channel_id = 'UCpostsxxxxxxxxxxxxxxxxx'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+            };
+            assert_eq!(read(), (1, 1));
+
+            assert_eq!(
+                patch_channel(&state, "UCpostsxxxxxxxxxxxxxxxxx", r#"{"hide_posts":0}"#).await,
+                StatusCode::OK
+            );
+            assert_eq!(read(), (0, 1));
+        }
+
+        #[tokio::test]
+        async fn channels_list_exposes_hide_posts() {
+            let state = setup_state();
+            subscribe_user1(&state, "UClistpostsxxxxxxxxxxxxx", "s");
+
+            let list = || async {
+                let resp = app(&state)
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/channels")
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            };
+            assert_eq!(list().await[0]["hide_posts"], 0);
+
+            state
+                .conn()
+                .execute(
+                    "UPDATE user_channels SET hide_posts = 1
+                     WHERE user_id = 1 AND channel_id = 'UClistpostsxxxxxxxxxxxxx'",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(list().await[0]["hide_posts"], 1);
+        }
+
+        #[tokio::test]
+        async fn update_channel_rejects_invalid_hide_posts_value() {
+            let state = setup_state();
+            subscribe_user1(&state, "UCbadpostsxxxxxxxxxxxxxx", "s");
+
+            for body in [r#"{"hide_posts":2}"#, r#"{"hide_posts":-1}"#] {
+                let resp = app(&state)
+                    .oneshot(
+                        Request::builder()
+                            .method("PATCH")
+                            .uri("/api/channels/UCbadpostsxxxxxxxxxxxxxx")
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+                assert!(error_message(resp)
+                    .await
+                    .contains("hide_posts must be 0 or 1"));
+            }
+            let stored: i64 = state
+                .conn()
+                .query_row(
+                    "SELECT hide_posts FROM user_channels WHERE user_id = 1 AND channel_id = 'UCbadpostsxxxxxxxxxxxxxx'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, 0);
         }
 
         #[tokio::test]

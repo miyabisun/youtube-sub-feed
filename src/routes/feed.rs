@@ -90,6 +90,7 @@ const FEED_POSTS: &str = "SELECT p.id AS id, p.channel_id, NULL, p.published_at 
      JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
      LEFT JOIN user_posts up ON up.post_id = p.id AND up.user_id = ?1
      WHERE COALESCE(up.is_hidden, 0) = 0
+       AND uc.hide_posts = 0
        AND (?2 IS NULL OR c.id IN (SELECT channel_id FROM channel_groups WHERE group_id = ?2))";
 
 fn feed_item_json(row: &rusqlite::Row) -> rusqlite::Result<Value> {
@@ -142,7 +143,7 @@ fn video_json(row: &rusqlite::Row, watched_at_index: Option<usize>) -> rusqlite:
     path = "/api/feed",
     tag = "動画フィード",
     summary = "動画一覧取得",
-    description = "ユーザーが購読しているチャンネルの動画と投稿を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画・投稿を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- グループIDで絞り込み可能\n- kinds で種類を指定 (video, post)。省略時は動画のみ。各項目は kind を持つ\n- 投稿の公開日時は相対表記から推定した値",
+    description = "ユーザーが購読しているチャンネルの動画と投稿を公開日時の降順で取得する。\n\n- ユーザーが非表示にした動画・投稿を除外\n- ライブ配信はユーザーの show_livestreams=1 の場合のみ表示\n- Shortsはユーザーの hide_shorts=1 のチャンネルでは除外\n- 投稿はユーザーの hide_posts=1 のチャンネルでは除外\n- グループIDで絞り込み可能\n- kinds で種類を指定 (video, post)。省略時は動画のみ。各項目は kind を持つ\n- 投稿の公開日時は相対表記から推定した値",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
@@ -199,7 +200,7 @@ async fn get_feed(
     path = "/api/history",
     tag = "動画フィード",
     summary = "視聴履歴取得",
-    description = "ユーザーが非表示にした動画と投稿を記録日時の降順で取得する。投稿は kind=post と watched_at を持つ。動画の既存の形式は維持する。",
+    description = "ユーザーが非表示にした動画と投稿を記録日時の降順で取得する。投稿は kind=post と watched_at を持つ。動画の既存の形式は維持する。hide_posts=1 のチャンネルの投稿は除外する。",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
@@ -236,7 +237,9 @@ async fn get_history(
              FROM user_posts up
              JOIN posts p ON p.id = up.post_id
              JOIN channels c ON c.id = p.channel_id
+             LEFT JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
              WHERE up.user_id = ?1 AND up.is_hidden = 1
+               AND COALESCE(uc.hide_posts, 0) = 0
              ORDER BY marked_order DESC, id DESC, kind
              LIMIT ?2 OFFSET ?3",
         )?;
@@ -926,6 +929,119 @@ mod tests {
             feed_ids_as(&state, "", Some("user2@example.com")).await,
             vec!["v_short"]
         );
+    }
+
+    fn set_channel_flag(state: &AppState, column: &str, channel_id: &str, value: i64) {
+        state
+            .conn()
+            .execute(
+                &format!(
+                    "UPDATE user_channels SET {column} = ?1 WHERE user_id = 1 AND channel_id = ?2"
+                ),
+                params![value, channel_id],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn feed_excludes_posts_of_posts_ng_channels_until_turned_off() {
+        let state = setup_state();
+        insert_mixed(&state);
+        set_channel_flag(&state, "hide_posts", "UC1", 1);
+
+        // UC1's post p2 is gone; its video v1 and the other channel's post stay.
+        assert_eq!(
+            feed_ids(&state, "?kinds=video,post").await,
+            vec!["p4", "v3", "v1"]
+        );
+        assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p4"]);
+
+        set_channel_flag(&state, "hide_posts", "UC1", 0);
+        assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p4", "p2"]);
+    }
+
+    #[tokio::test]
+    async fn posts_ng_is_scoped_to_the_user() {
+        let state = setup_state();
+        insert_mixed(&state);
+        state
+            .conn()
+            .execute_batch(
+                "INSERT INTO users (google_id,email) VALUES ('g2','user2@example.com');
+                 INSERT INTO user_channels (user_id,channel_id) VALUES (2,'UC1'),(2,'UC2');",
+            )
+            .unwrap();
+        set_channel_flag(&state, "hide_posts", "UC1", 1);
+
+        assert_eq!(feed_ids(&state, "?kinds=post").await, vec!["p4"]);
+        assert_eq!(
+            feed_ids_as(&state, "?kinds=post", Some("user2@example.com")).await,
+            vec!["p4", "p2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn posts_ng_and_shorts_ng_apply_independently() {
+        let state = setup_state();
+        insert_video(&state, "v_short", "UC1", "2024-01-03T00:00:00Z", 0);
+        insert_post(&state, "p2", "UC1", JAN_2);
+        state
+            .conn()
+            .execute("UPDATE videos SET is_short = 1 WHERE id = 'v_short'", [])
+            .unwrap();
+        let all = "?kinds=video,post";
+
+        set_channel_flag(&state, "hide_posts", "UC1", 1);
+        assert_eq!(feed_ids(&state, all).await, vec!["v_short"]);
+
+        set_channel_flag(&state, "hide_shorts", "UC1", 1);
+        assert!(feed_ids(&state, all).await.is_empty());
+
+        set_channel_flag(&state, "hide_posts", "UC1", 0);
+        assert_eq!(feed_ids(&state, all).await, vec!["p2"]);
+    }
+
+    #[tokio::test]
+    async fn history_excludes_posts_of_posts_ng_channels_until_turned_off() {
+        let state = setup_state();
+        insert_mixed(&state);
+        state
+            .conn()
+            .execute_batch(
+                "INSERT INTO user_videos (user_id,video_id,is_hidden,created_at) VALUES (1,'v1',1,40);
+                 INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30),(1,'p4',1,10);
+                 INSERT INTO users (google_id,email) VALUES ('g2','user2@example.com');
+                 INSERT INTO user_channels (user_id,channel_id) VALUES (2,'UC1');
+                 INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (2,'p2',1,50);",
+            )
+            .unwrap();
+        set_channel_flag(&state, "hide_posts", "UC1", 1);
+
+        // UC1's hidden video stays; only its post leaves, and only for user 1.
+        assert_eq!(history_ids(&state, "").await, vec!["v1", "p4"]);
+        assert_eq!(history_ids(&state, "?limit=1&offset=1").await, vec!["p4"]);
+        assert_eq!(
+            history_ids_as(&state, "", Some("user2@example.com")).await,
+            vec!["p2"]
+        );
+
+        set_channel_flag(&state, "hide_posts", "UC1", 0);
+        assert_eq!(history_ids(&state, "").await, vec!["v1", "p2", "p4"]);
+    }
+
+    #[tokio::test]
+    async fn history_keeps_posts_of_channels_the_user_no_longer_subscribes_to() {
+        let state = setup_state();
+        insert_mixed(&state);
+        state
+            .conn()
+            .execute_batch(
+                "INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30);
+                 DELETE FROM user_channels WHERE user_id = 1 AND channel_id = 'UC1';",
+            )
+            .unwrap();
+
+        assert_eq!(history_ids(&state, "").await, vec!["p2"]);
     }
 
     #[tokio::test]

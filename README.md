@@ -71,6 +71,7 @@ The header carries `data-video-host-keep`. It marks the part a host app is to ke
 The feed also shows the public posts from your channels' Posts tab, mixed with videos by time.
 Use **動画** (Videos) and **投稿** (Posts) above the feed to choose what appears; both start on.
 **返信** (Reply) opens the post on YouTube, where you reply; on a phone, the YouTube app may open it.
+To leave one channel's posts out, turn on **投稿NG** (No posts) on that channel's page; its videos still appear.
 
 The app reads the first page of each Posts tab about once an hour, starting at launch, without signing in.
 YouTube offers no official API for posts, so this uses its unofficial web endpoint.
