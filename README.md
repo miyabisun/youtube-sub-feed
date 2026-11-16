@@ -72,7 +72,7 @@ A video card is a link: its thumbnail and title open the video on YouTube in a n
 The list stays where it was, and a video opened from the feed is marked as watched.
 
 Inside [subfeed-browser](https://github.com/miyabisun/subfeed-browser), an Android browser built for this feed, a tap hands the video to the app instead, which opens it on YouTube's own page.
-The header carries `data-video-host-keep`. It marks the part a host app is to keep on screen above the video, closing the video when that part is pressed; other browsers ignore it.
+The header carries `data-video-host-keep`. It marks the part a host app is to keep on screen above the video. The header keeps working there: its menu opens over the video, and the app brings the feed back to the front when the page moves to another group or page. Other browsers ignore the mark.
 
 ## Read channel posts
 
