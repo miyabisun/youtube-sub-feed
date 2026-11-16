@@ -200,7 +200,7 @@ async fn get_feed(
     path = "/api/history",
     tag = "動画フィード",
     summary = "視聴履歴取得",
-    description = "ユーザーが非表示にした動画と投稿を記録日時の降順で取得する。投稿は kind=post と watched_at を持つ。動画の既存の形式は維持する。hide_posts=1 のチャンネルの投稿は除外する。",
+    description = "ユーザーが非表示にした動画と投稿を記録日時の降順で取得する。投稿は kind=post と watched_at を持つ。動画の既存の形式は維持する。",
     params(
         ("limit" = Option<i64>, Query, description = "取得件数 (デフォルト: 100, 最大: 500)"),
         ("offset" = Option<i64>, Query, description = "オフセット (デフォルト: 0)"),
@@ -237,9 +237,7 @@ async fn get_history(
              FROM user_posts up
              JOIN posts p ON p.id = up.post_id
              JOIN channels c ON c.id = p.channel_id
-             LEFT JOIN user_channels uc ON uc.channel_id = c.id AND uc.user_id = ?1
              WHERE up.user_id = ?1 AND up.is_hidden = 1
-               AND COALESCE(uc.hide_posts, 0) = 0
              ORDER BY marked_order DESC, id DESC, kind
              LIMIT ?2 OFFSET ?3",
         )?;
@@ -1002,31 +1000,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_excludes_posts_of_posts_ng_channels_until_turned_off() {
+    async fn history_is_the_same_whether_posts_ng_is_on_or_off() {
         let state = setup_state();
         insert_mixed(&state);
         state
             .conn()
             .execute_batch(
                 "INSERT INTO user_videos (user_id,video_id,is_hidden,created_at) VALUES (1,'v1',1,40);
-                 INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30),(1,'p4',1,10);
-                 INSERT INTO users (google_id,email) VALUES ('g2','user2@example.com');
-                 INSERT INTO user_channels (user_id,channel_id) VALUES (2,'UC1');
-                 INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (2,'p2',1,50);",
+                 INSERT INTO user_posts (user_id,post_id,is_hidden,created_at) VALUES (1,'p2',1,30),(1,'p4',1,10);",
             )
             .unwrap();
-        set_channel_flag(&state, "hide_posts", "UC1", 1);
+        let before = history_json_as(&state, "", None).await;
+        assert_eq!(history_ids(&state, "").await, vec!["v1", "p2", "p4"]);
 
-        // UC1's hidden video stays; only its post leaves, and only for user 1.
-        assert_eq!(history_ids(&state, "").await, vec!["v1", "p4"]);
-        assert_eq!(history_ids(&state, "?limit=1&offset=1").await, vec!["p4"]);
-        assert_eq!(
-            history_ids_as(&state, "", Some("user2@example.com")).await,
-            vec!["p2"]
-        );
+        set_channel_flag(&state, "hide_posts", "UC1", 1);
+        assert_eq!(history_json_as(&state, "", None).await, before);
+        assert_eq!(history_ids(&state, "?limit=1&offset=1").await, vec!["p2"]);
 
         set_channel_flag(&state, "hide_posts", "UC1", 0);
-        assert_eq!(history_ids(&state, "").await, vec!["v1", "p2", "p4"]);
+        assert_eq!(history_json_as(&state, "", None).await, before);
     }
 
     #[tokio::test]

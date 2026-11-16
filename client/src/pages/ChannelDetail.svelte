@@ -31,7 +31,7 @@
     {
       field: 'hide_posts',
       label: '投稿NG',
-      description: 'ONにすると、このチャンネルの投稿を動画一覧・視聴履歴から除外します。',
+      description: 'ONにすると、このチャンネルの投稿を動画一覧から除外します。',
     },
   ]
 

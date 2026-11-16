@@ -27,9 +27,7 @@ test('投稿NG saves by itself and survives a reload', async ({ browser }) => {
   await expect.soft(toggle(page, 'ショートNG')).toHaveAttribute('aria-checked', 'true')
   await expect
     .soft(toggle(page, '投稿NG'))
-    .toHaveAccessibleDescription(
-      'ONにすると、このチャンネルの投稿を動画一覧・視聴履歴から除外します。',
-    )
+    .toHaveAccessibleDescription('ONにすると、このチャンネルの投稿を動画一覧から除外します。')
   await expect
     .soft(toggle(page, 'ショートNG'))
     .toHaveAccessibleDescription(

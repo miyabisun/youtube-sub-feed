@@ -116,7 +116,7 @@ pub struct ChannelItem {
     pub is_favorite: i64,
     /// Shortsをフィードから除外 (0: 表示, 1: 除外)
     pub hide_shorts: i64,
-    /// 投稿をフィードと視聴履歴から除外 (0: 表示, 1: 除外)
+    /// 投稿をフィードから除外 (0: 表示, 1: 除外)
     pub hide_posts: i64,
 }
 
