@@ -22,10 +22,7 @@ export function requestGisToken(clientId, scope) {
         if (response.error) {
           reject(new Error(response.error_description || response.error))
         } else {
-          resolve({
-            accessToken: response.access_token,
-            expiresIn: Number(response.expires_in) || 0,
-          })
+          resolve(response.access_token)
         }
       },
       error_callback: (err) => {
@@ -34,33 +31,4 @@ export function requestGisToken(clientId, scope) {
     })
     client.requestAccessToken()
   })
-}
-
-/** Renew this long before the stated expiry, so a request never starts with a dying token. */
-const EXPIRY_MARGIN_MS = 60_000
-
-/**
- * Keep one token for as long as Google says it lives, so the consent popup
- * appears once per visit rather than once per comment.
- */
-export function createTokenCache(request, now = Date.now) {
-  let token = null
-  let expiresAt = 0
-
-  return {
-    async get() {
-      if (token && now() < expiresAt) return token
-      const { accessToken, expiresIn } = await request()
-      token = accessToken
-      expiresAt = now() + expiresIn * 1000 - EXPIRY_MARGIN_MS
-      return token
-    },
-    /** The token if one is live, without ever opening the consent popup. */
-    peek() {
-      return token && now() < expiresAt ? token : null
-    },
-    invalidate() {
-      token = null
-    },
-  }
 }

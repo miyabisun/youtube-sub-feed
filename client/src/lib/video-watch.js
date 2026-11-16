@@ -3,15 +3,6 @@ export function isWatchActivation(event) {
   return event.type === 'auxclick' && event.button === 1
 }
 
-/** A plain tap plays in the app; modifier and middle clicks keep opening YouTube in a new tab. */
-export function opensInApp(event) {
-  return (
-    event.type === 'click' &&
-    event.button === 0 &&
-    !(event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)
-  )
-}
-
 export function createVideoHider({ hideRequest, onHidden, onSuccess, onError }) {
   const pending = new Set()
 

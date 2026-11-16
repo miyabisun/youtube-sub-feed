@@ -1,7 +1,7 @@
 // How focus is drawn: a text field recolours its own border and nothing else,
 // while controls without a border of their own keep the shared ring.
 import { test } from '@playwright/test'
-import { BASE, IDS, check, setup } from './harness.js'
+import { BASE, check, setup } from './harness.js'
 
 const GROUPS = [{ id: 1, name: 'ゲーム', sort_order: 0 }]
 const CHANNELS = [{ id: 'UC' + 'x'.repeat(22), title: 'チャンネル', group_names: null }]
@@ -32,14 +32,6 @@ for (const scheme of ['dark', 'light']) {
   test(`a focused text field shows one line (${scheme})`, async ({ browser }) => {
     const options = { scheme, width: 1280, height: 800, groups: GROUPS, channels: CHANNELS }
     const { context, page } = await setup(browser, options)
-
-    await page.goto(BASE + '/?watch=' + IDS[0])
-    const box = page.getByRole('textbox', { name: 'コメント', exact: true })
-    await oneLine(page, 'comment box', box)
-    await box.fill('直す前')
-    await page.getByRole('button', { name: '送信' }).click()
-    await page.getByRole('button', { name: '編集' }).click()
-    await oneLine(page, 'comment edit box', page.getByRole('textbox', { name: 'コメントを編集' }))
 
     await page.goto(BASE + '/channels')
     await oneLine(page, 'channel id', page.getByPlaceholder('チャンネルID'))

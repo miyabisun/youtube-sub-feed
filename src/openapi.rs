@@ -165,30 +165,3 @@ pub struct MeResponse {
 }
 
 // RefreshResponse removed (refresh_channel endpoint was removed with OAuth)
-
-/// 動画のトップレベルコメント
-#[derive(Serialize, ToSchema)]
-pub struct CommentItem {
-    /// コメントID
-    pub id: String,
-    /// 投稿者の表示名
-    pub author: String,
-    /// 投稿者のアイコンURL
-    pub author_avatar: Option<String>,
-    /// 本文 (プレーンテキスト)
-    pub text: String,
-    /// 高評価の数
-    pub like_count: u64,
-    /// 投稿日時 (ISO 8601)
-    pub published_at: Option<String>,
-}
-
-/// 動画のコメント 1 ページ
-#[derive(Serialize, ToSchema)]
-pub struct CommentsResponse {
-    /// "ok" / "unavailable" / "disabled" / "quota"
-    pub status: String,
-    pub items: Vec<CommentItem>,
-    /// 次のページのトークン。最後のページでは null
-    pub next_page_token: Option<String>,
-}

@@ -96,11 +96,9 @@ a quiet overlay). Only ongoing or format states earn a hue.
 
 ## Layout
 
-The template's two-pane list+detail grid does not apply. A video's detail
-is the **watch view**: a full-screen layer over the list that plays the video
-in place, so the list underneath keeps its items and scroll position and
-closing the layer returns exactly there. It is a full-screen reader, not the
-template's centred 80dvh modal — the player is the content.
+The template's two-pane list+detail grid does not apply: the "detail" view
+of a video is YouTube itself, reached by an external link, so this app has
+no detail pane. Instead:
 
 - **Feed:** single column (max 640px, centered) on mobile; at ≥768px it
   becomes a **3-column thumbnail grid**. The thumbnails are the content —
@@ -114,37 +112,11 @@ Domain components on top of the Sumi recipes:
 
 - **Video card:** 16:9 thumbnail (cover, md radius) over a two-line
   ellipsized body title and a caption meta row (channel link + relative
-  time, muted). The card opens the watch view; only new-tab gestures
-  (modifier or middle click) leave for YouTube. Thumbnail
+  time, muted). The card links out to YouTube in a new tab. Thumbnail
   overlays — the duration pill (bottom-right, white caption on a
   near-black scrim) and the hide button — sit on the image, not the
   chrome, and use scrim-on-image colors per the template's image-viewer
   exception.
-- **Watch view:** a 48px bar (quiet back button, one-line ellipsized
-  title, quiet external-link button to YouTube), the video on a black
-  stage, and one text column with the comment box and the comments. The
-  column opens with the caption meta row (channel link, relative time),
-  which ends in the like toggle: a quiet 40px icon button whose thumb is
-  an outline when off and filled in the accent when on, so shape carries
-  the state. What a like has to say (ratings turned off, a failure) is one
-  caption line under that row. The video always gets the most the screen
-  allows. Upright screen: the video
-  spans the width, and the bar and the video stay fixed while the comments
-  scroll beneath; a portrait video instead takes the height of the screen.
-  Screen on its side: the video and the comments stand side by side — the
-  video takes the height under the bar, the comments scroll in their own
-  column (never narrower than 320px), and the way back, the comments and
-  the comment box are all on screen with the video; nothing overlays the
-  video. The comment box is a multi-line field that grows with its text.
-  Comments are plain body-sm text on the page background with the post
-  card's caption meta row (24px circular avatar, author, time) — smaller
-  than the body-size text being written, so more of them fit a screen.
-  The viewer's own comments sit on a surface panel and carry quiet edit
-  and delete icon buttons, deletion using the two-step inline confirm.
-  States that are
-  normal (comments turned off, nothing configured to read or send them)
-  are a muted caption, never the danger role; failures use danger text
-  beside the control that retries them and keep what was typed.
 - **Status badges (thumbnail top-left):** caption size, bold, tinted
   subtle background + 1px border in the data color. LIVE (live color,
   pulsing in Sumi only), Shorts (shorts color), 配信アーカイブ (neutral

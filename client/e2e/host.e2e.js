@@ -25,7 +25,7 @@ async function hosted(page) {
 const handedOver = (page) => page.evaluate(() => window.__handedOver)
 const until = (page, count) => page.waitForFunction((n) => window.__handedOver.length === n, count)
 
-test('in the app a tap hands the video over instead of playing it here', async ({ browser }) => {
+test('in the app a tap hands the video over instead of opening a tab', async ({ browser }) => {
   const { context, page, log } = await setup(browser)
   await hosted(page)
   await page.goto(BASE + '/')
@@ -47,10 +47,8 @@ test('in the app a tap hands the video over instead of playing it here', async (
     JSON.stringify(sent),
   )
   check(
-    'nothing plays in the page',
-    (await page.locator('dialog.watch').count()) === 0 &&
-      !page.url().includes('watch=') &&
-      context.pages().length === 1,
+    'the page stays where it is and opens no tab',
+    page.url() === BASE + '/' && context.pages().length === 1,
     page.url(),
   )
   check('the video is still marked as watched', log.hide.join() === IDS[1], log.hide.join())
@@ -83,17 +81,8 @@ test('in the app history and channel pages hand over too', async ({ browser }) =
   await until(page, 1)
   check(
     'a channel page hands over',
-    (await handedOver(page))[0].id === IDS[0] && (await page.locator('dialog.watch').count()) === 0,
+    (await handedOver(page))[0].id === IDS[0] && context.pages().length === 1,
   )
-  await context.close()
-})
-
-test('in the app a watch address still plays here', async ({ browser }) => {
-  const { context, page } = await setup(browser)
-  await hosted(page)
-  await page.goto(BASE + '/?watch=' + IDS[3])
-  await page.waitForSelector('dialog.watch[open]')
-  check('a loaded watch address hands nothing over', (await handedOver(page)).length === 0)
   await context.close()
 })
 

@@ -4,8 +4,7 @@
   import { setGroups } from '$lib/groups.svelte.js'
   import { videoThumbnail } from '$lib/youtube-thumbnail.js'
   import { youtubeUrl } from '$lib/youtube-url.js'
-  import { opensInApp } from '$lib/video-watch.js'
-  import { openWatch } from '$lib/router.svelte.js'
+  import { handOver } from '$lib/video-host.js'
   import Spinner from '$lib/components/Spinner.svelte'
   import Toast from '$lib/components/Toast.svelte'
   import Icon from '$lib/components/Icon.svelte'
@@ -342,11 +341,7 @@
                             href={youtubeUrl(video)}
                             target="_blank"
                             rel="noopener"
-                            onclick={(event) => {
-                              if (!opensInApp(event)) return
-                              event.preventDefault()
-                              openWatch(video)
-                            }}
+                            onclick={(event) => handOver(event, video)}
                           >
                             <img
                               src={videoThumbnail(video.id, 'mqdefault')}

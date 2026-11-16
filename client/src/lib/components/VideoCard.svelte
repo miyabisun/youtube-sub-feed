@@ -1,9 +1,10 @@
 <script>
   import { relativeTime } from '$lib/relative-time.js'
   import { formatDuration } from '$lib/format-duration.js'
-  import { link, openWatch } from '$lib/router.svelte.js'
+  import { link } from '$lib/router.svelte.js'
   import { videoThumbnail } from '$lib/youtube-thumbnail.js'
-  import { isWatchActivation, opensInApp } from '$lib/video-watch.js'
+  import { isWatchActivation } from '$lib/video-watch.js'
+  import { handOver } from '$lib/video-host.js'
   import { youtubeUrl } from '$lib/youtube-url.js'
 
   let { video, onwatch = null } = $props()
@@ -25,14 +26,10 @@
     return ''
   }
 
-  // A plain tap plays here. The href stays for new-tab gestures, which still
-  // open YouTube itself.
+  // The link itself opens YouTube; inside a host app the tap goes to the app.
   function handleWatch(event) {
     if (!isWatchActivation(event)) return
-    if (opensInApp(event)) {
-      event.preventDefault()
-      openWatch(video)
-    }
+    handOver(event, video)
     onwatch?.(video.id)
   }
 </script>

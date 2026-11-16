@@ -63,7 +63,7 @@
     }
 
     try {
-      const { accessToken } = await requestGisToken(
+      const accessToken = await requestGisToken(
         clientId,
         'https://www.googleapis.com/auth/youtube.readonly',
       )

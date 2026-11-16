@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createVideoHider, isWatchActivation, opensInApp } from './video-watch.js'
+import { createVideoHider, isWatchActivation } from './video-watch.js'
 
 describe('isWatchActivation', () => {
   it('accepts primary clicks including modifier clicks', () => {
@@ -12,20 +12,6 @@ describe('isWatchActivation', () => {
     expect(isWatchActivation({ type: 'auxclick', button: 1 })).toBe(true)
     expect(isWatchActivation({ type: 'auxclick', button: 2 })).toBe(false)
     expect(isWatchActivation({ type: 'contextmenu', button: 2 })).toBe(false)
-  })
-})
-
-describe('opensInApp', () => {
-  it('plays a plain primary click inside the app', () => {
-    expect(opensInApp({ type: 'click', button: 0 })).toBe(true)
-  })
-
-  it('leaves new-tab gestures to the browser', () => {
-    expect(opensInApp({ type: 'click', button: 0, ctrlKey: true })).toBe(false)
-    expect(opensInApp({ type: 'click', button: 0, metaKey: true })).toBe(false)
-    expect(opensInApp({ type: 'click', button: 0, shiftKey: true })).toBe(false)
-    expect(opensInApp({ type: 'click', button: 0, altKey: true })).toBe(false)
-    expect(opensInApp({ type: 'auxclick', button: 1 })).toBe(false)
   })
 })
 

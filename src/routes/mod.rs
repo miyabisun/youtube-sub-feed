@@ -1,19 +1,19 @@
 pub mod auth;
 pub mod channels;
-pub mod comments;
 pub mod feed;
 pub mod groups;
 pub mod news;
 pub mod rss;
 pub mod websub;
 
+use crate::error::AppError;
 use crate::middleware::auth_middleware;
 use crate::openapi;
 use crate::spa;
 use crate::state::AppState;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 use tower_http::services::ServeDir;
 use utoipa::OpenApi;
@@ -34,7 +34,6 @@ use utoipa_swagger_ui::SwaggerUi;
         feed::unhide_video,
         feed::hide_post,
         feed::unhide_post,
-        comments::get_comments,
         channels::get_channels,
         channels::get_channel_videos,
         channels::add_channel,
@@ -59,8 +58,6 @@ use utoipa_swagger_ui::SwaggerUi;
         openapi::PostItem,
         openapi::HistoryItem,
         openapi::PostHistoryItem,
-        openapi::CommentItem,
-        openapi::CommentsResponse,
         openapi::ChannelItem,
         openapi::ChannelVideoItem,
         openapi::GroupItem,
@@ -97,7 +94,6 @@ pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .merge(auth::routes())
         .merge(feed::routes())
-        .merge(comments::routes())
         .merge(channels::routes())
         .merge(groups::routes())
         .merge(news::routes())
@@ -118,10 +114,17 @@ pub fn build_router(state: AppState) -> Router {
         .merge(public)
         .merge(protected)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route("/api/{*rest}", any(api_not_found))
         .route("/", get(spa_index))
         .route("/index.html", get(spa_index))
         .fallback_service(serve_static)
         .with_state(state)
+}
+
+/// A path under /api/ that no route owns. Without this the SPA fallback
+/// would answer it with index.html and a 200.
+async fn api_not_found() -> AppError {
+    AppError::NotFound("no such API".to_string())
 }
 
 async fn spa_index(
@@ -325,6 +328,34 @@ mod tests {
                     "{method} {uri} must require authentication"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn unknown_api_paths_are_404_instead_of_the_spa_page() {
+            // Every other unknown path falls back to index.html so the SPA can
+            // route it; a path under /api/ that no route owns must say so.
+            let unknown: &[(&str, &str)] = &[
+                ("GET", "/api/videos/abc/comments"),
+                ("GET", "/api/nope"),
+                ("POST", "/api/nope/deeper"),
+            ];
+            for (method, uri) in unknown {
+                assert_eq!(
+                    status(method, uri).await,
+                    StatusCode::NOT_FOUND,
+                    "{method} {uri} is not an API"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn a_known_api_path_keeps_answering_for_its_own_route() {
+            // The catch-all must not take over a path that a route owns: a
+            // wrong method there still meets that route's auth first.
+            assert_eq!(
+                status("GET", "/api/videos/abc/hide").await,
+                StatusCode::UNAUTHORIZED
+            );
         }
 
         #[tokio::test]

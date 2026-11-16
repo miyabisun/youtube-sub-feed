@@ -2,7 +2,6 @@
   import { router, navigate, getBasePath } from '$lib/router.svelte.js'
   import config from '$lib/config.js'
   import Header from '$lib/components/Header.svelte'
-  import WatchView from '$lib/components/WatchView.svelte'
   import Login from './pages/Login.svelte'
   import Feed from './pages/Feed.svelte'
   import Channels from './pages/Channels.svelte'
@@ -80,11 +79,6 @@
           <History />
         {/if}
       </main>
-      {#if router.watch}
-        {#key router.watch.id}
-          <WatchView id={router.watch.id} video={router.watch.video} />
-        {/key}
-      {/if}
     {/if}
   </div>
 {/if}

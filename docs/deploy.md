@@ -68,8 +68,8 @@ WebSubで新着動画を受信するため、`WEBSUB_CALLBACK_URL`へ公開HTTPS
 
 ## GIS_CLIENT_ID の設定
 
-ブラウザの「チャンネル同期 (YouTube)」と、動画への高評価・コメントの送信に使います。
-手動でチャンネルIDを登録し、高評価もコメントも送らないなら不要です。
+ブラウザの「チャンネル同期 (YouTube)」を使う場合だけ設定します。
+手動でチャンネルIDを登録するなら不要です。
 [GoogleのクライアントID設定](https://developers.google.com/identity/oauth2/web/guides/get-google-api-clientid)も参照してください。
 
 1. [Google Cloud Console](https://console.cloud.google.com/) にアクセス
@@ -78,7 +78,6 @@ WebSubで新着動画を受信するため、`WEBSUB_CALLBACK_URL`へ公開HTTPS
 4. 左メニューの **Google Auth platform** を開き、OAuth 同意画面を設定
    - 対象: **外部** を選択 → テストユーザーに自分の Google メールアドレスを追加
    - データアクセス: `https://www.googleapis.com/auth/youtube.readonly` を追加
-   - 高評価・コメントを送るなら `https://www.googleapis.com/auth/youtube.force-ssl` も追加
 5. 左メニューの **API とサービス > 認証情報** に移動
 6. **認証情報を作成 > OAuth クライアント ID** をクリック
    - アプリケーションの種類: **ウェブ アプリケーション**
@@ -88,14 +87,8 @@ WebSubで新着動画を受信するため、`WEBSUB_CALLBACK_URL`へ公開HTTPS
 クライアントシークレットは不要です。ブラウザのGISが短命トークンを取得します。
 このサーバーへトークンを送信・保存しません。テストユーザーに自分を追加すれば「未確認アプリ」警告を経由して利用できます。
 
-高評価と、コメントの送信・編集・削除は、ブラウザが閲覧者自身のトークンでYouTube Data APIを直接呼びます。
-書き込みの許可（`youtube.force-ssl`）は、高評価かコメントを初めて送るときにだけ求めます。購読の同期は読み取りの許可のままです。
 トークンの要求には`prompt: ''`を付け、Googleが許可の画面を出すのを初回だけにします。
-トークンはその訪問の間だけブラウザのメモリに持ち、高評価とコメントで共有します。
-1回につき50 unitを、このクライアントIDのGoogle projectの日次quotaから使います。サーバーの利用数記録には入りません。
-許可済みの訪問では、動画を開くたびに自分の評価を1 unitで読みます。
-コメントの閲覧はサーバーが`YOUTUBE_API_KEY`で取得し、1ページ1 unitを`YOUTUBE_API_DAILY_BUDGET`に数えます。
-キーが無ければ、視聴画面にコメントの一覧は出ません。
+求める許可は読み取り（`youtube.readonly`）だけで、書き込みの許可は求めません。
 
 ## YOUTUBE_API_KEY の設定
 

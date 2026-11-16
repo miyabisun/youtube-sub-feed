@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'vitest'
-import { hasVideoHost, openVideoMessage } from './video-host.js'
+import { handsOver, hasVideoHost, openVideoMessage } from './video-host.js'
 
 describe('hasVideoHost', () => {
   const root = (dataset) => ({ dataset })
@@ -12,6 +12,27 @@ describe('hasVideoHost', () => {
 
   test('is false where there is no document at all', () => {
     expect(hasVideoHost(undefined)).toBe(false)
+  })
+})
+
+describe('handsOver', () => {
+  const hosted = { dataset: { videoHost: '1' } }
+  const plain = { dataset: {} }
+
+  test('hands a plain primary click to the host', () => {
+    expect(handsOver({ type: 'click', button: 0 }, hosted)).toBe(true)
+  })
+
+  test('leaves new-tab gestures to the browser even in the host', () => {
+    expect(handsOver({ type: 'click', button: 0, ctrlKey: true }, hosted)).toBe(false)
+    expect(handsOver({ type: 'click', button: 0, metaKey: true }, hosted)).toBe(false)
+    expect(handsOver({ type: 'click', button: 0, shiftKey: true }, hosted)).toBe(false)
+    expect(handsOver({ type: 'click', button: 0, altKey: true }, hosted)).toBe(false)
+    expect(handsOver({ type: 'auxclick', button: 1 }, hosted)).toBe(false)
+  })
+
+  test('hands nothing over in an ordinary browser, where the link opens YouTube', () => {
+    expect(handsOver({ type: 'click', button: 0 }, plain)).toBe(false)
   })
 })
 
