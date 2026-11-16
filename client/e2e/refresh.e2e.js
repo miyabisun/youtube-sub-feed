@@ -168,6 +168,7 @@ test('left alone, the feed loads nothing: not after minutes, not on coming back'
   await page.clock.runFor('02:30')
   await page.waitForTimeout(300)
   check('the feed was asked for once, at the start', log.feed === loads, `${loads} -> ${log.feed}`)
+  check('the server was never asked for its version', log.health === 0, String(log.health))
   await context.close()
 })
 

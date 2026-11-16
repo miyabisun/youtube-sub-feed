@@ -11,6 +11,7 @@
   import { swipeNav } from '$lib/swipe.js'
   import { navigate } from '$lib/router.svelte.js'
   import { PULL_HOLD, pullToRefresh, shouldRefresh } from '$lib/pull-refresh.js'
+  import { isStale } from '$lib/app-version.js'
   import { createVideoHider } from '$lib/video-watch.js'
   import { feedKinds, kindsParam } from '$lib/feed-kinds.svelte.js'
 
@@ -98,10 +99,24 @@
     untrack(() => loadVideos(true))
   })
 
+  // The release the server runs now, or `null` when it cannot be read.
+  async function serverVersion() {
+    try {
+      const res = await fetch(`${config.path.api}/health`, { cache: 'no-store' })
+      return res.ok ? (await res.json()).version : null
+    } catch {
+      return null
+    }
+  }
+
   // The list reloads when asked to — a pull, a group, a kind — and never on its own.
+  // A pull also finds out whether the server has moved on to another release
+  // since this page was served, and then loads the whole page again instead:
+  // only that replaces the client.
   async function refresh() {
-    if (loading) return
+    if (loading || refreshing) return
     refreshing = true
+    if (isStale(window.__APP_VERSION__, await serverVersion())) return location.reload()
     await loadVideos(true)
     refreshing = false
   }
@@ -124,7 +139,11 @@
 <div
   class="feed"
   use:swipeNav={{ onLeft: () => navigateGroup(1), onRight: () => navigateGroup(-1) }}
-  use:pullToRefresh={{ onPull: (px) => (pull = px), onRefresh: refresh, busy: () => loading }}
+  use:pullToRefresh={{
+    onPull: (px) => (pull = px),
+    onRefresh: refresh,
+    busy: () => loading || refreshing,
+  }}
 >
   <div
     class="pull"

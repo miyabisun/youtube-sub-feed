@@ -54,9 +54,18 @@ export async function setup(
     isMobile: width < 768,
   })
   const page = await context.newPage()
-  const log = { hide: [], feed: 0, feedQueries: [], youtube: [], settings: [] }
-  // How /api/feed answers from now on: a spec changes these while the page is open.
-  const server = { failFeed: false, holdFeed: null, newVideo: false }
+  const log = { hide: [], feed: 0, feedQueries: [], youtube: [], settings: [], health: 0, pages: 0 }
+  // How the server answers from now on: a spec changes these while the page is open.
+  // `version` is the release it runs, written into each page it serves and reported by
+  // /api/health; '' is the dev server, whose pages carry none.
+  const server = {
+    failFeed: false,
+    holdFeed: null,
+    newVideo: false,
+    version: '0.4.4',
+    failHealth: false,
+    holdHealth: null,
+  }
   page.on('pageerror', (error) => expect.soft(error.message, 'uncaught page error').toBe(''))
   await context.route('**/*', async (route) => {
     const req = route.request()
@@ -64,6 +73,12 @@ export async function setup(
     if (url.origin === BASE) {
       if (url.pathname === '/api/auth/me')
         return route.fulfill({ json: { email: 'me@example.test' } })
+      if (url.pathname === '/api/health') {
+        log.health++
+        await server.holdHealth
+        if (server.failHealth) return route.fulfill({ status: 500, json: { error: 'down' } })
+        return route.fulfill({ json: { ok: true, version: server.version } })
+      }
       if (url.pathname === '/api/groups') return route.fulfill({ json: groups })
       if (url.pathname === '/api/channels') return route.fulfill({ json: channels })
       // A channel's settings: kept here as the server keeps them, so a reload shows them.
@@ -107,10 +122,10 @@ export async function setup(
         return route.fulfill({ status: 404, json: { error: 'unstubbed ' + url.pathname } })
       if (req.resourceType() === 'document') {
         const res = await route.fetch()
-        const html = (await res.text()).replace(
-          "window.__GIS_CLIENT_ID__ = ''",
-          `window.__GIS_CLIENT_ID__ = '${gisClientId}'`,
-        )
+        log.pages++
+        const html = (await res.text())
+          .replace("window.__GIS_CLIENT_ID__ = ''", `window.__GIS_CLIENT_ID__ = '${gisClientId}'`)
+          .replace("window.__APP_VERSION__ = ''", `window.__APP_VERSION__ = '${server.version}'`)
         return route.fulfill({ response: res, body: html })
       }
       return route.continue()

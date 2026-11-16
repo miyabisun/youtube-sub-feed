@@ -85,7 +85,9 @@ pub fn build_router(state: AppState) -> Router {
     let public = Router::new()
         .route(
             "/api/health",
-            get(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+            get(|| async {
+                axum::Json(serde_json::json!({"ok": true, "version": crate::VERSION}))
+            }),
         )
         .merge(rss::routes())
         .merge(websub::routes());
@@ -211,6 +213,32 @@ mod tests {
         #[tokio::test]
         async fn unknown_spa_route_returns_html_with_injected_gis_client_id() {
             assert_html_has_injected_gis_id("/channels").await;
+        }
+
+        #[tokio::test]
+        async fn page_and_health_report_the_same_running_version() {
+            // The client reloads the page when these two differ, so a page
+            // just served must agree with the server that served it.
+            require_built_asset("client/build/index.html");
+            let page = body_string(get_response("/group/3").await).await;
+            let marker = "window.__APP_VERSION__ = '";
+            let start = page
+                .find(marker)
+                .expect("the page must carry the version placeholder")
+                + marker.len();
+            let page_version = &page[start..start + page[start..].find('\'').unwrap_or(0)];
+
+            let health = get_response("/api/health").await;
+            assert_eq!(health.status(), StatusCode::OK, "health must answer");
+            let health: serde_json::Value =
+                serde_json::from_str(&body_string(health).await).expect("health must be JSON");
+
+            assert!(!page_version.is_empty(), "the page must carry a version");
+            assert_eq!(
+                health["version"], page_version,
+                "health must report the version the page was served with"
+            );
+            assert_eq!(health["ok"], true, "health keeps its ok flag");
         }
 
         #[tokio::test]
