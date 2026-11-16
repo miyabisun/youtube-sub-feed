@@ -1,6 +1,6 @@
 [package]
 name = "youtube-sub-feed"
-version = "0.3.27"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
